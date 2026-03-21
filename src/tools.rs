@@ -187,6 +187,10 @@ impl AgentTool for WriteFileTool {
             .and_then(|c| c.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
 
+        if content.contains("...rest of") || content.contains("left unchanged") || content.contains("... rest of") || content.contains("... existing code ...") {
+            return Err(anyhow::anyhow!("[System Guardrail] CRITICAL ERROR: You attempted to write placeholder text (e.g. '...rest of file left unchanged...'). You are a machine executing a literal file-write. Placeholders will physically delete the user's code. You MUST provide the FULL, EXACT code. Re-evaluate and call the tool properly."));
+        }
+
         println!(">> [TOOL CALL: write_file] Writing to: {}", path);
         
         if let Some(parent) = PathBuf::from(path).parent() {
@@ -436,6 +440,10 @@ impl AgentTool for PatchFileTool {
         let start_line = args.get("start_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'start_line' argument"))? as usize;
         let end_line = args.get("end_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'end_line' argument"))? as usize;
         let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
+
+        if content.contains("...rest of") || content.contains("left unchanged") || content.contains("... rest of") || content.contains("... existing code ...") {
+            return Err(anyhow::anyhow!("[System Guardrail] CRITICAL ERROR: You attempted to write placeholder text (e.g. '...rest of file left unchanged...'). You are a machine executing a literal file-write. Placeholders will physically delete the user's code. You MUST provide the FULL, EXACT code. Re-evaluate and call the tool properly."));
+        }
 
         println!(">> [TOOL CALL: patch_file] Patching: {} from line {} to {}", path, start_line, end_line);
 
