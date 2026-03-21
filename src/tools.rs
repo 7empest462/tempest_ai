@@ -89,7 +89,8 @@ impl AgentTool for RunCommandTool {
                 // Truncate if output is too long to prevent context overflow
                 let max_len = 4000;
                 if out.len() > max_len {
-                    out.truncate(max_len);
+                    let safe_len = out.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(out.len());
+                    out.truncate(safe_len);
                     out.push_str("\n...[output truncated]...");
                 }
 
@@ -380,7 +381,8 @@ impl AgentTool for ReadUrlTool {
             let max_len = 15000;
             let mut truncated = text;
             if truncated.len() > max_len {
-                truncated.truncate(max_len);
+                let safe_len = truncated.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated.len());
+                truncated.truncate(safe_len);
                 truncated.push_str("\n...[Content truncated due to length]...");
             }
             
@@ -562,7 +564,8 @@ impl AgentTool for ReadProcessLogsTool {
             } else {
                 let max_len = 4000;
                 if log_text.len() > max_len {
-                    Ok(format!("...[truncated]...\n{}", &log_text[log_text.len()-max_len..]))
+                    let safe_start = log_text.char_indices().rev().nth(max_len).map(|(i, _)| i).unwrap_or(0);
+                    Ok(format!("...[truncated]...\n{}", &log_text[safe_start..]))
                 } else {
                     Ok(log_text)
                 }
@@ -627,7 +630,8 @@ impl AgentTool for SearchDirTool {
         
         let max_len = 4000;
         if out.len() > max_len {
-            out.truncate(max_len);
+            let safe_len = out.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(out.len());
+            out.truncate(safe_len);
             out.push_str("\n...[Results truncated due to length. Try a more specific query.]...");
         }
 
