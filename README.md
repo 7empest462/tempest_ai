@@ -20,7 +20,8 @@ Before running Tempest AI, make sure you have the following installed on your ma
 
 1. **Rust & Cargo**: [Install Rust](https://www.rust-lang.org/tools/install)
 2. **Ollama**: [Install Ollama](https://ollama.ai/download) to run models locally.
-3. **Ripgrep** *(Optional but Highly Recommended)*: `brew install ripgrep` for blazing-fast codebase search.
+3. **Ripgrep** *(Optional but Highly Recommended)*: `brew install ripgrep` (Mac) or `sudo apt install ripgrep` (Linux) for blazing-fast codebase search.
+4. **OpenSSL** *(Linux Only)*: `sudo apt install libssl-dev` or `sudo dnf install openssl-devel` is required to compile the web-crawler networking crates.
 
 ---
 
