@@ -141,23 +141,31 @@ impl Agent {
                             println!("\n{} {}", "🛠️  Attempting to run:".magenta().bold(), tool_name);
                             
                             let mut allowed = true;
+                            let mut feedback = String::new();
                             if tool.requires_confirmation() {
                                 println!("{} \n{}", "⚠️  Agent wants to execute the following tool parameters:".yellow().bold(), serde_json::to_string_pretty(args).unwrap_or_default().cyan());
-                                print!("Allow execution? [Y/n]: ");
+                                print!("Allow execution? [Y/n] (Or type instructions to correct): ");
                                 let _ = std::io::Write::flush(&mut std::io::stdout());
                                 
                                 let mut input = String::new();
                                 if std::io::stdin().read_line(&mut input).is_ok() {
                                     let ans = input.trim().to_lowercase();
-                                    if ans == "n" || ans == "no" {
+                                    if ans != "y" && ans != "yes" && ans != "" {
                                         allowed = false;
+                                        if ans != "n" && ans != "no" {
+                                            feedback = input.trim().to_string();
+                                        }
                                     }
                                 }
                             }
 
                             if !allowed {
                                 println!("{}", "❌ Tool execution denied by user.".red());
-                                tool_result_str = "Error: User denied permission to execute this tool. Re-evaluate your approach or ask the user for clarification.".to_string();
+                                if feedback.is_empty() {
+                                    tool_result_str = "Error: User denied permission to execute this tool. Re-evaluate your approach or ask the user for clarification.".to_string();
+                                } else {
+                                    tool_result_str = format!("Error: User denied permission and provided this feedback: '{}'. Adjust your execution plan accordingly.", feedback);
+                                }
                             } else {
                                 match tool.execute(args) {
                                     Ok(res) => {
