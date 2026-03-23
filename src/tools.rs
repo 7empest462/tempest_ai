@@ -17,7 +17,7 @@ fn process_registry() -> &'static Mutex<HashMap<String, ProcessLogs>> {
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    fn execute(&self, args: &Value) -> Result<String>;
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String>;
     
     /// Define the JSON schema for this tool's parameters.
     fn parameters(&self) -> Value;
@@ -56,7 +56,7 @@ impl AgentTool for RunCommandTool {
         })
     }
 
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let cmd = args.get("command")
             .and_then(|c| c.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
@@ -139,7 +139,7 @@ impl AgentTool for ReadFileTool {
         })
     }
 
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -184,7 +184,7 @@ impl AgentTool for WriteFileTool {
         })
     }
 
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -234,7 +234,7 @@ impl AgentTool for ListDirTool {
         })
     }
 
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .unwrap_or(".");
@@ -288,7 +288,7 @@ impl AgentTool for SearchWebTool {
         })
     }
 
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
         println!(">> [TOOL CALL: search_web] Query: {}", query);
         
@@ -377,7 +377,7 @@ impl AgentTool for ReadUrlTool {
         })
     }
     
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
         println!(">> [TOOL CALL: read_url] Fetching: {}", url);
         
@@ -445,7 +445,7 @@ impl AgentTool for PatchFileTool {
         })
     }
 
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("file_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_path' argument"))?;
         let path_owned = shellexpand::tilde(path_str).to_string();
         let path = path_owned.as_str();
@@ -505,7 +505,7 @@ impl AgentTool for RunBackgroundTool {
             "required": ["command"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let cmd = args.get("command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
         println!(">> [TOOL CALL: run_background] Spawning: {}", cmd);
 
@@ -576,7 +576,7 @@ impl AgentTool for ReadProcessLogsTool {
         })
     }
     
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let pid = args.get("process_id").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'process_id' argument"))?;
         println!(">> [TOOL CALL: read_process_logs] PID: {}", pid);
 
@@ -616,7 +616,7 @@ impl AgentTool for SearchDirTool {
         })
     }
     
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
         let query = args.get("query").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'query' argument"))?;
         
@@ -678,7 +678,7 @@ impl AgentTool for AskUserTool {
         })
     }
     
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let question = args.get("question").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'question' argument"))?;
         
         println!("\n{} {}", "🤔 [AI Requires Input]".bold().yellow(), question.yellow());
@@ -693,3 +693,55 @@ impl AgentTool for AskUserTool {
     }
 }
 
+pub struct ExtractAndWriteTool;
+
+impl AgentTool for ExtractAndWriteTool {
+    fn name(&self) -> &'static str { "extract_and_write" }
+    fn description(&self) -> &'static str { "Extracts the latest markdown code block from your thought process and writes it to a file. Use this for complex files to avoid JSON escaping issues. MUST wrap your code in triple backticks BEFORE calling this tool." }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path to the file to create or overwrite."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    fn execute(&self, args: &Value, agent_content: &str) -> Result<String> {
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let path = path_owned.as_str();
+
+        println!(">> [TOOL CALL: extract_and_write] Parsing thought process for target: {}", path);
+
+        let blocks: Vec<&str> = agent_content.split("```").collect();
+        if blocks.len() >= 3 {
+            let code_block = blocks[blocks.len() - 2];
+            let clean_code = if let Some(first_newline) = code_block.find('\n') {
+                let first_line = &code_block[0..first_newline];
+                if !first_line.contains(' ') {
+                    &code_block[first_newline + 1..]
+                } else {
+                    code_block
+                }
+            } else {
+                code_block
+            };
+
+            if let Some(parent) = std::path::PathBuf::from(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            std::fs::write(path, clean_code.trim_matches('\n'))?;
+            Ok(format!("Successfully extracted code block and wrote {} bytes to {}", clean_code.len(), path))
+        } else {
+            anyhow::bail!("Could not find a valid markdown code block (` ``` `) in your thought process to extract! You must write the code inside triple backticks explicitly before calling this tool.")
+        }
+    }
+}

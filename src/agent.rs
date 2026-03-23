@@ -1,4 +1,4 @@
-use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool};
+use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool};
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
@@ -34,6 +34,7 @@ impl Agent {
                 Box::new(ReadUrlTool),
                 Box::new(SearchDirTool),
                 Box::new(AskUserTool),
+                Box::new(ExtractAndWriteTool),
             ],
             system_prompt,
             last_tool_call: None,
@@ -183,7 +184,7 @@ impl Agent {
                                     tool_result_str = format!("Error: User denied permission and provided this feedback: '{}'. Adjust your execution plan accordingly.", feedback);
                                 }
                             } else {
-                                match tool.execute(args) {
+                                match tool.execute(args, &content) {
                                     Ok(res) => {
                                         println!("{}", "✅ Tool execution successful".green());
                                         tool_result_str = res;
