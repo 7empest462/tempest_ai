@@ -63,7 +63,11 @@ impl AgentTool for RunCommandTool {
 
         println!(">> [TOOL CALL: run_command] Executing: {}", cmd);
         
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
+        
         let mut child = Command::new("sh")
+            .env("PATH", new_path)
             .arg("-c")
             .arg(cmd)
             .stdout(std::process::Stdio::piped())
@@ -136,9 +140,11 @@ impl AgentTool for ReadFileTool {
     }
 
     fn execute(&self, args: &Value) -> Result<String> {
-        let path = args.get("path")
+        let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let path = path_owned.as_str();
 
         println!(">> [TOOL CALL: read_file] Reading: {}", path);
         let content = fs::read_to_string(path)?;
@@ -179,9 +185,11 @@ impl AgentTool for WriteFileTool {
     }
 
     fn execute(&self, args: &Value) -> Result<String> {
-        let path = args.get("path")
+        let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let path = path_owned.as_str();
             
         let content = args.get("content")
             .and_then(|c| c.as_str())
@@ -227,9 +235,11 @@ impl AgentTool for ListDirTool {
     }
 
     fn execute(&self, args: &Value) -> Result<String> {
-        let path = args.get("path")
+        let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .unwrap_or(".");
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let path = path_owned.as_str();
             
         println!(">> [TOOL CALL: list_dir] Listing: {}", path);
         let mut result = String::new();
@@ -436,7 +446,9 @@ impl AgentTool for PatchFileTool {
     }
 
     fn execute(&self, args: &Value) -> Result<String> {
-        let path = args.get("file_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_path' argument"))?;
+        let path_str = args.get("file_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_path' argument"))?;
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let path = path_owned.as_str();
         let start_line = args.get("start_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'start_line' argument"))? as usize;
         let end_line = args.get("end_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'end_line' argument"))? as usize;
         let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
@@ -500,7 +512,11 @@ impl AgentTool for RunBackgroundTool {
         use std::process::{Command, Stdio};
         use std::io::{Read, BufReader};
 
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
+
         let mut child = Command::new("sh")
+            .env("PATH", new_path)
             .arg("-c")
             .arg(cmd)
             .stdout(Stdio::piped())

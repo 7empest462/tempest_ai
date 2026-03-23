@@ -13,6 +13,7 @@ pub struct Agent {
     history: Vec<ChatMessage>,
     tools: Vec<Box<dyn AgentTool>>,
     system_prompt: String,
+    last_tool_call: Option<String>,
 }
 
 impl Agent {
@@ -35,6 +36,7 @@ impl Agent {
                 Box::new(AskUserTool),
             ],
             system_prompt,
+            last_tool_call: None,
         }
     }
 
@@ -135,8 +137,22 @@ impl Agent {
                     if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
                         let args = tool_req.get("arguments").unwrap_or(&Value::Null);
 
+                        let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
+                        if let Some(ref last) = self.last_tool_call {
+                            if last == &current_call_hash {
+                                println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool call...".red());
+                                let guard_msg = "[System Guardrail] LOOP DETECTED. You just executed the exact same tool and arguments twice in a row, which means your execution sequence is stuck. You MUST pivot to an entirely new strategy or ask the user for help. Do NOT run this specific command again.".to_string();
+                                let tool_result_msg = format!("TOOL RESULT for {}:\n{}", tool_name, guard_msg);
+                                self.history.push(ChatMessage::new(MessageRole::User, tool_result_msg));
+                                let _ = self.save_history();
+                                self.last_tool_call = None;
+                                continue;
+                            }
+                        }
+                        self.last_tool_call = Some(current_call_hash);
+
                         // Execute tool
-                        let tool_result_str;
+                        let mut tool_result_str;
                         if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
                             println!("\n{} {}", "🛠️  Attempting to run:".magenta().bold(), tool_name);
                             
