@@ -1,4 +1,4 @@
-use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool};
+use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool};
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
@@ -13,7 +13,7 @@ pub struct Agent {
     history: Vec<ChatMessage>,
     tools: Vec<Box<dyn AgentTool>>,
     system_prompt: String,
-    last_tool_call: Option<String>,
+    recent_tool_calls: std::collections::VecDeque<String>,
 }
 
 impl Agent {
@@ -35,9 +35,13 @@ impl Agent {
                 Box::new(SearchDirTool),
                 Box::new(AskUserTool),
                 Box::new(ExtractAndWriteTool),
+                Box::new(SystemInfoTool),
+                Box::new(SqliteQueryTool),
+                Box::new(GitTool),
+                Box::new(WatchDirectoryTool),
             ],
             system_prompt,
-            last_tool_call: None,
+            recent_tool_calls: std::collections::VecDeque::new(),
         }
     }
 
@@ -139,18 +143,19 @@ impl Agent {
                         let args = tool_req.get("arguments").unwrap_or(&Value::Null);
 
                         let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
-                        if let Some(ref last) = self.last_tool_call {
-                            if last == &current_call_hash {
-                                println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool call...".red());
-                                let guard_msg = "[System Guardrail] LOOP DETECTED. You just executed the exact same tool and arguments twice in a row, which means your execution sequence is stuck. You MUST pivot to an entirely new strategy or ask the user for help. Do NOT run this specific command again.".to_string();
-                                let tool_result_msg = format!("TOOL RESULT for {}:\n{}", tool_name, guard_msg);
-                                self.history.push(ChatMessage::new(MessageRole::User, tool_result_msg));
-                                let _ = self.save_history();
-                                self.last_tool_call = None;
-                                continue;
-                            }
+                        if self.recent_tool_calls.contains(&current_call_hash) {
+                            println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool sequence...".red());
+                            let guard_msg = "[System Guardrail] LOOP DETECTED. You just executed the exact same tool and arguments as a recent failed tool call, which means your execution sequence is stuck in a hallucination loop. You MUST pivot to an entirely new strategy or ask the user for help. Do NOT repeat yourself.".to_string();
+                            let tool_result_msg = format!("TOOL RESULT for {}:\n{}", tool_name, guard_msg);
+                            self.history.push(ChatMessage::new(MessageRole::User, tool_result_msg));
+                            let _ = self.save_history();
+                            self.recent_tool_calls.clear();
+                            continue;
                         }
-                        self.last_tool_call = Some(current_call_hash);
+                        self.recent_tool_calls.push_back(current_call_hash);
+                        if self.recent_tool_calls.len() > 5 {
+                            self.recent_tool_calls.pop_front();
+                        }
 
                         // Execute tool
                         let tool_result_str;

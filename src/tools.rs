@@ -745,3 +745,228 @@ impl AgentTool for ExtractAndWriteTool {
         }
     }
 }
+
+pub struct SystemInfoTool;
+
+impl AgentTool for SystemInfoTool {
+    fn name(&self) -> &'static str { "system_info" }
+    fn description(&self) -> &'static str { "Reads your Host PC's operating system, CPU architecture, active CPU load, and RAM limits. Call this tool to make sure your background tasks aren't crashing the local machine." }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
+        println!(">> [TOOL CALL: system_info] Fetching hardware diagnostics...");
+        let mut sys = sysinfo::System::new_all();
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        sys.refresh_all();
+
+        let total_mem = sys.total_memory() / 1024 / 1024; // MB
+        let used_mem = sys.used_memory() / 1024 / 1024; // MB
+        let cpu_count = sys.cpus().len();
+        
+        let mut total_cpu_usage = 0.0;
+        for cpu in sys.cpus() {
+            total_cpu_usage += cpu.cpu_usage();
+        }
+        let avg_cpu_usage = if cpu_count > 0 { total_cpu_usage / cpu_count as f32 } else { 0.0 };
+
+        let os_name = sysinfo::System::name().unwrap_or_else(|| "Unknown".to_owned());
+        let os_ver = sysinfo::System::os_version().unwrap_or_else(|| "Unknown".to_owned());
+        let host = sysinfo::System::host_name().unwrap_or_else(|| "Unknown".to_owned());
+
+        let report = format!(
+            "Hardware Diagnostic Report:\nOS: {} {}\nHostname: {}\nCPU Cores: {}\nAverage CPU Load: {:.1}%\nTotal RAM: {} MB\nUsed RAM: {} MB",
+            os_name, os_ver, host, cpu_count, avg_cpu_usage, total_mem, used_mem
+        );
+
+        Ok(report)
+    }
+}
+
+pub struct SqliteQueryTool;
+
+impl AgentTool for SqliteQueryTool {
+    fn name(&self) -> &'static str { "sqlite_query" }
+    fn description(&self) -> &'static str { "Executes a raw SQL query against a specified SQLite database file securely. Returns a JSON string of the resulting rows. WARNING: You are parsing RAW SQL natively. Do NOT use CLI dot-commands like '.read' or '.schema'! Do NOT use 'CREATE DATABASE' (SQLite databases are created automatically when you query a new file via db_path)." }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "db_path": { "type": "string", "description": "Absolute path (or ~/) to the .sqlite or .db file." },
+                "query": { "type": "string", "description": "The exact SQL query to execute (e.g., 'SELECT * FROM users LIMIT 5;')." }
+            },
+            "required": ["db_path", "query"]
+        })
+    }
+
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let db_path_str = args.get("db_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'db_path' argument"))?;
+        let db_path = shellexpand::tilde(db_path_str).to_string();
+        
+        let query = args.get("query").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'query' argument"))?;
+
+        println!(">> [TOOL CALL: sqlite_query] Querying: {}", db_path);
+
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let mut stmt = conn.prepare(query)?;
+        
+        let column_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+
+        if column_names.is_empty() {
+            let changed = stmt.execute([])?;
+            return Ok(format!("Query executed successfully. {} rows affected.", changed));
+        }
+
+        let mut rows = stmt.query([])?;
+        let mut results = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let mut row_map = serde_json::Map::new();
+            for (i, name) in column_names.iter().enumerate() {
+                let val_ref = row.get_ref(i)?;
+                use rusqlite::types::ValueRef;
+                let val = match val_ref {
+                    ValueRef::Null => serde_json::Value::Null,
+                    ValueRef::Integer(v) => serde_json::json!(v),
+                    ValueRef::Real(v) => serde_json::json!(v),
+                    ValueRef::Text(t) => serde_json::json!(String::from_utf8_lossy(t)),
+                    ValueRef::Blob(b) => serde_json::json!(format!("<Blob {} bytes>", b.len())),
+                };
+                row_map.insert(name.clone(), val);
+            }
+            results.push(serde_json::Value::Object(row_map));
+        }
+
+        Ok(serde_json::to_string_pretty(&results)?)
+    }
+}
+
+pub struct GitTool;
+
+impl AgentTool for GitTool {
+    fn name(&self) -> &'static str { "git_action" }
+    fn description(&self) -> &'static str { "Natively executes a secure 'git' command using the local OS bindings. Bypasses bash explicitly. Provide arguments as an array of strings (e.g., ['commit', '-m', 'Initial commit'])." }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cwd": { "type": "string", "description": "The path to the repository directory." },
+                "args": { "type": "array", "items": { "type": "string" }, "description": "Array of string arguments for git (e.g., ['push', 'origin', 'main'])." }
+            },
+            "required": ["cwd", "args"]
+        })
+    }
+
+    fn execute(&self, json_args: &Value, _agent_content: &str) -> Result<String> {
+        let cwd_str = json_args.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
+        let cwd = shellexpand::tilde(cwd_str).to_string();
+
+        let raw_args = json_args.get("args").and_then(|a| a.as_array()).ok_or_else(|| anyhow::anyhow!("Missing 'args' array"))?;
+        let mut string_args = Vec::new();
+        for arg in raw_args {
+            if let Some(s) = arg.as_str() {
+                string_args.push(s.to_string());
+            }
+        }
+
+        println!(">> [TOOL CALL: git_action] git {}", string_args.join(" "));
+
+        let output = std::process::Command::new("git")
+            .current_dir(&cwd)
+            .args(&string_args)
+            .output()?;
+
+        let mut result = String::from_utf8_lossy(&output.stdout).to_string();
+        let err_result = String::from_utf8_lossy(&output.stderr).to_string();
+        
+        if !err_result.is_empty() {
+            result.push_str("\n--- STDERR ---\n");
+            result.push_str(&err_result);
+        }
+
+        if !output.status.success() {
+            anyhow::bail!("Git command failed with status {}:\n{}", output.status, result);
+        }
+
+        Ok(result)
+    }
+}
+
+pub struct WatchDirectoryTool;
+
+impl AgentTool for WatchDirectoryTool {
+    fn name(&self) -> &'static str { "watch_directory" }
+    fn description(&self) -> &'static str { "Starts a persistent background daemon that watches a directory for file modifications. When you make changes to files, it will instantly run the 'trigger_command' provided. Extremely useful for hot-reloading servers or auto-testing your code upon save!" }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "The directory path to recursively watch." },
+                "trigger_command": { "type": "string", "description": "The bash command to run whenever a file changes." }
+            },
+            "required": ["path", "trigger_command"]
+        })
+    }
+
+    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        use notify::Watcher;
+        
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+        let path = shellexpand::tilde(path_str).to_string();
+        let cmd = args.get("trigger_command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'trigger_command' argument"))?.to_string();
+
+        println!(">> [TOOL CALL: watch_directory] Spawning daemon on: {}", path);
+
+        let success_msg = format!("Successfully spawned File-Watching Daemon on directory: '{}'. It will automatically execute '{}' upon any file modifications.", path, cmd);
+
+        std::thread::spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            
+            let mut watcher = match notify::recommended_watcher(tx) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Failed to initialize watcher: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.watch(std::path::Path::new(&path), notify::RecursiveMode::Recursive) {
+                eprintln!("Failed to watch path {}: {}", path, e);
+                return;
+            }
+
+            let mut last_trigger = std::time::Instant::now();
+
+            loop {
+                match rx.recv() {
+                    Ok(Ok(event)) => {
+                        if let notify::EventKind::Modify(_) = event.kind {
+                            if last_trigger.elapsed() > std::time::Duration::from_millis(1500) {
+                                println!("\n>> [DAEMON: watch_directory] File changed! Triggering: {}", cmd);
+                                let _ = std::process::Command::new("sh")
+                                    .arg("-c")
+                                    .arg(&cmd)
+                                    .current_dir(&path)
+                                    .spawn();
+                                last_trigger = std::time::Instant::now();
+                            }
+                        }
+                    },
+                    Ok(Err(e)) => eprintln!("Watch error: {:?}", e),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(success_msg)
+    }
+}
