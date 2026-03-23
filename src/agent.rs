@@ -152,7 +152,7 @@ impl Agent {
                         self.last_tool_call = Some(current_call_hash);
 
                         // Execute tool
-                        let mut tool_result_str;
+                        let tool_result_str;
                         if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
                             println!("\n{} {}", "🛠️  Attempting to run:".magenta().bold(), tool_name);
                             
