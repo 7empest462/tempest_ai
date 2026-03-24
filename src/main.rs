@@ -53,8 +53,13 @@ fn load_config(cli_config_path: Option<&str>) -> AppConfig {
         paths_to_try.push(std::path::PathBuf::from(p));
     }
     
+    // Check platform-standard config dir (~/Library/Application Support on macOS)
     if let Some(config_dir) = dirs::config_dir() {
         paths_to_try.push(config_dir.join("tempest_ai").join("config.toml"));
+    }
+    // Also check ~/.config (XDG convention, common on macOS too)
+    if let Some(home) = dirs::home_dir() {
+        paths_to_try.push(home.join(".config").join("tempest_ai").join("config.toml"));
     }
 
     for path in &paths_to_try {
