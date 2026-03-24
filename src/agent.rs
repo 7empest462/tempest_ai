@@ -168,101 +168,85 @@ impl Agent {
             match self.extract_tool_calls(&content) {
                 Ok(tool_calls) if !tool_calls.is_empty() => {
                     for tool_req in &tool_calls {
-                    if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
-                        let args = tool_req.get("arguments").unwrap_or(&Value::Null);
+                        if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
+                            let args = tool_req.get("arguments").unwrap_or(&Value::Null);
 
-                        let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
-                        if self.recent_tool_calls.contains(&current_call_hash) {
-                            println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool sequence...".red());
-                            let guard_msg = "[System Guardrail] LOOP DETECTED. You just executed the exact same tool and arguments as a recent failed tool call, which means your execution sequence is stuck in a hallucination loop. You MUST pivot to an entirely new strategy or ask the user for help. Do NOT repeat yourself.".to_string();
-                            let tool_result_msg = format!("TOOL RESULT for {}:\n{}", tool_name, guard_msg);
-                            self.history.push(ChatMessage::new(MessageRole::User, tool_result_msg));
-                            let _ = self.save_history();
-                            self.recent_tool_calls.clear();
-                            continue;
-                        }
-                        self.recent_tool_calls.push_back(current_call_hash);
-                        if self.recent_tool_calls.len() > 5 {
-                            self.recent_tool_calls.pop_front();
-                        }
+                            let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
+                            if self.recent_tool_calls.contains(&current_call_hash) {
+                                println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool sequence...".red());
+                                let guard_msg = "[System Guardrail] LOOP DETECTED. You just executed the exact same tool and arguments as a recent failed tool call. Pivot to a new strategy.".to_string();
+                                self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, guard_msg)));
+                                let _ = self.save_history();
+                                self.recent_tool_calls.clear();
+                                continue;
+                            }
+                            self.recent_tool_calls.push_back(current_call_hash);
+                            if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
 
-                        // Execute tool
-                        let tool_result_str;
-                        if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
-                            println!("\n{} {}", "🛠️  Attempting to run:".magenta().bold(), tool_name);
-                            
-                            let mut allowed = true;
-                            let mut feedback = String::new();
-                            if tool.requires_confirmation() {
-                                println!("{} \n{}", "⚠️  Agent wants to execute the following tool parameters:".yellow().bold(), serde_json::to_string_pretty(args).unwrap_or_default().cyan());
-                                print!("Allow execution? [Y/n] (Or type instructions to correct): ");
-                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let tool_result_str;
+                            if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
+                                println!("\n{} {}", "🛠️  Attempting to run:".magenta().bold(), tool_name);
                                 
-                                let mut input = String::new();
-                                if std::io::stdin().read_line(&mut input).is_ok() {
-                                    let ans = input.trim().to_lowercase();
-                                    if ans != "y" && ans != "yes" && ans != "" {
-                                        allowed = false;
-                                        if ans != "n" && ans != "no" {
-                                            feedback = input.trim().to_string();
+                                let mut allowed = true;
+                                let mut feedback = String::new();
+                                if tool.requires_confirmation() {
+                                    println!("{} \n{}", "⚠️  Agent wants to execute:".yellow().bold(), serde_json::to_string_pretty(args).unwrap_or_default().cyan());
+                                    print!("Allow? [Y/n]: ");
+                                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                                    let mut input = String::new();
+                                    if std::io::stdin().read_line(&mut input).is_ok() {
+                                        let ans = input.trim().to_lowercase();
+                                        if ans != "y" && ans != "yes" && ans != "" {
+                                            allowed = false;
+                                            if ans != "n" && ans != "no" { feedback = input.trim().to_string(); }
                                         }
                                     }
                                 }
-                            }
 
-                            if !allowed {
-                                println!("{}", "❌ Tool execution denied by user.".red());
-                                if feedback.is_empty() {
-                                    tool_result_str = "Error: User denied permission to execute this tool. Re-evaluate your approach or ask the user for clarification.".to_string();
+                                if !allowed {
+                                    tool_result_str = if feedback.is_empty() { "Error: User denied permission.".to_string() } else { format!("Error: User feedback: '{}'", feedback) };
                                 } else {
-                                    tool_result_str = format!("Error: User denied permission and provided this feedback: '{}'. Adjust your execution plan accordingly.", feedback);
+                                    match tool.execute(args, &content).await {
+                                        Ok(res) => {
+                                            println!("{}", "✅ Tool execution successful".green());
+                                            tool_result_str = res;
+                                        }
+                                        Err(e) => {
+                                            let err_str = format!("{}", e);
+                                            println!("{} {}", "❌ Tool execution failed:".red(), err_str);
+                                            let retry_hint = if err_str.contains("403") { " [HINT: Try a different URL.]" } 
+                                                else if err_str.contains("404") { " [HINT: Page not found. Try searching again.]" }
+                                                else if err_str.contains("timeout") { " [HINT: Server slow. Use network_check.]" }
+                                                else { "" };
+                                            tool_result_str = format!("Error: {}{}", e, retry_hint);
+                                        }
+                                    }
                                 }
                             } else {
-                                match tool.execute(args, &content).await {
-                                    Ok(res) => {
-                                        println!("{}", "✅ Tool execution successful".green());
-                                        tool_result_str = res;
-                                    }
-                                    Err(e) => {
-                                        let err_str = format!("{}", e);
-                                        println!("{} {}", "❌ Tool execution failed:".red(), err_str);
-                                        
-                                        // Smart retry hint based on error type
-                                        let retry_hint = if err_str.contains("403") || err_str.contains("Forbidden") {
-                                            " [HINT: This URL returned 403 Forbidden. Try a DIFFERENT URL from the search results instead of retrying the same one.]"
-                                        } else if err_str.contains("404") || err_str.contains("Not Found") {
-                                            " [HINT: This URL returned 404 Not Found. The page may have moved. Try a different URL or search again.]"
-                                        } else if err_str.contains("timeout") || err_str.contains("timed out") {
-                                            " [HINT: The request timed out. The server may be slow or unreachable. Try a different host or check connectivity with network_check.]"
-                                        } else if err_str.contains("Connection refused") {
-                                            " [HINT: Connection refused. The service may not be running. Use network_check to verify the port is open.]"
-                                        } else {
-                                            ""
-                                        };
-                                        tool_result_str = format!("Error executing tool: {}{}", e, retry_hint);
-                                    }
-                                }
+                                tool_result_str = format!("Error: Tool '{}' not found.", tool_name);
                             }
-                        } else {
-                            tool_result_str = format!("Error: Tool '{}' not found. Type 'help' to see available tools.", tool_name);
-                        }
 
-                        // Feed result back to the model
-                        let tool_result_msg = format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str);
-                        self.history.push(ChatMessage::new(MessageRole::User, tool_result_msg));
-                        let _ = self.save_history();
-                        executed_tools = true;
-                    }
+                            self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                            let _ = self.save_history();
+                            executed_tools = true;
+                        }
                     }
                 }
                 Err(guardrail_msg) => {
-                    // System Guardrail: Force self-correction
-                    println!("\n{} {}", "⚠️  Agent syntax error, forcing self-correction:".yellow(), guardrail_msg);
+                    println!("\n{} {}", "⚠️  Agent syntax error:".yellow(), guardrail_msg);
                     self.history.push(ChatMessage::new(MessageRole::User, format!("[System Guardrail] {}", guardrail_msg)));
                     let _ = self.save_history();
                     continue;
                 }
-                _ => {}
+                Ok(_) => {
+                    if !executed_tools && content.contains("```") && !content.to_lowercase().contains("finished task") {
+                        println!("\n{}", "⚠️  Agent provided code but forgot tools. Nudging...".yellow().bold());
+                        let nudge = "[System Guardrail] You provided code but didn't use tools like `write_file` or `extract_and_write`. YOU MUST USE TOOLS. Rewrite your response using tool calls.".to_string();
+                        self.history.push(ChatMessage::new(MessageRole::User, nudge));
+                        let _ = self.save_history();
+                        continue;
+                    }
+                }
             }
 
             if !executed_tools {
