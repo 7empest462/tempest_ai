@@ -1,7 +1,51 @@
-{
-  "tool": "extract_and_write",
-  "arguments": {
-    "path": "pi.py",
-    "content": "def chudnovsky_pi(n):\n    pi_digits = [14, 0, 5, 2, 8]\n    q = 640320**3 // 256\n    k = 6\n\n    for i in range(1, n+1):\n        pi_digits.append(q * (pi_digits[2] - pi_digits[1] * pi_digits[0]) // (pi_digits[3] + i * pi_digits[4]))\n        q *= -(6 * (i + 1) * (i + 1)) // ((i + 1) * (i + 1) + i * i)\n        k += 5\n\n    return pi_digits[0], pi_digits[1]\n\n# Calculate the first 10 digits of π using Chudnovsky's algorithm\npi_digits = chudnovsky_pi(10)\n\n# Print the result\nprint(\"π ≈\", \".\" + \'\'.join(str(digit) for digit in pi_digits))\n"
-  }
-}
+from decimal import Decimal, getcontext
+
+def chudnovsky_algorithm(precision):
+    """Calculates π to the specified precision using the Chudnovsky algorithm."""
+    getcontext().prec = precision + 2
+    
+    C = 426880 * Decimal(10005).sqrt()
+    K = 6
+    M = 1
+    X = 1
+    L = 13591409
+    S = L
+
+    # Number of iterations needed for the given precision
+    # Each iteration adds approximately 14.18 digits
+    iterations = (precision // 14) + 1
+
+    for k in range(1, iterations):
+        M = (K**3 - 16*K) * M // k**3
+        L += 545140134
+        X *= -262537412640768000
+        S += Decimal(M * L) / X
+        K += 12
+
+    pi = C / S
+    return +pi
+
+if __name__ == "__main__":
+    PRECISION = 20000
+    print(f"Calculating Pi to {PRECISION} digits using Chudnovsky algorithm...")
+    pi_val = chudnovsky_algorithm(PRECISION)
+    
+    # Analysis
+    pi_str = str(pi_val).replace(".", "")
+    # Extract only the decimal places (skip the '3')
+    decimal_digits = pi_str[1:PRECISION+1]
+    
+    print(f"\nDigit Frequency Analysis (First {PRECISION} decimal places):")
+    print("-" * 45)
+    
+    counts = {str(i): decimal_digits.count(str(i)) for i in range(10)}
+    
+    for digit in sorted(counts.keys()):
+        count = counts[digit]
+        percentage = (count / len(decimal_digits)) * 100
+        # Create a simple visual histogram bar
+        bar = "█" * int(percentage * 2)
+        print(f"Digit {digit}: {count:5} ({percentage:5.2f}%) {bar}")
+    
+    print("-" * 45)
+    print(f"Total digits analyzed: {len(decimal_digits)}")

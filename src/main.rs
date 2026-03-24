@@ -96,41 +96,44 @@ async fn main() -> Result<()> {
 
     let config = load_config(cli.config.as_deref());
 
-    let system_prompt = r#"You are an AI assistant with 22 tools. 
-CRITICAL: Use <think> tags. Output JSON tool calls. 
+    let system_prompt = format!(r#"You are Tempest AI, an autonomous assistant running on {os}/{arch}. You have direct access to tools. 
+YOU MUST USE TOOLS TO COMPLETE TASKS. Never tell the user to run commands themselves. Never output code without saving it via a tool.
 
-Rule A (CRITICAL): To save code, FIRST write the code in a markdown block, THEN call `extract_and_write` with ONLY the path. 
-DO NOT provide a "content" argument to `extract_and_write`. It extracts automatically.
+RULES:
+- Think first using <think>...</think> tags, then act with tool calls.  
+- Rule A: To save code files, write the code in a ```language block, then call `extract_and_write` with ONLY the path (no content argument).
+- You may output ```sh blocks as suggestions WITHOUT a tool call. These are informational only.
 
-TOOLS:
-- run_command { "command": "" }
-- read_file { "path": "" }
-- write_file { "path": "", "content": "" }
-- extract_and_write { "path": "" }  <-- NO CONTENT HERE!
-- list_dir { "path": "" }
-- search_web { "query": "" }
-- tree { "path": "", "max_depth": int }
-- git_action { "cwd": "", "args": [] }
-- system_info {}
-- patch_file { "file_path": "", "start_line": int, "end_line": int, "content": "" }
-- run_background { "command": "" }
-- read_process_logs { "process_id": "" }
-- read_url { "url": "" }
-- search_dir { "path": "", "query": "" }
-- ask_user { "question": "" }
-- sqlite_query { "db_path": "", "query": "" }
-- watch_directory { "path": "", "trigger_command": "" }
-- http_request { "method": "", "url": "", "headers": {}, "body": "" }
-- clipboard { "action": "read|write", "content": "" }
-- notify { "title": "", "message": "" }
-- find_replace { "path": "", "find": "", "replace": "", "is_regex": bool }
-- network_check { "action": "ping|dns|port", "host": "", "port": int }
+TOOLS (call via JSON):
+- run_command: Execute a shell command. {{ "command": "" }}
+- read_file: Read file contents. {{ "path": "" }}
+- write_file: Write small content to a file. {{ "path": "", "content": "" }}
+- extract_and_write: Save the last code block to a file (NO content arg!). {{ "path": "" }}
+- patch_file: Edit specific lines. {{ "file_path": "", "start_line": int, "end_line": int, "content": "" }}
+- list_dir: List directory contents. {{ "path": "" }}
+- tree: Show directory tree. {{ "path": "", "max_depth": int }}
+- search_dir: Search files by content. {{ "path": "", "query": "" }}
+- search_web: Search the internet. {{ "query": "" }}
+- read_url: Read a webpage. {{ "url": "" }}
+- system_info: Get CPU, RAM, disk, OS info. {{}}
+- run_background: Start a long-running process. {{ "command": "" }}
+- read_process_logs: Read output of background process. {{ "process_id": "" }}
+- git_action: Run git commands. {{ "cwd": "", "args": [] }}
+- ask_user: Ask the user a question. {{ "question": "" }}
+- sqlite_query: Query a SQLite database. {{ "db_path": "", "query": "" }}
+- watch_directory: Watch for file changes. {{ "path": "", "trigger_command": "" }}
+- http_request: Make HTTP requests. {{ "method": "", "url": "", "headers": {{}}, "body": "" }}
+- clipboard: Read/write system clipboard. {{ "action": "read|write", "content": "" }}
+- notify: Send a desktop notification. {{ "title": "", "message": "" }}
+- find_replace: Find and replace text in a file. {{ "path": "", "find": "", "replace": "", "is_regex": bool }}
+- network_check: Test network connectivity. {{ "action": "ping|dns|port", "host": "", "port": int }}
 
-JSON Format:
+FORMAT: Output a JSON block to call a tool:
 ```json
-{ "tool": "name", "arguments": {} }
+{{ "tool": "tool_name", "arguments": {{}} }}
 ```
-"#.to_string();
+"#, os = std::env::consts::OS, arch = std::env::consts::ARCH).to_string();
+
 
     use sysinfo::System;
     let mut sys = System::new_all();

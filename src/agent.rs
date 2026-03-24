@@ -262,9 +262,16 @@ impl Agent {
                     continue;
                 }
                 Ok(_) => {
-                    if !executed_tools && content.contains("```") && !content.to_lowercase().contains("finished task") {
+                    // Only nudge if the model outputs a non-shell code block without tool calls.
+                    // Shell blocks (sh, bash, shell, zsh) are allowed as suggestions.
+                    let has_non_shell_code = content.contains("```") 
+                        && !content.contains("```sh") 
+                        && !content.contains("```bash") 
+                        && !content.contains("```shell")
+                        && !content.contains("```zsh");
+                    if !executed_tools && has_non_shell_code && !content.to_lowercase().contains("finished task") {
                         println!("\n{}", "⚠️  Agent provided code but forgot tools. Nudging...".yellow().bold());
-                        let nudge = "[System Guardrail] You provided code but didn't use tools like `write_file` or `extract_and_write`. YOU MUST USE TOOLS. Rewrite your response using tool calls.".to_string();
+                        let nudge = "[System Guardrail] You provided code but didn't use tools like `extract_and_write`. YOU MUST USE TOOLS. Rewrite your response using tool calls.".to_string();
                         self.history.push(ChatMessage::new(MessageRole::User, nudge));
                         let _ = self.save_history();
                         continue;
@@ -376,8 +383,15 @@ impl Agent {
             }
         }
         
-        if calls.is_empty() && content.contains("```") && !content.contains("tool") {
-             // Heuristic for model just outputting raw code without tool calls
+        // Only flag non-shell code blocks without tool calls as errors.
+        // Shell blocks (sh, bash, zsh) are allowed as informational suggestions.
+        let has_non_shell_code = content.contains("```") 
+            && !content.contains("```sh") 
+            && !content.contains("```bash") 
+            && !content.contains("```shell")
+            && !content.contains("```zsh")
+            && !content.contains("```json");
+        if calls.is_empty() && has_non_shell_code && !content.contains("tool") {
              return Err("You provided a code block but did not call a tool using the JSON format. Please use 'extract_and_write' to save this code.".to_string());
         }
 
