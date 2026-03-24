@@ -135,12 +135,12 @@ impl Agent {
 
             // Check if there are think tags and print them nicely (specific to DeepSeek-R1)
             let mut display_content = content.clone();
-            if display_content.contains("<think>") && display_content.contains("</think>") {
-                let start = display_content.find("<think>").unwrap();
-                let end = display_content.find("</think>").unwrap() + 9;
-                let thought = &display_content[start..end];
-                println!("{}", thought.bright_black());
-                display_content = display_content[end..].trim().to_string();
+            if let (Some(start), Some(close)) = (display_content.find("<think>"), display_content.find("</think>")) {
+                let end = close + "</think>".len();
+                if let Some(thought) = display_content.get(start..end) {
+                    println!("{}", thought.bright_black());
+                }
+                display_content = display_content.get(end..).unwrap_or("").trim().to_string();
             }
 
             if !display_content.is_empty() {
