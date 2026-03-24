@@ -137,6 +137,45 @@ CORE BEHAVIORS:
                 if input.is_empty() {
                     continue;
                 }
+                if input == "help" {
+                    println!("{}", "═".repeat(60).blue());
+                    println!("{}", "🌪️  TEMPEST AI — Quick Reference".green().bold());
+                    println!("{}", "═".repeat(60).blue());
+                    println!("{}", "\n📦 BUILT-IN TOOLS:".yellow().bold());
+                    println!("  run_command      — Execute bash/zsh commands");
+                    println!("  read_file        — Read file contents");
+                    println!("  write_file       — Write/create files");
+                    println!("  patch_file       — Surgically edit files");
+                    println!("  extract_and_write— Write code from markdown blocks");
+                    println!("  list_dir         — List directory contents");
+                    println!("  search_dir       — Ripgrep search in directories");
+                    println!("  search_web       — DuckDuckGo web search");
+                    println!("  read_url         — Fetch and read web pages");
+                    println!("  run_background   — Spawn long-running processes");
+                    println!("  read_process_logs— Check background process output");
+                    println!("  system_info      — Hardware diagnostics (CPU/RAM/OS)");
+                    println!("  sqlite_query     — Direct SQLite database access");
+                    println!("  git_action       — Native Git operations");
+                    println!("  watch_directory  — File-watching daemon");
+                    println!("  ask_user         — Ask for human input");
+                    println!("{}", "\n⌨️  SHELL COMMANDS:".yellow().bold());
+                    println!("  help             — Show this reference card");
+                    println!("  clear            — Clear conversation history");
+                    println!("  exit / quit      — Exit Tempest AI");
+                    println!("{}", "\n🚀 CLI FLAGS:".yellow().bold());
+                    println!("  --model <name>   — Swap Ollama model");
+                    println!("  --no-color       — Disable colored output");
+                    println!("  --config <path>  — Custom TOML config file");
+                    println!("{}", "\n📁 CONFIG:".yellow().bold());
+                    println!("  ~/.config/tempest_ai/config.toml");
+                    println!("{}", "═".repeat(60).blue());
+                    continue;
+                }
+                if input == "clear" {
+                    agent.clear_history();
+                    println!("{}", "🧹 Conversation history cleared.".green());
+                    continue;
+                }
                 let _ = rl.add_history_entry(input);
                 if let Err(e) = agent.run(input.to_string()).await {
                     println!("{}", format!("Agent Error: {}", e).red());

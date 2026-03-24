@@ -83,6 +83,11 @@ impl Agent {
         Ok(())
     }
 
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        let _ = std::fs::remove_file(&self.history_path);
+    }
+
     pub async fn run(&mut self, initial_user_prompt: String) -> Result<()> {
         println!("{}", "=".repeat(60).blue());
         println!("{}", "🚀 Tempest AI Agent Initialized".green().bold());
