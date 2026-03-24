@@ -14,10 +14,11 @@ fn process_registry() -> &'static Mutex<HashMap<String, ProcessLogs>> {
 }
 
 /// A trait representing an autonomous tool the agent can use.
+#[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String>;
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String>;
     
     /// Define the JSON schema for this tool's parameters.
     fn parameters(&self) -> Value;
@@ -30,6 +31,7 @@ pub trait AgentTool: Send + Sync {
 
 pub struct RunCommandTool;
 
+#[async_trait::async_trait]
 impl AgentTool for RunCommandTool {
     fn name(&self) -> &'static str {
         "run_command"
@@ -56,7 +58,7 @@ impl AgentTool for RunCommandTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let cmd = args.get("command")
             .and_then(|c| c.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
@@ -117,6 +119,7 @@ impl AgentTool for RunCommandTool {
 
 pub struct ReadFileTool;
 
+#[async_trait::async_trait]
 impl AgentTool for ReadFileTool {
     fn name(&self) -> &'static str {
         "read_file"
@@ -139,7 +142,7 @@ impl AgentTool for ReadFileTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -154,6 +157,7 @@ impl AgentTool for ReadFileTool {
 
 pub struct WriteFileTool;
 
+#[async_trait::async_trait]
 impl AgentTool for WriteFileTool {
     fn name(&self) -> &'static str {
         "write_file"
@@ -184,7 +188,7 @@ impl AgentTool for WriteFileTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -212,6 +216,7 @@ impl AgentTool for WriteFileTool {
 
 pub struct ListDirTool;
 
+#[async_trait::async_trait]
 impl AgentTool for ListDirTool {
     fn name(&self) -> &'static str {
         "list_dir"
@@ -234,7 +239,7 @@ impl AgentTool for ListDirTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path")
             .and_then(|p| p.as_str())
             .unwrap_or(".");
@@ -266,6 +271,7 @@ impl AgentTool for ListDirTool {
 
 pub struct SearchWebTool;
 
+#[async_trait::async_trait]
 impl AgentTool for SearchWebTool {
     fn name(&self) -> &'static str {
         "search_web"
@@ -288,73 +294,72 @@ impl AgentTool for SearchWebTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
         println!(">> [TOOL CALL: search_web] Query: {}", query);
         
-        tokio::task::block_in_place(move || {
-            let url = "https://lite.duckduckgo.com/lite/";
-            let client = reqwest::blocking::Client::builder()
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                .build()?;
-                
-            let res = client.post(url)
-                .form(&[("q", &query)])
-                .send()?
-                .text()?;
-                
-            let document = scraper::Html::parse_document(&res);
-            let tr_selector = scraper::Selector::parse("tr").unwrap();
-            let a_selector = scraper::Selector::parse("a.result-link").unwrap();
-            let snippet_selector = scraper::Selector::parse("td.result-snippet").unwrap();
+        let url = "https://lite.duckduckgo.com/lite/";
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            .build()?;
             
-            let mut results = String::new();
-            let mut current_title = String::new();
-            let mut current_url = String::new();
+        let res = client.post(url)
+            .form(&[("q", &query)])
+            .send().await?
+            .text().await?;
             
-            for tr in document.select(&tr_selector) {
-                if let Some(a) = tr.select(&a_selector).next() {
-                    current_title = a.text().collect::<Vec<_>>().join(" ").trim().to_string();
-                    current_url = a.value().attr("href").unwrap_or("").to_string();
-                    
-                    if current_url.contains("uddg?u=") {
-                        if let Some(idx) = current_url.find("uddg?u=") {
-                            let extracted = &current_url[idx + 7..];
-                            let clean = if let Some(end_idx) = extracted.find('&') {
-                                &extracted[..end_idx]
-                            } else {
-                                extracted
-                            };
-                            if let Ok(decoded) = urlencoding::decode(clean) {
-                                current_url = decoded.to_string();
-                            }
+        let document = scraper::Html::parse_document(&res);
+        let tr_selector = scraper::Selector::parse("tr").unwrap();
+        let a_selector = scraper::Selector::parse("a.result-link").unwrap();
+        let snippet_selector = scraper::Selector::parse("td.result-snippet").unwrap();
+        
+        let mut results = String::new();
+        let mut current_title = String::new();
+        let mut current_url = String::new();
+        
+        for tr in document.select(&tr_selector) {
+            if let Some(a) = tr.select(&a_selector).next() {
+                current_title = a.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                current_url = a.value().attr("href").unwrap_or("").to_string();
+                
+                if current_url.contains("uddg?u=") {
+                    if let Some(idx) = current_url.find("uddg?u=") {
+                        let extracted = &current_url[idx + 7..];
+                        let clean = if let Some(end_idx) = extracted.find('&') {
+                            &extracted[..end_idx]
+                        } else {
+                            extracted
+                        };
+                        if let Ok(decoded) = urlencoding::decode(clean) {
+                            current_url = decoded.to_string();
                         }
-                    } else if current_url.starts_with("//") {
-                        current_url = format!("https:{}", current_url);
-                    } else if current_url.starts_with('/') {
-                        current_url = format!("https://lite.duckduckgo.com{}", current_url);
                     }
-                } else if let Some(snippet) = tr.select(&snippet_selector).next() {
-                    let snip = snippet.text().collect::<Vec<_>>().join(" ").trim().to_string();
-                    if !current_title.is_empty() && !current_url.is_empty() {
-                        results.push_str(&format!("Title: {}\nURL: {}\nSnippet: {}\n\n", current_title, current_url, snip));
-                        current_title.clear();
-                        current_url.clear();
-                    }
+                } else if current_url.starts_with("//") {
+                    current_url = format!("https:{}", current_url);
+                } else if current_url.starts_with('/') {
+                    current_url = format!("https://lite.duckduckgo.com{}", current_url);
+                }
+            } else if let Some(snippet) = tr.select(&snippet_selector).next() {
+                let snip = snippet.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                if !current_title.is_empty() && !current_url.is_empty() {
+                    results.push_str(&format!("Title: {}\nURL: {}\nSnippet: {}\n\n", current_title, current_url, snip));
+                    current_title.clear();
+                    current_url.clear();
                 }
             }
-            
-            if results.is_empty() {
-                Ok(format!("No results found for query: {}", query))
-            } else {
-                Ok(results)
-            }
-        })
+        }
+        
+        if results.is_empty() {
+            Ok(format!("No results found for query: {}", query))
+        } else {
+            Ok(results)
+        }
     }
 }
 
 pub struct ReadUrlTool;
 
+#[async_trait::async_trait]
 impl AgentTool for ReadUrlTool {
     fn name(&self) -> &'static str {
         "read_url"
@@ -377,36 +382,35 @@ impl AgentTool for ReadUrlTool {
         })
     }
     
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
         println!(">> [TOOL CALL: read_url] Fetching: {}", url);
         
-        tokio::task::block_in_place(move || {
-            let client = reqwest::blocking::Client::builder()
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .build()?;
-                
-            let res = client.get(&url).send()?;
-            let html_bytes = res.bytes()?;
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()?;
             
-            // Use html2text to strip HTML tags and present clean text
-            let text = html2text::from_read(html_bytes.as_ref(), 100);
-            
-            let max_len = 15000;
-            let mut truncated = text;
-            if truncated.len() > max_len {
-                let safe_len = truncated.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated.len());
-                truncated.truncate(safe_len);
-                truncated.push_str("\n...[Content truncated due to length]...");
-            }
-            
-            Ok(truncated)
-        })
+        let res = client.get(&url).send().await?;
+        let html_bytes = res.bytes().await?;
+        
+        // Use html2text to strip HTML tags and present clean text
+        let text = html2text::from_read(html_bytes.as_ref(), 100);
+        
+        let max_len = 15000;
+        let mut truncated = text;
+        if truncated.len() > max_len {
+            let safe_len = truncated.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated.len());
+            truncated.truncate(safe_len);
+            truncated.push_str("\n...[Content truncated due to length]...");
+        }
+        
+        Ok(truncated)
     }
 }
 
 pub struct PatchFileTool;
 
+#[async_trait::async_trait]
 impl AgentTool for PatchFileTool {
     fn name(&self) -> &'static str {
         "patch_file"
@@ -445,7 +449,7 @@ impl AgentTool for PatchFileTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("file_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_path' argument"))?;
         let path_owned = shellexpand::tilde(path_str).to_string();
         let path = path_owned.as_str();
@@ -492,6 +496,7 @@ impl AgentTool for PatchFileTool {
 
 pub struct RunBackgroundTool;
 
+#[async_trait::async_trait]
 impl AgentTool for RunBackgroundTool {
     fn name(&self) -> &'static str { "run_background" }
     fn description(&self) -> &'static str { "Spawns a long-running bash/zsh command in the background (like starting a web server). Returns a process_id immediately. Use read_process_logs to check its output." }
@@ -505,7 +510,7 @@ impl AgentTool for RunBackgroundTool {
             "required": ["command"]
         })
     }
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let cmd = args.get("command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
         println!(">> [TOOL CALL: run_background] Spawning: {}", cmd);
 
@@ -563,6 +568,7 @@ impl AgentTool for RunBackgroundTool {
 
 pub struct ReadProcessLogsTool;
 
+#[async_trait::async_trait]
 impl AgentTool for ReadProcessLogsTool {
     fn name(&self) -> &'static str { "read_process_logs" }
     fn description(&self) -> &'static str { "Reads the stdout and stderr of a background process using its process_id." }
@@ -576,7 +582,7 @@ impl AgentTool for ReadProcessLogsTool {
         })
     }
     
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let pid = args.get("process_id").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'process_id' argument"))?;
         println!(">> [TOOL CALL: read_process_logs] PID: {}", pid);
 
@@ -602,6 +608,7 @@ impl AgentTool for ReadProcessLogsTool {
 
 pub struct SearchDirTool;
 
+#[async_trait::async_trait]
 impl AgentTool for SearchDirTool {
     fn name(&self) -> &'static str { "search_dir" }
     fn description(&self) -> &'static str { "Recursively searches a directory for a specific text snippet or regex pattern. Returns the matching file paths and line numbers." }
@@ -616,7 +623,7 @@ impl AgentTool for SearchDirTool {
         })
     }
     
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
         let query = args.get("query").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'query' argument"))?;
         
@@ -665,6 +672,7 @@ impl AgentTool for SearchDirTool {
 
 pub struct AskUserTool;
 
+#[async_trait::async_trait]
 impl AgentTool for AskUserTool {
     fn name(&self) -> &'static str { "ask_user" }
     fn description(&self) -> &'static str { "Pauses execution and asks the user a clarifying question. Use this when you are blocked and need human input to proceed." }
@@ -678,7 +686,7 @@ impl AgentTool for AskUserTool {
         })
     }
     
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let question = args.get("question").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'question' argument"))?;
         
         println!("\n{} {}", "🤔 [AI Requires Input]".bold().yellow(), question.yellow());
@@ -695,6 +703,7 @@ impl AgentTool for AskUserTool {
 
 pub struct ExtractAndWriteTool;
 
+#[async_trait::async_trait]
 impl AgentTool for ExtractAndWriteTool {
     fn name(&self) -> &'static str { "extract_and_write" }
     fn description(&self) -> &'static str { "Extracts the latest markdown code block from your thought process and writes it to a file. Use this for complex files to avoid JSON escaping issues. MUST wrap your code in triple backticks BEFORE calling this tool." }
@@ -712,7 +721,7 @@ impl AgentTool for ExtractAndWriteTool {
         })
     }
 
-    fn execute(&self, args: &Value, agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, agent_content: &str) -> Result<String> {
         let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
         let path_owned = shellexpand::tilde(path_str).to_string();
         let path = path_owned.as_str();
@@ -748,6 +757,7 @@ impl AgentTool for ExtractAndWriteTool {
 
 pub struct SystemInfoTool;
 
+#[async_trait::async_trait]
 impl AgentTool for SystemInfoTool {
     fn name(&self) -> &'static str { "system_info" }
     fn description(&self) -> &'static str { "Reads your Host PC's operating system, CPU architecture, active CPU load, and RAM limits. Call this tool to make sure your background tasks aren't crashing the local machine." }
@@ -760,7 +770,7 @@ impl AgentTool for SystemInfoTool {
         })
     }
 
-    fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
         println!(">> [TOOL CALL: system_info] Fetching hardware diagnostics...");
         let mut sys = sysinfo::System::new_all();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
@@ -791,6 +801,7 @@ impl AgentTool for SystemInfoTool {
 
 pub struct SqliteQueryTool;
 
+#[async_trait::async_trait]
 impl AgentTool for SqliteQueryTool {
     fn name(&self) -> &'static str { "sqlite_query" }
     fn description(&self) -> &'static str { "Executes a raw SQL query against a specified SQLite database file securely. Returns a JSON string of the resulting rows. WARNING: You are parsing RAW SQL natively. Do NOT use CLI dot-commands like '.read' or '.schema'! Do NOT use 'CREATE DATABASE' (SQLite databases are created automatically when you query a new file via db_path)." }
@@ -806,7 +817,7 @@ impl AgentTool for SqliteQueryTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let db_path_str = args.get("db_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'db_path' argument"))?;
         let db_path = shellexpand::tilde(db_path_str).to_string();
         
@@ -815,6 +826,9 @@ impl AgentTool for SqliteQueryTool {
         println!(">> [TOOL CALL: sqlite_query] Querying: {}", db_path);
 
         let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let mut stmt = conn.prepare(query)?;
         
         let column_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
@@ -850,6 +864,7 @@ impl AgentTool for SqliteQueryTool {
 
 pub struct GitTool;
 
+#[async_trait::async_trait]
 impl AgentTool for GitTool {
     fn name(&self) -> &'static str { "git_action" }
     fn description(&self) -> &'static str { "Natively executes a secure 'git' command using the local OS bindings. Bypasses bash explicitly. Provide arguments as an array of strings (e.g., ['commit', '-m', 'Initial commit'])." }
@@ -865,7 +880,7 @@ impl AgentTool for GitTool {
         })
     }
 
-    fn execute(&self, json_args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, json_args: &Value, _agent_content: &str) -> Result<String> {
         let cwd_str = json_args.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
         let cwd = shellexpand::tilde(cwd_str).to_string();
 
@@ -902,6 +917,7 @@ impl AgentTool for GitTool {
 
 pub struct WatchDirectoryTool;
 
+#[async_trait::async_trait]
 impl AgentTool for WatchDirectoryTool {
     fn name(&self) -> &'static str { "watch_directory" }
     fn description(&self) -> &'static str { "Starts a persistent background daemon that watches a directory for file modifications. When you make changes to files, it will instantly run the 'trigger_command' provided. Extremely useful for hot-reloading servers or auto-testing your code upon save!" }
@@ -917,7 +933,7 @@ impl AgentTool for WatchDirectoryTool {
         })
     }
 
-    fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         use notify::Watcher;
         
         let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;

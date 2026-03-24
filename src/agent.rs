@@ -14,10 +14,12 @@ pub struct Agent {
     tools: Vec<Box<dyn AgentTool>>,
     system_prompt: String,
     recent_tool_calls: std::collections::VecDeque<String>,
+    history_path: String,
+    pub session_id: String,
 }
 
 impl Agent {
-    pub fn new(model: String, system_prompt: String) -> Self {
+    pub fn new(model: String, system_prompt: String, history_path: String) -> Self {
         Agent {
             ollama: Ollama::default(),
             model,
@@ -42,6 +44,8 @@ impl Agent {
             ],
             system_prompt,
             recent_tool_calls: std::collections::VecDeque::new(),
+            history_path,
+            session_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -54,7 +58,7 @@ impl Agent {
     }
 
     pub fn load_history(&mut self) -> Result<()> {
-        let history_path = std::path::Path::new("history.json");
+        let history_path = std::path::Path::new(&self.history_path);
         if history_path.exists() {
             let data = std::fs::read_to_string(history_path)?;
             if let Ok(history) = serde_json::from_str::<Vec<ChatMessage>>(&data) {
@@ -72,7 +76,7 @@ impl Agent {
     }
 
     pub fn save_history(&self) -> Result<()> {
-        let history_path = std::path::Path::new("history.json");
+        let history_path = std::path::Path::new(&self.history_path);
         let data = serde_json::to_string_pretty(&self.history)?;
         std::fs::write(history_path, data)?;
         Ok(())
@@ -111,9 +115,20 @@ impl Agent {
                 self.history.clone(),
             );
 
-            // Execute the model
-            println!("\n{}", "🤔 Thinking...".yellow());
+            // Execute the model with a loading spinner
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap()
+            );
+            spinner.set_message("Thinking...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+            
             let response = self.ollama.send_chat_messages(request).await?;
+            spinner.finish_and_clear();
+            
             let message = response.message;
             let content = message.content.clone();
 
@@ -128,7 +143,8 @@ impl Agent {
             }
 
             if !display_content.is_empty() {
-                println!("{}", display_content.cyan());
+                // Render markdown output through termimad
+                termimad::print_text(&display_content);
             }
 
             self.history.push(message);
@@ -189,7 +205,7 @@ impl Agent {
                                     tool_result_str = format!("Error: User denied permission and provided this feedback: '{}'. Adjust your execution plan accordingly.", feedback);
                                 }
                             } else {
-                                match tool.execute(args, &content) {
+                                match tool.execute(args, &content).await {
                                     Ok(res) => {
                                         println!("{}", "✅ Tool execution successful".green());
                                         tool_result_str = res;
