@@ -25,6 +25,7 @@ struct Cli {
     config: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug)]
 struct AppConfig {
     model: Option<String>,

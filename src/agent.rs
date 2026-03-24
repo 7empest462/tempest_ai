@@ -15,6 +15,7 @@ pub struct Agent {
     system_prompt: String,
     recent_tool_calls: std::collections::VecDeque<String>,
     history_path: String,
+    #[allow(dead_code)]
     pub session_id: String,
 }
 
