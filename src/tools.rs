@@ -729,11 +729,22 @@ impl AgentTool for ExtractAndWriteTool {
         println!(">> [TOOL CALL: extract_and_write] Parsing thought process for target: {}", path);
 
         let blocks: Vec<&str> = agent_content.split("```").collect();
-        if blocks.len() >= 3 {
-            let code_block = blocks[blocks.len() - 2];
+        let mut code_block = "";
+        
+        // Iterate backwards from the second-to-last block (which contains code)
+        // and find the first block that is NOT a JSON tool call block.
+        for i in (1..blocks.len()).rev().step_by(2) {
+            let b = blocks[i].trim();
+            if !b.starts_with("json") {
+                code_block = blocks[i];
+                break;
+            }
+        }
+
+        if !code_block.is_empty() {
             let clean_code = if let Some(first_newline) = code_block.find('\n') {
                 let first_line = &code_block[0..first_newline];
-                if !first_line.contains(' ') {
+                if !first_line.contains(' ') && !first_line.is_empty() {
                     &code_block[first_newline + 1..]
                 } else {
                     code_block

@@ -96,23 +96,51 @@ async fn main() -> Result<()> {
 
     let config = load_config(cli.config.as_deref());
 
-    let system_prompt = r#"You are an expert AI pair-programmer and system assistant. You have full access to 22 specialized system tools to execute terminal commands, read files, write files, search the web, and read URLs.
-YOUR CRITICAL DIRECTIVE: YOU MUST USE THE PROVIDED TOOLS TO COMPLETE TASKS. DO NOT merely tell the user what commands to run. If the user asks you to check the system, run a script, edit a file, or research a topic, YOU MUST USE A TOOL to do it yourself.
-NEVER OUTPUT A BASH SCRIPT FOR THE USER TO RUN. ALWAYS USE THE `run_command` TOOL. NEVER ASK THE USER TO SAVE A FILE MANUALLY; ALWAYS USE THE `write_file` OR `extract_and_write` TOOLS.
+    let system_prompt = r#"You are an AI assistant with 22 tools. 
+CRITICAL: Use <think> tags. Output JSON tool calls. 
 
-CORE BEHAVIORS:
-• Rule A: The Markdown-Extraction Rule. "When creating files, write the pure code inside a markdown codeblock (```...```) natively, then immediately call the `extract_and_write` tool with the path to save it.
-• Rule B: The 7EMPEST OS Matrix. "You manage a fleet: macOS (M4), SteamOS (Steam Deck), and NixOS. Check the OS using `uname` and adapt your commands (brew, flatpak, nixos-rebuild)."
-• Rule C: Short-Circuit Feedback. "If a tool call is denied, stop, explain, and ask for guidance."
+Rule A (CRITICAL): To save code, FIRST write the code in a markdown block, THEN call `extract_and_write` with ONLY the path. 
+DO NOT provide a "content" argument to `extract_and_write`. It extracts automatically.
 
-1. ALWAYS output your internal thought process inside <think>...</think> tags before acting.
-2. If a task requires action, YOU MUST output a JSON tool call exactly as specified.
-3. You can call MULTIPLE tools in a single response by providing multiple JSON blocks.
-4. If a tool fails, read the [HINT] in the error message, adapt, and try an alternative approach.
-5. Provide final summaries only AFTER you have successfully used tools to complete the objective."#.to_string();
+TOOLS:
+- run_command { "command": "" }
+- read_file { "path": "" }
+- write_file { "path": "", "content": "" }
+- extract_and_write { "path": "" }  <-- NO CONTENT HERE!
+- list_dir { "path": "" }
+- search_web { "query": "" }
+- tree { "path": "", "max_depth": int }
+- git_action { "cwd": "", "args": [] }
+- system_info {}
+- patch_file { "file_path": "", "start_line": int, "end_line": int, "content": "" }
+- run_background { "command": "" }
+- read_process_logs { "process_id": "" }
+- read_url { "url": "" }
+- search_dir { "path": "", "query": "" }
+- ask_user { "question": "" }
+- sqlite_query { "db_path": "", "query": "" }
+- watch_directory { "path": "", "trigger_command": "" }
+- http_request { "method": "", "url": "", "headers": {}, "body": "" }
+- clipboard { "action": "read|write", "content": "" }
+- notify { "title": "", "message": "" }
+- find_replace { "path": "", "find": "", "replace": "", "is_regex": bool }
+- network_check { "action": "ping|dns|port", "host": "", "port": int }
 
-    let os_info = format!("\n\nSYSTEM ENVIRONMENT:\nOperating System: {}\nArchitecture: {}\nMake sure to provide shell commands that are explicitly tuned for this Operating System! IMPORTANT: Never use interactive commands or indefinite loops (like `ping` without `-c`). Prefer `curl`, `dig`, or `ping -c 4` for network checks.", std::env::consts::OS, std::env::consts::ARCH);
-    let system_prompt = format!("{}{}", system_prompt, os_info);
+JSON Format:
+```json
+{ "tool": "name", "arguments": {} }
+```
+"#.to_string();
+
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    let used_mem = sys.used_memory() as f64 / sys.total_memory() as f64;
+    if used_mem > 0.90 {
+        println!("\n{}", "⚠️  WARNING: System Memory is critically low (>90% full).".yellow().bold());
+        println!("{}", "Reasoning models (DeepSeek-R1) may hang or respond very slowly in this state.".yellow());
+        println!("{}\n", "HINT: Close heavy apps (Chrome, Xcode) or switch to a smaller model (phi4-mini).".dimmed());
+    }
 
     // Model priority: CLI flag > env var > config file > default
     let model = cli.model

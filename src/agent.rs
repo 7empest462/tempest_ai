@@ -2,10 +2,15 @@ use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, Patch
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
-    generation::chat::{request::ChatMessageRequest, ChatMessage, MessageRole},
+    generation::{
+        chat::{request::ChatMessageRequest, ChatMessage, MessageRole},
+        options::GenerationOptions,
+    },
     Ollama,
 };
 use serde_json::Value;
+use futures::StreamExt;
+use std::io::Write;
 
 pub struct Agent {
     ollama: Ollama,
@@ -101,66 +106,84 @@ impl Agent {
         println!("{}", "=".repeat(60).blue());
 
         // Initialize history with system prompt
-        // We append the tools description to the system prompt so any model (even without native tool API support) 
-        // can use the JSON output fallback.
-        let mut full_system_prompt = self.system_prompt.clone();
-        full_system_prompt.push_str("\n\nAVAILABLE TOOLS:\n");
-        for tool in &self.tools {
-            full_system_prompt.push_str(&format!("- {}: {}\n  Schema: {}\n", tool.name(), tool.description(), tool.parameters().to_string()));
-        }
-        full_system_prompt.push_str(
-            "\nTO USE A TOOL, output exactly in this format inside a JSON block:\n```json\n{\n  \"tool\": \"tool_name\",\n  \"arguments\": {\"arg1\": \"value\"}\n}\n```\nAfter tool execution, you will receive the result and can use another tool or provide the final answer."
-        );
+        let full_system_prompt = self.system_prompt.clone();
 
-        if !self.history.iter().any(|m| m.role == MessageRole::System) {
+        // If history has a system prompt but it's different from the current one, update it.
+        // Otherwise, if no system prompt exists, insert it.
+        if let Some(pos) = self.history.iter().position(|m| m.role == MessageRole::System) {
+            if self.history[pos].content != full_system_prompt {
+                self.history[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
+            }
+        } else {
             self.history.insert(0, ChatMessage::new(MessageRole::System, full_system_prompt));
         }
         self.history.push(ChatMessage::new(MessageRole::User, initial_user_prompt));
+        let _ = self.save_history(); // Guarantee file creation immediately
+
+        let mut turn_count = 0;
+        let max_turns = 10;
 
         loop {
-            // 🧠 Autonomously compress the context window if it gets too large
-            let _ = self.auto_summarize_memory().await;
+            turn_count += 1;
+            if turn_count > max_turns {
+                println!("\n{}", "🛑 Execution limit reached (10 turns). Stopping to prevent infinite loop.".red());
+                break;
+            }
+            // 🧠 Autonomously clear empty/useless messages from history before sending
+            self.history.retain(|m| !m.content.trim().is_empty() || !m.tool_calls.is_empty());
 
-            // Build the request
+            // Build the request with moderate options (8k context)
+            let options = GenerationOptions::default()
+                .num_ctx(8192)
+                .num_predict(4096);
+
             let request = ChatMessageRequest::new(
                 self.model.clone(),
                 self.history.clone(),
-            );
+            ).options(options);
 
-            // Execute the model with a loading spinner
-            let spinner = indicatif::ProgressBar::new_spinner();
-            spinner.set_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-                    .template("{spinner:.cyan} {msg}")
-                    .unwrap()
-            );
-            spinner.set_message("Thinking...");
-            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-            
-            let response = self.ollama.send_chat_messages(request).await?;
-            spinner.finish_and_clear();
-            
-            let message = response.message;
-            let content = message.content.clone();
+            println!("{}", "📡 Connected to Ollama. Streaming response...".dimmed());
+            let mut stream = self.ollama.send_chat_messages_stream(request).await?;
+            let mut full_content = String::new();
+            let mut in_thinking = false;
 
-            // Check if there are think tags and print them nicely (specific to DeepSeek-R1)
-            let mut display_content = content.clone();
-            if let (Some(start), Some(close)) = (display_content.find("<think>"), display_content.find("</think>")) {
-                let end = close + "</think>".len();
-                if let Some(thought) = display_content.get(start..end) {
-                    println!("{}", thought.bright_black());
+            print!("\n"); 
+            while let Some(res) = stream.next().await {
+                let chunk = res.map_err(|e| anyhow::anyhow!("Ollama stream error: {:?}", e))?;
+                let text = chunk.message.content;
+                full_content.push_str(&text);
+
+                // Live Highlight Thinking tags
+                if text.contains("<think>") {
+                    in_thinking = true;
+                    print!("{}", "<think>".bright_black());
                 }
-                display_content = display_content.get(end..).unwrap_or("").trim().to_string();
-            }
+                
+                let clean_text = text.replace("<think>", "").replace("</think>", "");
+                if in_thinking {
+                    print!("{}", clean_text.bright_black());
+                } else if !clean_text.is_empty() {
+                    print!("{}", clean_text);
+                } else {
+                    // Pulse to show we are receiving data even if text is empty
+                    print!("{}", ".".dimmed());
+                }
 
-            if !display_content.is_empty() {
-                // Render markdown output through termimad
-                termimad::print_text(&display_content);
+                if text.contains("</think>") {
+                    in_thinking = false;
+                    println!("{}", "</think>".bright_black());
+                }
+                let _ = std::io::stdout().flush();
             }
+            println!();
 
-            self.history.push(message);
-            let _ = self.save_history();
+            // Only save if we actually got something
+            if !full_content.trim().is_empty() {
+                let message = ChatMessage::new(MessageRole::Assistant, full_content.clone());
+                self.history.push(message);
+                let _ = self.save_history();
+            }
+            let content = full_content;
 
             // Look for JSON blocks to execute tools (supports multiple per response)
             let mut executed_tools = false;
@@ -318,9 +341,33 @@ impl Agent {
                         }
                     }
                     Err(e) => {
-                        if calls.is_empty() {
-                            return Err(format!("Invalid JSON inside code block: {}", e));
+                        let err_msg = format!("{}", e);
+                        
+                        // 🚑 EMERGENCY RECOVERY: Try Regex to rescue the tool and path if JSON parsing failed due to escaping
+                        let re_tool = regex::Regex::new(r#""tool"\s*:\s*"([^"]+)""#).unwrap();
+                        let re_path = regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap();
+                        
+                        if let (Some(t_cap), Some(p_cap)) = (re_tool.captures(block), re_path.captures(block)) {
+                            let tool_name = t_cap.get(1).unwrap().as_str();
+                            let path = p_cap.get(1).unwrap().as_str();
+                            
+                            if tool_name == "extract_and_write" {
+                                println!("{}", "🚑 Emergency Recovery: Rescued 'extract_and_write' from malformed JSON.".yellow());
+                                calls.push(serde_json::json!({
+                                    "tool": tool_name,
+                                    "arguments": { "path": path }
+                                }));
+                                search_from = abs_start + end_offset + 3;
+                                continue;
+                            }
                         }
+
+                        let hint = if err_msg.contains("invalid escape") {
+                            " [HINT: Use 'extract_and_write' instead of 'write_file' for large code blocks. Rule A: DO NOT pass a 'content' field to extract_and_write! It extracts from the markdown block above.]"
+                        } else {
+                            ""
+                        };
+                        return Err(format!("Invalid JSON inside code block: {}{}", e, hint));
                     }
                 }
                 search_from = abs_start + end_offset + 3;
@@ -329,6 +376,11 @@ impl Agent {
             }
         }
         
+        if calls.is_empty() && content.contains("```") && !content.contains("tool") {
+             // Heuristic for model just outputting raw code without tool calls
+             return Err("You provided a code block but did not call a tool using the JSON format. Please use 'extract_and_write' to save this code.".to_string());
+        }
+
         if calls.is_empty() {
             // Anti-hallucination guardrail check
             if content.contains("```bash") || content.contains("```sh") {
