@@ -986,3 +986,418 @@ impl AgentTool for WatchDirectoryTool {
         Ok(success_msg)
     }
 }
+
+// ========== NEW TOOLS: Extended Reach ==========
+
+pub struct HttpRequestTool;
+
+#[async_trait::async_trait]
+impl AgentTool for HttpRequestTool {
+    fn name(&self) -> &'static str { "http_request" }
+    fn description(&self) -> &'static str { "Makes an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) with optional headers and body. Use this to interact with REST APIs, webhooks, or any HTTP endpoint. Returns status code, headers, and response body." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "method": { "type": "string", "description": "HTTP method: GET, POST, PUT, DELETE, PATCH" },
+                "url": { "type": "string", "description": "The full URL to send the request to" },
+                "headers": { "type": "object", "description": "Optional key-value pairs for HTTP headers (e.g., {\"Authorization\": \"Bearer TOKEN\"})" },
+                "body": { "type": "string", "description": "Optional request body (typically JSON string for POST/PUT)" }
+            },
+            "required": ["method", "url"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let method = args.get("method").and_then(|m| m.as_str()).unwrap_or("GET").to_uppercase();
+        let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url' argument"))?;
+        println!(">> [TOOL CALL: http_request] {} {}", method, url);
+
+        let client = reqwest::Client::builder()
+            .user_agent("TempestAI/0.1")
+            .build()?;
+
+        let mut request = match method.as_str() {
+            "POST" => client.post(url),
+            "PUT" => client.put(url),
+            "DELETE" => client.delete(url),
+            "PATCH" => client.patch(url),
+            _ => client.get(url),
+        };
+
+        // Add custom headers
+        if let Some(headers) = args.get("headers").and_then(|h| h.as_object()) {
+            for (key, val) in headers {
+                if let Some(v) = val.as_str() {
+                    request = request.header(key.as_str(), v);
+                }
+            }
+        }
+
+        // Add body if provided
+        if let Some(body) = args.get("body").and_then(|b| b.as_str()) {
+            request = request.header("Content-Type", "application/json").body(body.to_string());
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        let resp_headers: Vec<String> = response.headers().iter()
+            .take(10)
+            .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or("?")))
+            .collect();
+
+        let body = response.text().await?;
+        let max_len = 15000;
+        let mut truncated_body = body;
+        if truncated_body.len() > max_len {
+            let safe_len = truncated_body.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated_body.len());
+            truncated_body.truncate(safe_len);
+            truncated_body.push_str("\n...[Response truncated]...");
+        }
+
+        Ok(format!("Status: {}\nHeaders:\n{}\n\nBody:\n{}", status, resp_headers.join("\n"), truncated_body))
+    }
+}
+
+pub struct ClipboardTool;
+
+#[async_trait::async_trait]
+impl AgentTool for ClipboardTool {
+    fn name(&self) -> &'static str { "clipboard" }
+    fn description(&self) -> &'static str { "Read from or write to the system clipboard. Use 'read' to get clipboard contents, or 'write' to copy text to the clipboard so the user can paste it." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "description": "'read' to get clipboard contents, 'write' to set them" },
+                "content": { "type": "string", "description": "Text to copy to clipboard (required for 'write')" }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("read");
+        println!(">> [TOOL CALL: clipboard] Action: {}", action);
+
+        match action {
+            "write" => {
+                let content = args.get("content").and_then(|c| c.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'content' for clipboard write"))?;
+                let mut clipboard = arboard::Clipboard::new()
+                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {}", e))?;
+                clipboard.set_text(content)
+                    .map_err(|e| anyhow::anyhow!("Failed to write to clipboard: {}", e))?;
+                Ok(format!("✅ Copied {} characters to clipboard.", content.len()))
+            },
+            "read" => {
+                let mut clipboard = arboard::Clipboard::new()
+                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {}", e))?;
+                let text = clipboard.get_text()
+                    .map_err(|e| anyhow::anyhow!("Failed to read clipboard: {}", e))?;
+                Ok(format!("Clipboard contents:\n{}", text))
+            },
+            _ => anyhow::bail!("Unknown clipboard action '{}'. Use 'read' or 'write'.", action),
+        }
+    }
+}
+
+pub struct NotifyTool;
+
+#[async_trait::async_trait]
+impl AgentTool for NotifyTool {
+    fn name(&self) -> &'static str { "notify" }
+    fn description(&self) -> &'static str { "Sends a native macOS desktop notification. Use this to alert the user when a long-running task completes or when something important happens." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "Notification title" },
+                "message": { "type": "string", "description": "Notification message body" }
+            },
+            "required": ["title", "message"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let title = args.get("title").and_then(|t| t.as_str()).unwrap_or("Tempest AI");
+        let message = args.get("message").and_then(|m| m.as_str()).unwrap_or("Task complete.");
+        println!(">> [TOOL CALL: notify] {} — {}", title, message);
+
+        let script = format!(
+            "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
+            message.replace('"', "\\\""),
+            title.replace('"', "\\\"")
+        );
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()?;
+
+        if output.status.success() {
+            Ok(format!("🔔 Notification sent: {} — {}", title, message))
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to send notification: {}", err)
+        }
+    }
+}
+
+// ========== NEW TOOLS: Precision & Dexterity ==========
+
+pub struct FindReplaceTool;
+
+#[async_trait::async_trait]
+impl AgentTool for FindReplaceTool {
+    fn name(&self) -> &'static str { "find_replace" }
+    fn description(&self) -> &'static str { "Performs a regex or literal find-and-replace across one or more files. Can target a single file or recursively process a directory. Returns a summary of all replacements made. Use this for sweeping refactors like renaming functions, updating imports, or changing config values across an entire project." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File or directory path to search in" },
+                "find": { "type": "string", "description": "The text or regex pattern to find" },
+                "replace": { "type": "string", "description": "The replacement string" },
+                "is_regex": { "type": "boolean", "description": "If true, treat 'find' as a regex pattern. Default: false (literal match)" },
+                "file_pattern": { "type": "string", "description": "Optional glob pattern to filter files when path is a directory (e.g., '*.rs', '*.toml')" }
+            },
+            "required": ["path", "find", "replace"]
+        })
+    }
+
+    fn requires_confirmation(&self) -> bool { true }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let find = args.get("find").and_then(|f| f.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'find'"))?;
+        let replace = args.get("replace").and_then(|r| r.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'replace'"))?;
+        let is_regex = args.get("is_regex").and_then(|r| r.as_bool()).unwrap_or(false);
+        let file_pattern = args.get("file_pattern").and_then(|f| f.as_str());
+
+        println!(">> [TOOL CALL: find_replace] {} → {} in {}", find, replace, path_owned);
+
+        let path = std::path::Path::new(&path_owned);
+        let mut files_to_process: Vec<PathBuf> = vec![];
+
+        if path.is_file() {
+            files_to_process.push(path.to_path_buf());
+        } else if path.is_dir() {
+            fn collect_files(dir: &std::path::Path, pattern: Option<&str>, out: &mut Vec<PathBuf>) {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            if !p.file_name().map(|n| n.to_str().unwrap_or("").starts_with('.')).unwrap_or(false) {
+                                collect_files(&p, pattern, out);
+                            }
+                        } else if p.is_file() {
+                            if let Some(pat) = pattern {
+                                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                                    let glob = pat.trim_start_matches('*');
+                                    if name.ends_with(glob) {
+                                        out.push(p);
+                                    }
+                                }
+                            } else {
+                                out.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+            collect_files(path, file_pattern, &mut files_to_process);
+        } else {
+            anyhow::bail!("Path '{}' does not exist", path_owned);
+        }
+
+        let mut total_replacements = 0;
+        let mut files_modified = 0;
+        let mut summary = String::new();
+
+        for file in &files_to_process {
+            if let Ok(content) = fs::read_to_string(file) {
+                let new_content = if is_regex {
+                    let re = regex::Regex::new(find)
+                        .map_err(|e| anyhow::anyhow!("Invalid regex: {}", e))?;
+                    let count = re.find_iter(&content).count();
+                    if count > 0 {
+                        total_replacements += count;
+                        files_modified += 1;
+                        summary.push_str(&format!("  {} — {} replacements\n", file.display(), count));
+                        re.replace_all(&content, replace).to_string()
+                    } else {
+                        continue;
+                    }
+                } else {
+                    let count = content.matches(find).count();
+                    if count > 0 {
+                        total_replacements += count;
+                        files_modified += 1;
+                        summary.push_str(&format!("  {} — {} replacements\n", file.display(), count));
+                        content.replace(find, replace)
+                    } else {
+                        continue;
+                    }
+                };
+                fs::write(file, new_content)?;
+            }
+        }
+
+        if total_replacements == 0 {
+            Ok(format!("No matches found for '{}' in {}", find, path_owned))
+        } else {
+            Ok(format!("✅ {} replacements across {} files:\n{}", total_replacements, files_modified, summary))
+        }
+    }
+}
+
+pub struct TreeTool;
+
+#[async_trait::async_trait]
+impl AgentTool for TreeTool {
+    fn name(&self) -> &'static str { "tree" }
+    fn description(&self) -> &'static str { "Shows a recursive directory tree view. Gives you full project structure awareness instantly. Excludes hidden directories and common noise like node_modules, target, .git by default." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Root directory to display tree for" },
+                "max_depth": { "type": "integer", "description": "Maximum depth to recurse (default: 4)" }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        let path_owned = shellexpand::tilde(path_str).to_string();
+        let max_depth = args.get("max_depth").and_then(|d| d.as_u64()).unwrap_or(4) as usize;
+        println!(">> [TOOL CALL: tree] {} (depth: {})", path_owned, max_depth);
+
+        let skip_dirs = ["node_modules", "target", ".git", "__pycache__", ".next", "dist", "build", ".DS_Store"];
+        let mut output = String::new();
+        let mut file_count = 0usize;
+        let mut dir_count = 0usize;
+
+        fn walk_tree(
+            dir: &std::path::Path,
+            prefix: &str,
+            depth: usize,
+            max_depth: usize,
+            skip: &[&str],
+            output: &mut String,
+            file_count: &mut usize,
+            dir_count: &mut usize,
+        ) {
+            if depth > max_depth { return; }
+            let mut entries: Vec<_> = match fs::read_dir(dir) {
+                Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+                Err(_) => return,
+            };
+            entries.sort_by_key(|e| e.file_name());
+
+            let total = entries.len();
+            for (i, entry) in entries.iter().enumerate() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if skip.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+
+                let is_last = i == total - 1;
+                let connector = if is_last { "└── " } else { "├── " };
+                let child_prefix = if is_last { "    " } else { "│   " };
+
+                let path = entry.path();
+                if path.is_dir() {
+                    *dir_count += 1;
+                    output.push_str(&format!("{}{}{}/\n", prefix, connector, name));
+                    walk_tree(&path, &format!("{}{}", prefix, child_prefix), depth + 1, max_depth, skip, output, file_count, dir_count);
+                } else {
+                    *file_count += 1;
+                    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    let size_str = if size > 1_000_000 {
+                        format!("{:.1}MB", size as f64 / 1_000_000.0)
+                    } else if size > 1_000 {
+                        format!("{:.1}KB", size as f64 / 1_000.0)
+                    } else {
+                        format!("{}B", size)
+                    };
+                    output.push_str(&format!("{}{}{} ({})\n", prefix, connector, name, size_str));
+                }
+            }
+        }
+
+        let root = std::path::Path::new(&path_owned);
+        output.push_str(&format!("{}/\n", path_owned));
+        walk_tree(root, "", 0, max_depth, &skip_dirs, &mut output, &mut file_count, &mut dir_count);
+        output.push_str(&format!("\n{} directories, {} files", dir_count, file_count));
+
+        Ok(output)
+    }
+}
+
+pub struct NetworkCheckTool;
+
+#[async_trait::async_trait]
+impl AgentTool for NetworkCheckTool {
+    fn name(&self) -> &'static str { "network_check" }
+    fn description(&self) -> &'static str { "Performs safe, non-hanging network diagnostics. Supports 'ping' (with automatic -c 4 limit), 'dns' (resolves a hostname), and 'port' (checks if a TCP port accepts connections). Use this instead of run_command for network tests." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "description": "'ping', 'dns', or 'port'" },
+                "host": { "type": "string", "description": "Hostname or IP to test" },
+                "port": { "type": "integer", "description": "Port number (required for 'port' action)" }
+            },
+            "required": ["action", "host"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("ping");
+        let host = args.get("host").and_then(|h| h.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'host'"))?;
+        println!(">> [TOOL CALL: network_check] {} {}", action, host);
+
+        match action {
+            "ping" => {
+                let output = Command::new("ping")
+                    .args(["-c", "4", "-W", "3", host])
+                    .output()?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.status.success() {
+                    Ok(format!("✅ Ping results:\n{}", stdout))
+                } else {
+                    Ok(format!("❌ Ping failed:\n{}{}", stdout, stderr))
+                }
+            },
+            "dns" => {
+                let output = Command::new("dig")
+                    .args(["+short", "+time=3", "+tries=1", host])
+                    .output()?;
+                let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if result.is_empty() {
+                    Ok(format!("❌ DNS lookup failed for '{}'", host))
+                } else {
+                    Ok(format!("✅ DNS results for '{}':\n{}", host, result))
+                }
+            },
+            "port" => {
+                let port = args.get("port").and_then(|p| p.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'port' for port check"))? as u16;
+                let addr = format!("{}:{}", host, port);
+                match std::net::TcpStream::connect_timeout(
+                    &addr.parse().unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+                    std::time::Duration::from_secs(3),
+                ) {
+                    Ok(_) => Ok(format!("✅ Port {} is OPEN on {}", port, host)),
+                    Err(e) => Ok(format!("❌ Port {} is CLOSED on {} — {}", port, host, e)),
+                }
+            },
+            _ => anyhow::bail!("Unknown network action '{}'. Use 'ping', 'dns', or 'port'.", action),
+        }
+    }
+}

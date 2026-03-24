@@ -1,4 +1,4 @@
-use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool};
+use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool};
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
@@ -42,6 +42,12 @@ impl Agent {
                 Box::new(SqliteQueryTool),
                 Box::new(GitTool),
                 Box::new(WatchDirectoryTool),
+                Box::new(HttpRequestTool),
+                Box::new(ClipboardTool),
+                Box::new(NotifyTool),
+                Box::new(FindReplaceTool),
+                Box::new(TreeTool),
+                Box::new(NetworkCheckTool),
             ],
             system_prompt,
             recent_tool_calls: std::collections::VecDeque::new(),

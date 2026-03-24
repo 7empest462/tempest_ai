@@ -163,6 +163,12 @@ CORE BEHAVIORS:
                     println!("  git_action       — Native Git operations");
                     println!("  watch_directory  — File-watching daemon");
                     println!("  ask_user         — Ask for human input");
+                    println!("  http_request     — REST API calls (GET/POST/PUT/DELETE)");
+                    println!("  clipboard        — Read/write system clipboard");
+                    println!("  notify           — macOS desktop notifications");
+                    println!("  find_replace     — Regex find-and-replace across files");
+                    println!("  tree             — Recursive directory tree view");
+                    println!("  network_check    — Safe ping/DNS/port check");
                     println!("{}", "\n⌨️  SHELL COMMANDS:".yellow().bold());
                     println!("  help             — Show this reference card");
                     println!("  clear            — Clear conversation history");
