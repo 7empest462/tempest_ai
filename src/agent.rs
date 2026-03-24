@@ -162,11 +162,12 @@ impl Agent {
             self.history.push(message);
             let _ = self.save_history();
 
-            // Look for JSON block to execute tools
+            // Look for JSON blocks to execute tools (supports multiple per response)
             let mut executed_tools = false;
 
-            match self.extract_tool_call(&content) {
-                Ok(Some(tool_req)) => {
+            match self.extract_tool_calls(&content) {
+                Ok(tool_calls) if !tool_calls.is_empty() => {
+                    for tool_req in &tool_calls {
                     if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
                         let args = tool_req.get("arguments").unwrap_or(&Value::Null);
 
@@ -223,13 +224,27 @@ impl Agent {
                                         tool_result_str = res;
                                     }
                                     Err(e) => {
-                                        println!("{} {}", "❌ Tool execution failed:".red(), e);
-                                        tool_result_str = format!("Error executing tool: {}", e);
+                                        let err_str = format!("{}", e);
+                                        println!("{} {}", "❌ Tool execution failed:".red(), err_str);
+                                        
+                                        // Smart retry hint based on error type
+                                        let retry_hint = if err_str.contains("403") || err_str.contains("Forbidden") {
+                                            " [HINT: This URL returned 403 Forbidden. Try a DIFFERENT URL from the search results instead of retrying the same one.]"
+                                        } else if err_str.contains("404") || err_str.contains("Not Found") {
+                                            " [HINT: This URL returned 404 Not Found. The page may have moved. Try a different URL or search again.]"
+                                        } else if err_str.contains("timeout") || err_str.contains("timed out") {
+                                            " [HINT: The request timed out. The server may be slow or unreachable. Try a different host or check connectivity with network_check.]"
+                                        } else if err_str.contains("Connection refused") {
+                                            " [HINT: Connection refused. The service may not be running. Use network_check to verify the port is open.]"
+                                        } else {
+                                            ""
+                                        };
+                                        tool_result_str = format!("Error executing tool: {}{}", e, retry_hint);
                                     }
                                 }
                             }
                         } else {
-                            tool_result_str = format!("Error: Tool '{}' not found", tool_name);
+                            tool_result_str = format!("Error: Tool '{}' not found. Type 'help' to see available tools.", tool_name);
                         }
 
                         // Feed result back to the model
@@ -237,6 +252,7 @@ impl Agent {
                         self.history.push(ChatMessage::new(MessageRole::User, tool_result_msg));
                         let _ = self.save_history();
                         executed_tools = true;
+                    }
                     }
                 }
                 Err(guardrail_msg) => {
@@ -246,7 +262,7 @@ impl Agent {
                     let _ = self.save_history();
                     continue;
                 }
-                Ok(None) => {}
+                _ => {}
             }
 
             if !executed_tools {
@@ -303,29 +319,39 @@ impl Agent {
         Ok(())
     }
 
-    fn extract_tool_call(&self, content: &str) -> Result<Option<Value>, String> {
-        if let Some(start) = content.find("```json") {
-            let after_start = &content[start + 7..];
-            if let Some(end_offset) = after_start.find("```") {
-                let block = after_start[..end_offset].trim();
-                return match serde_json::from_str::<Value>(block) {
+    fn extract_tool_calls(&self, content: &str) -> Result<Vec<Value>, String> {
+        let mut calls = Vec::new();
+        let mut search_from = 0;
+        
+        while let Some(start) = content[search_from..].find("```json") {
+            let abs_start = search_from + start + 7;
+            if let Some(end_offset) = content[abs_start..].find("```") {
+                let block = content[abs_start..abs_start + end_offset].trim();
+                match serde_json::from_str::<Value>(block) {
                     Ok(val) => {
                         if val.get("tool").is_some() && val.get("arguments").is_some() {
-                            Ok(Some(val))
-                        } else {
-                            Err("Missing 'tool' or 'arguments' field in JSON. Please format as {\"tool\": \"...\", \"arguments\": {...}}".to_string())
+                            calls.push(val);
                         }
                     }
-                    Err(e) => Err(format!("Invalid JSON inside code block: {}", e)),
-                };
+                    Err(e) => {
+                        if calls.is_empty() {
+                            return Err(format!("Invalid JSON inside code block: {}", e));
+                        }
+                    }
+                }
+                search_from = abs_start + end_offset + 3;
+            } else {
+                break;
             }
         }
         
-        // Anti-hallucination guardrail check
-        if content.contains("```bash") || content.contains("```sh") {
-            return Err("You provided a bash/sh code block. You MUST use the `run_command` tool within a strict ```json block to run commands yourself. DO NOT tell the user to run commands. Fix your response and use the run_command tool correctly.".to_string());
+        if calls.is_empty() {
+            // Anti-hallucination guardrail check
+            if content.contains("```bash") || content.contains("```sh") {
+                return Err("You provided a bash/sh code block. You MUST use the `run_command` tool within a strict ```json block to run commands yourself. DO NOT tell the user to run commands. Fix your response and use the run_command tool correctly.".to_string());
+            }
         }
         
-        Ok(None)
+        Ok(calls)
     }
 }
