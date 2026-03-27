@@ -416,13 +416,30 @@ impl Agent {
                 match serde_json::from_str::<Value>(block) {
                     Ok(val) => {
                         if val.get("tool").is_some() && val.get("arguments").is_some() {
+                            let tool_name = val.get("tool").and_then(|t| t.as_str()).unwrap_or("");
+                            let args = val.get("arguments").and_then(|a| a.as_object());
+
+                            // 🚨 SHELL INJECTION GUARDRAIL: Catch if AI puts shell scripts inside write_file
+                            if tool_name == "write_file" {
+                                if let Some(content_val) = args.and_then(|a| a.get("content")).and_then(|c| c.as_str()) {
+                                    if content_val.contains("<<EOF") || content_val.contains("cat >") || content_val.contains("$(") {
+                                        let path = args.and_then(|a| a.get("path")).and_then(|p| p.as_str()).unwrap_or("file");
+                                        println!("{}", "🚑 Auto-Rescue: Redirecting shell-injection 'write_file' → 'extract_and_write'".yellow());
+                                        calls.push(serde_json::json!({
+                                            "tool": "extract_and_write",
+                                            "arguments": { "path": path }
+                                        }));
+                                        search_from = abs_start + end_offset + 3;
+                                        continue;
+                                    }
+                                }
+                            }
                             calls.push(val);
                         }
                     }
-                    Err(e) => {
-                        let err_msg = format!("{}", e);
-                        
-                        // 🚑 EMERGENCY RECOVERY: Rescue tool name + path from malformed JSON
+                    Err(_) => {
+                        // 🚑 EMERGENCY RECOVERY: Rescue from malformed JSON
+                        // This regex is robust to missing braces or line breaks
                         let re_tool = regex::Regex::new(r#""tool"\s*:\s*"([^"]+)""#).unwrap();
                         let re_path = regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap();
                         
@@ -430,29 +447,19 @@ impl Agent {
                             let tool_name = t_cap.get(1).unwrap().as_str();
                             let path = p_cap.get(1).unwrap().as_str();
                             
-                            // Auto-rescue: redirect ANY file-writing tool with escape errors to extract_and_write
-                            if tool_name == "extract_and_write" || tool_name == "write_file" {
-                                let rescued_tool = "extract_and_write";
-                                if tool_name == "write_file" {
-                                    println!("{}", "🚑 Auto-Rescue: Redirecting broken 'write_file' → 'extract_and_write'".yellow());
-                                } else {
-                                    println!("{}", "🚑 Emergency Recovery: Rescued 'extract_and_write' from malformed JSON.".yellow());
-                                }
+                            if !tool_name.is_empty() && !path.is_empty() {
+                                println!("{}", format!("🚑 Emergency Recovery: Rescued '{}' for '{}' from malformed JSON.", tool_name, path).yellow());
+                                let target_tool = if tool_name == "write_file" { "extract_and_write" } else { tool_name };
                                 calls.push(serde_json::json!({
-                                    "tool": rescued_tool,
+                                    "tool": target_tool,
                                     "arguments": { "path": path }
                                 }));
                                 search_from = abs_start + end_offset + 3;
                                 continue;
                             }
                         }
-
-                        let hint = if err_msg.contains("invalid escape") {
-                            " [HINT: Use 'extract_and_write' with ONLY a 'path' argument. DO NOT include 'content'. The code block above will be extracted automatically.]"
-                        } else {
-                            ""
-                        };
-                        return Err(format!("Invalid JSON inside code block: {}{}", e, hint));
+                        
+                        return Err(format!("[System Guardrail] Invalid JSON in tool call. If you are trying to save a file, use: ```json\n{{ \"tool\": \"extract_and_write\", \"arguments\": {{ \"path\": \"filename\" }} }}\n```"));
                     }
                 }
                 search_from = abs_start + end_offset + 3;
@@ -461,15 +468,43 @@ impl Agent {
             }
         }
         
-        // Only flag non-shell/non-json code blocks without tool calls as needing a tool.
-        let has_non_shell_code = content.contains("```") 
-            && !content.contains("```sh") 
-            && !content.contains("```bash") 
-            && !content.contains("```shell")
-            && !content.contains("```zsh")
-            && !content.contains("```json");
-        if calls.is_empty() && has_non_shell_code && !content.contains("tool") {
-             return Err("You provided a code block but did not call a tool. Add a ```json block with: { \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"filename\" } }".to_string());
+        // Final fallback: If no JSON tools found but model wrote a code block AND mentioned "save"/"extract"/"write"
+        if calls.is_empty() {
+            let has_code = content.contains("```");
+            let wants_to_save = content.to_lowercase().contains("save") || content.to_lowercase().contains("extract") || content.to_lowercase().contains("write");
+            
+            if has_code && wants_to_save {
+                let re_path = regex::Regex::new(r#"(?:path|to|file|as)\s*['":\s]+([^"'\s,]+)"#).unwrap();
+                if let Some(cap) = re_path.captures(content) {
+                    let path = cap.get(1).unwrap().as_str().trim_matches('.');
+                    if !path.is_empty() && path.contains('.') {
+                         println!("{}", format!("🚑 Heuristic Recovery: Detected intent to save '{}'. Triggering extract_and_write.", path).yellow());
+                         calls.push(serde_json::json!({
+                            "tool": "extract_and_write",
+                            "arguments": { "path": path }
+                        }));
+                        return Ok(calls);
+                    }
+                }
+            }
+        }
+
+        // Only flag blocks as needing a tool if they look like actual code scripts (multi-line)
+        if calls.is_empty() && !content.contains("tool") {
+            let blocks: Vec<&str> = content.split("```").collect();
+            for i in (1..blocks.len()).step_by(2) {
+                let b = blocks[i].trim();
+                let lines = b.lines().count();
+                let first_line = b.lines().next().unwrap_or("").to_lowercase();
+                
+                if lines > 3 && first_line != "json" && !["sh", "bash", "zsh"].contains(&first_line.as_str()) {
+                     return Err("You provided a code block but did not call a tool. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"filename\" } }\n```".to_string());
+                }
+                
+                if lines > 5 && ["sh", "bash", "zsh"].contains(&first_line.as_str()) {
+                     return Err("You provided a script but did not call a tool to save it. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"script.sh\" } }\n```".to_string());
+                }
+            }
         }
         
         Ok(calls)
