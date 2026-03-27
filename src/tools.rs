@@ -14,6 +14,7 @@ fn process_registry() -> &'static Mutex<HashMap<String, ProcessLogs>> {
 }
 
 /// A trait representing an autonomous tool the agent can use.
+#[allow(dead_code)]
 #[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &'static str;

@@ -105,34 +105,7 @@ RULES:
 - You may output ```sh blocks as suggestions WITHOUT a tool call. These are informational only.
 
 TOOLS (call via JSON):
-- run_command: Execute a shell command. {{ "command": "" }}
-- read_file: Read file contents. {{ "path": "" }}
-- write_file: Write small content to a file. {{ "path": "", "content": "" }}
-- extract_and_write: Save the last code block to a file (NO content arg!). {{ "path": "" }}
-- patch_file: Edit specific lines. {{ "file_path": "", "start_line": int, "end_line": int, "content": "" }}
-- list_dir: List directory contents. {{ "path": "" }}
-- tree: Show directory tree. {{ "path": "", "max_depth": int }}
-- search_dir: Search files by content. {{ "path": "", "query": "" }}
-- search_web: Search the internet. {{ "query": "" }}
-- read_url: Read a webpage. {{ "url": "" }}
-- system_info: Get CPU, RAM, disk, OS info. {{}}
-- run_background: Start a long-running process. {{ "command": "" }}
-- read_process_logs: Read output of background process. {{ "process_id": "" }}
-- git_action: Run git commands. {{ "cwd": "", "args": [] }}
-- ask_user: Ask the user a question. {{ "question": "" }}
-- sqlite_query: Query a SQLite database. {{ "db_path": "", "query": "" }}
-- watch_directory: Watch for file changes. {{ "path": "", "trigger_command": "" }}
-- http_request: Make HTTP requests. {{ "method": "", "url": "", "headers": {{}}, "body": "" }}
-- clipboard: Read/write system clipboard. {{ "action": "read|write", "content": "" }}
-- notify: Send a desktop notification. {{ "title": "", "message": "" }}
-- find_replace: Find and replace text in a file. {{ "path": "", "find": "", "replace": "", "is_regex": bool }}
-- network_check: Test network connectivity. {{ "action": "ping|dns|port", "host": "", "port": int }}
-- diff_files: Compare two files (unified diff). {{ "file_a": "", "file_b": "" }}
-- kill_process: Kill a process by PID. {{ "pid": "", "signal": "TERM|KILL|INT" }}
-- env_var: Get/set environment variables. {{ "action": "get|set|list", "name": "", "value": "" }}
-- chmod: Change file permissions. {{ "path": "", "mode": "755" }}
-- append_file: Append to a file. {{ "path": "", "content": "" }}
-- download_file: Download URL to local path. {{ "url": "", "path": "" }}
+{{tool_descriptions}}
 
 FORMAT: Output a JSON block to call a tool:
 ```json

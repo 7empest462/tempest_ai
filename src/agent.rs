@@ -26,7 +26,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(model: String, system_prompt: String, history_path: String) -> Self {
-        Agent {
+        let mut agent = Agent {
             ollama: Ollama::default(),
             model,
             history: vec![],
@@ -60,11 +60,48 @@ impl Agent {
                 Box::new(AppendFileTool),
                 Box::new(DownloadFileTool),
             ],
-            system_prompt,
+            system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
             history_path,
             session_id: uuid::Uuid::new_v4().to_string(),
+        };
+
+        // Dynamically inject tool descriptions into the system prompt
+        let tool_desc = agent.get_tool_descriptions();
+        agent.system_prompt = system_prompt.replace("{tool_descriptions}", &tool_desc);
+        
+        // Add system message to history
+        agent.history.push(ChatMessage::new(MessageRole::System, agent.system_prompt.clone()));
+        
+        agent
+    }
+
+    pub fn get_tool_descriptions(&self) -> String {
+        let mut desc = String::new();
+        for tool in &self.tools {
+            let name = tool.name();
+            let description = tool.description();
+            let params = tool.parameters();
+            
+            // Format parameters as a concise JSON example or description
+            let params_desc = if let Some(props) = params.get("properties").and_then(|p| p.as_object()) {
+                let mut p_parts = Vec::new();
+                for (k, v) in props {
+                    let p_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                    p_parts.push(format!("\"{}\": {}", k, p_type));
+                }
+                format!("{{ {} }}", p_parts.join(", "))
+            } else {
+                "{}".to_string()
+            };
+
+            desc.push_str(&format!("- {}: {}. {}\n", name, description, params_desc));
         }
+        desc
+    }
+
+    pub fn get_tool_names(&self) -> Vec<String> {
+        self.tools.iter().map(|t| t.name().to_string()).collect()
     }
 
     pub async fn check_connection(&self) -> Result<()> {
