@@ -127,6 +127,12 @@ TOOLS (call via JSON):
 - notify: Send a desktop notification. {{ "title": "", "message": "" }}
 - find_replace: Find and replace text in a file. {{ "path": "", "find": "", "replace": "", "is_regex": bool }}
 - network_check: Test network connectivity. {{ "action": "ping|dns|port", "host": "", "port": int }}
+- diff_files: Compare two files (unified diff). {{ "file_a": "", "file_b": "" }}
+- kill_process: Kill a process by PID. {{ "pid": "", "signal": "TERM|KILL|INT" }}
+- env_var: Get/set environment variables. {{ "action": "get|set|list", "name": "", "value": "" }}
+- chmod: Change file permissions. {{ "path": "", "mode": "755" }}
+- append_file: Append to a file. {{ "path": "", "content": "" }}
+- download_file: Download URL to local path. {{ "url": "", "path": "" }}
 
 FORMAT: Output a JSON block to call a tool:
 ```json

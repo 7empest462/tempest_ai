@@ -1,4 +1,4 @@
-use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool};
+use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool, DiffFilesTool, KillProcessTool, EnvVarTool, ChmodTool, AppendFileTool, DownloadFileTool};
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
@@ -53,6 +53,12 @@ impl Agent {
                 Box::new(FindReplaceTool),
                 Box::new(TreeTool),
                 Box::new(NetworkCheckTool),
+                Box::new(DiffFilesTool),
+                Box::new(KillProcessTool),
+                Box::new(EnvVarTool),
+                Box::new(ChmodTool),
+                Box::new(AppendFileTool),
+                Box::new(DownloadFileTool),
             ],
             system_prompt,
             recent_tool_calls: std::collections::VecDeque::new(),
@@ -120,17 +126,39 @@ impl Agent {
         self.history.push(ChatMessage::new(MessageRole::User, initial_user_prompt));
         let _ = self.save_history(); // Guarantee file creation immediately
 
-        let mut turn_count = 0;
-        let max_turns = 10;
+        let max_iterations = 30;
+        let mut iteration_count = 0;
+        let mut guardrail_retries = 0;
+        const MAX_GUARDRAIL_RETRIES: usize = 3;
 
         loop {
-            turn_count += 1;
-            if turn_count > max_turns {
+            iteration_count += 1;
+            if iteration_count > max_iterations {
                 println!("\n{}", "🛑 Execution limit reached (10 turns). Stopping to prevent infinite loop.".red());
                 break;
             }
             // 🧠 Autonomously clear empty/useless messages from history before sending
             self.history.retain(|m| !m.content.trim().is_empty() || !m.tool_calls.is_empty());
+
+            // 🧹 Auto-strip old [System Guardrail] messages to prevent history poisoning.
+            // Keep only guardrail messages from the last 4 history entries.
+            let guardrail_cutoff = self.history.len().saturating_sub(4);
+            for i in 0..guardrail_cutoff {
+                if self.history[i].content.contains("[System Guardrail]") {
+                    self.history[i] = ChatMessage::new(MessageRole::User, "[trimmed]".to_string());
+                }
+            }
+            self.history.retain(|m| m.content != "[trimmed]");
+
+            // 📏 Hard-cap history to prevent context overflow (keep system + last 39 messages)
+            const MAX_HISTORY: usize = 40;
+            if self.history.len() > MAX_HISTORY {
+                let system_msg = self.history[0].clone();
+                let keep_from = self.history.len() - (MAX_HISTORY - 1);
+                let mut new_history = vec![system_msg];
+                new_history.extend_from_slice(&self.history[keep_from..]);
+                self.history = new_history;
+            }
 
             // Build the request with moderate options (8k context)
             let options = GenerationOptions::default()
@@ -190,6 +218,7 @@ impl Agent {
 
             match self.extract_tool_calls(&content) {
                 Ok(tool_calls) if !tool_calls.is_empty() => {
+                    guardrail_retries = 0; // Reset on successful parse
                     for tool_req in &tool_calls {
                         if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
                             let args = tool_req.get("arguments").unwrap_or(&Value::Null);
@@ -256,12 +285,19 @@ impl Agent {
                     }
                 }
                 Err(guardrail_msg) => {
-                    println!("\n{} {}", "⚠️  Agent syntax error:".yellow(), guardrail_msg);
+                    guardrail_retries += 1;
+                    if guardrail_retries >= MAX_GUARDRAIL_RETRIES {
+                        println!("\n{}", "🛑 Max guardrail retries reached. Stopping this task.".red().bold());
+                        println!("Error: {}", guardrail_msg);
+                        break;
+                    }
+                    println!("\n{} {} ({}/{})", "⚠️  Agent syntax error:".yellow(), guardrail_msg, guardrail_retries, MAX_GUARDRAIL_RETRIES);
                     self.history.push(ChatMessage::new(MessageRole::User, format!("[System Guardrail] {}", guardrail_msg)));
                     let _ = self.save_history();
                     continue;
                 }
                 Ok(_) => {
+                    guardrail_retries = 0; // Reset on clean response
                     // Only nudge if the model outputs a non-shell code block without tool calls.
                     // Shell blocks (sh, bash, shell, zsh) are allowed as suggestions.
                     let has_non_shell_code = content.contains("```") 
@@ -270,6 +306,11 @@ impl Agent {
                         && !content.contains("```shell")
                         && !content.contains("```zsh");
                     if !executed_tools && has_non_shell_code && !content.to_lowercase().contains("finished task") {
+                        guardrail_retries += 1;
+                        if guardrail_retries >= MAX_GUARDRAIL_RETRIES {
+                            println!("\n{}", "🛑 Max nudge retries reached. Stopping.".red().bold());
+                            break;
+                        }
                         println!("\n{}", "⚠️  Agent provided code but forgot tools. Nudging...".yellow().bold());
                         let nudge = "[System Guardrail] You provided code but didn't use tools like `extract_and_write`. YOU MUST USE TOOLS. Rewrite your response using tool calls.".to_string();
                         self.history.push(ChatMessage::new(MessageRole::User, nudge));
@@ -350,7 +391,7 @@ impl Agent {
                     Err(e) => {
                         let err_msg = format!("{}", e);
                         
-                        // 🚑 EMERGENCY RECOVERY: Try Regex to rescue the tool and path if JSON parsing failed due to escaping
+                        // 🚑 EMERGENCY RECOVERY: Rescue tool name + path from malformed JSON
                         let re_tool = regex::Regex::new(r#""tool"\s*:\s*"([^"]+)""#).unwrap();
                         let re_path = regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap();
                         
@@ -358,10 +399,16 @@ impl Agent {
                             let tool_name = t_cap.get(1).unwrap().as_str();
                             let path = p_cap.get(1).unwrap().as_str();
                             
-                            if tool_name == "extract_and_write" {
-                                println!("{}", "🚑 Emergency Recovery: Rescued 'extract_and_write' from malformed JSON.".yellow());
+                            // Auto-rescue: redirect ANY file-writing tool with escape errors to extract_and_write
+                            if tool_name == "extract_and_write" || tool_name == "write_file" {
+                                let rescued_tool = "extract_and_write";
+                                if tool_name == "write_file" {
+                                    println!("{}", "🚑 Auto-Rescue: Redirecting broken 'write_file' → 'extract_and_write'".yellow());
+                                } else {
+                                    println!("{}", "🚑 Emergency Recovery: Rescued 'extract_and_write' from malformed JSON.".yellow());
+                                }
                                 calls.push(serde_json::json!({
-                                    "tool": tool_name,
+                                    "tool": rescued_tool,
                                     "arguments": { "path": path }
                                 }));
                                 search_from = abs_start + end_offset + 3;
@@ -370,7 +417,7 @@ impl Agent {
                         }
 
                         let hint = if err_msg.contains("invalid escape") {
-                            " [HINT: Use 'extract_and_write' instead of 'write_file' for large code blocks. Rule A: DO NOT pass a 'content' field to extract_and_write! It extracts from the markdown block above.]"
+                            " [HINT: Use 'extract_and_write' with ONLY a 'path' argument. DO NOT include 'content'. The code block above will be extracted automatically.]"
                         } else {
                             ""
                         };
@@ -383,8 +430,7 @@ impl Agent {
             }
         }
         
-        // Only flag non-shell code blocks without tool calls as errors.
-        // Shell blocks (sh, bash, zsh) are allowed as informational suggestions.
+        // Only flag non-shell/non-json code blocks without tool calls as needing a tool.
         let has_non_shell_code = content.contains("```") 
             && !content.contains("```sh") 
             && !content.contains("```bash") 
@@ -392,14 +438,7 @@ impl Agent {
             && !content.contains("```zsh")
             && !content.contains("```json");
         if calls.is_empty() && has_non_shell_code && !content.contains("tool") {
-             return Err("You provided a code block but did not call a tool using the JSON format. Please use 'extract_and_write' to save this code.".to_string());
-        }
-
-        if calls.is_empty() {
-            // Anti-hallucination guardrail check
-            if content.contains("```bash") || content.contains("```sh") {
-                return Err("You provided a bash/sh code block. You MUST use the `run_command` tool within a strict ```json block to run commands yourself. DO NOT tell the user to run commands. Fix your response and use the run_command tool correctly.".to_string());
-            }
+             return Err("You provided a code block but did not call a tool. Add a ```json block with: { \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"filename\" } }".to_string());
         }
         
         Ok(calls)

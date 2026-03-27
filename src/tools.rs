@@ -730,14 +730,30 @@ impl AgentTool for ExtractAndWriteTool {
 
         let blocks: Vec<&str> = agent_content.split("```").collect();
         let mut code_block = "";
+        let skip_langs = ["json", "sh", "bash", "shell", "zsh"];
         
-        // Iterate backwards from the second-to-last block (which contains code)
-        // and find the first block that is NOT a JSON tool call block.
+        // Pass 1: Prefer language-tagged blocks (python, rust, js, etc.), skip json/sh/bash
         for i in (1..blocks.len()).rev().step_by(2) {
             let b = blocks[i].trim();
-            if !b.starts_with("json") {
+            let first_line = b.lines().next().unwrap_or("");
+            let is_skippable = skip_langs.iter().any(|s| first_line.starts_with(s));
+            let is_tagged = !first_line.is_empty() && !first_line.contains(' ') && first_line.len() < 20;
+            if is_tagged && !is_skippable {
                 code_block = blocks[i];
                 break;
+            }
+        }
+        
+        // Pass 2: If no language-tagged block found, take any non-skip block
+        if code_block.is_empty() {
+            for i in (1..blocks.len()).rev().step_by(2) {
+                let b = blocks[i].trim();
+                let first_line = b.lines().next().unwrap_or("");
+                let is_skippable = skip_langs.iter().any(|s| first_line.starts_with(s));
+                if !is_skippable && !b.is_empty() {
+                    code_block = blocks[i];
+                    break;
+                }
             }
         }
 
@@ -1410,5 +1426,255 @@ impl AgentTool for NetworkCheckTool {
             },
             _ => anyhow::bail!("Unknown network action '{}'. Use 'ping', 'dns', or 'port'.", action),
         }
+    }
+}
+
+// ========== WAVE 6: Competitive Gap Tools ==========
+
+pub struct DiffFilesTool;
+
+#[async_trait::async_trait]
+impl AgentTool for DiffFilesTool {
+    fn name(&self) -> &'static str { "diff_files" }
+    fn description(&self) -> &'static str { "Compare two files and show their differences in unified diff format." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_a": { "type": "string", "description": "Path to the first file" },
+                "file_b": { "type": "string", "description": "Path to the second file" }
+            },
+            "required": ["file_a", "file_b"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let file_a = args.get("file_a").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_a'"))?;
+        let file_b = args.get("file_b").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_b'"))?;
+        let a = shellexpand::tilde(file_a).to_string();
+        let b = shellexpand::tilde(file_b).to_string();
+        println!(">> [TOOL CALL: diff_files] {} vs {}", a, b);
+
+        let output = Command::new("diff")
+            .args(["-u", &a, &b])
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        
+        if stdout.is_empty() && output.status.success() {
+            Ok("Files are identical.".to_string())
+        } else if !stderr.is_empty() {
+            Ok(format!("Diff error: {}", stderr))
+        } else {
+            Ok(format!("Diff output:\n{}", stdout))
+        }
+    }
+}
+
+pub struct KillProcessTool;
+
+#[async_trait::async_trait]
+impl AgentTool for KillProcessTool {
+    fn name(&self) -> &'static str { "kill_process" }
+    fn description(&self) -> &'static str { "Kill a running background process by its process ID." }
+    fn requires_confirmation(&self) -> bool { true }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pid": { "type": "string", "description": "Process ID to kill" },
+                "signal": { "type": "string", "description": "Signal to send (default: TERM). Options: TERM, KILL, INT" }
+            },
+            "required": ["pid"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let pid = args.get("pid").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'pid'"))?;
+        let signal = args.get("signal").and_then(|s| s.as_str()).unwrap_or("TERM");
+        println!(">> [TOOL CALL: kill_process] Sending {} to PID {}", signal, pid);
+
+        let output = Command::new("kill")
+            .args([&format!("-{}", signal), pid])
+            .output()?;
+        
+        if output.status.success() {
+            Ok(format!("✅ Sent {} signal to process {}", signal, pid))
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Ok(format!("❌ Failed to kill process {}: {}", pid, err.trim()))
+        }
+    }
+}
+
+pub struct EnvVarTool;
+
+#[async_trait::async_trait]
+impl AgentTool for EnvVarTool {
+    fn name(&self) -> &'static str { "env_var" }
+    fn description(&self) -> &'static str { "Get or set environment variables. Use 'get' to read a variable, 'set' to set one for the current session, or 'list' to show all." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "description": "'get', 'set', or 'list'" },
+                "name": { "type": "string", "description": "Variable name (required for get/set)" },
+                "value": { "type": "string", "description": "Variable value (required for set)" }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("get");
+        println!(">> [TOOL CALL: env_var] Action: {}", action);
+
+        match action {
+            "get" => {
+                let name = args.get("name").and_then(|n| n.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'name' for env get"))?;
+                match std::env::var(name) {
+                    Ok(val) => Ok(format!("{}={}", name, val)),
+                    Err(_) => Ok(format!("Variable '{}' is not set.", name)),
+                }
+            },
+            "set" => {
+                let name = args.get("name").and_then(|n| n.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'name' for env set"))?;
+                let value = args.get("value").and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'value' for env set"))?;
+                unsafe { std::env::set_var(name, value); }
+                Ok(format!("✅ Set {}={}", name, value))
+            },
+            "list" => {
+                let vars: Vec<String> = std::env::vars()
+                    .take(50)
+                    .map(|(k, v)| {
+                        let truncated = if v.len() > 100 { format!("{}...", &v[..100]) } else { v };
+                        format!("{}={}", k, truncated)
+                    })
+                    .collect();
+                Ok(format!("Environment variables (first 50):\n{}", vars.join("\n")))
+            },
+            _ => anyhow::bail!("Unknown env_var action '{}'. Use 'get', 'set', or 'list'.", action),
+        }
+    }
+}
+
+pub struct ChmodTool;
+
+#[async_trait::async_trait]
+impl AgentTool for ChmodTool {
+    fn name(&self) -> &'static str { "chmod" }
+    fn description(&self) -> &'static str { "Change file or directory permissions using standard Unix mode strings (e.g., '755', '644', '+x')." }
+    fn requires_confirmation(&self) -> bool { true }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to file or directory" },
+                "mode": { "type": "string", "description": "Permission mode (e.g., '755', '644', '+x', 'u+rwx')" }
+            },
+            "required": ["path", "mode"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let path = shellexpand::tilde(path_str).to_string();
+        let mode = args.get("mode").and_then(|m| m.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'mode'"))?;
+        println!(">> [TOOL CALL: chmod] {} {}", mode, path);
+
+        let output = Command::new("chmod")
+            .args([mode, &path])
+            .output()?;
+        
+        if output.status.success() {
+            Ok(format!("✅ Changed permissions of '{}' to '{}'", path, mode))
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("chmod failed: {}", err.trim())
+        }
+    }
+}
+
+pub struct AppendFileTool;
+
+#[async_trait::async_trait]
+impl AgentTool for AppendFileTool {
+    fn name(&self) -> &'static str { "append_file" }
+    fn description(&self) -> &'static str { "Append content to the end of an existing file without overwriting it. Creates the file if it doesn't exist." }
+    fn requires_confirmation(&self) -> bool { true }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file to append to" },
+                "content": { "type": "string", "description": "Content to append" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let path = shellexpand::tilde(path_str).to_string();
+        let content = args.get("content").and_then(|c| c.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
+        println!(">> [TOOL CALL: append_file] Appending to: {}", path);
+
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        file.write_all(content.as_bytes())?;
+        Ok(format!("✅ Appended {} bytes to {}", content.len(), path))
+    }
+}
+
+pub struct DownloadFileTool;
+
+#[async_trait::async_trait]
+impl AgentTool for DownloadFileTool {
+    fn name(&self) -> &'static str { "download_file" }
+    fn description(&self) -> &'static str { "Download a file from a URL and save it to a local path. Useful for fetching remote resources, images, scripts, or data files." }
+    fn requires_confirmation(&self) -> bool { true }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "URL to download from" },
+                "path": { "type": "string", "description": "Local path to save the downloaded file" }
+            },
+            "required": ["url", "path"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url'"))?;
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let path = shellexpand::tilde(path_str).to_string();
+        println!(">> [TOOL CALL: download_file] {} → {}", url, path);
+
+        let client = reqwest::Client::builder()
+            .user_agent("TempestAI/0.1")
+            .build()?;
+        let response = client.get(url).send().await?;
+        let status = response.status();
+        
+        if !status.is_success() {
+            anyhow::bail!("Download failed with status {}", status);
+        }
+
+        let bytes = response.bytes().await?;
+        
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(&path, &bytes)?;
+        Ok(format!("✅ Downloaded {} bytes from {} → {}", bytes.len(), url, path))
     }
 }
