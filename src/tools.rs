@@ -731,36 +731,65 @@ impl AgentTool for ExtractAndWriteTool {
 
         let blocks: Vec<&str> = agent_content.split("```").collect();
         let mut code_block = "";
-        let skip_langs = ["json", "sh", "bash", "shell", "zsh"];
         
         // Collect odd indices (actual code blocks between ``` markers)
-        // CRITICAL: (1..len).rev().step_by(2) gives EVEN indices, which is WRONG.
-        // We must use step_by(2) FIRST to get odd indices, then reverse.
         let odd_indices: Vec<usize> = (1..blocks.len()).step_by(2).collect();
         
-        // Pass 1: Prefer language-tagged blocks (python, rust, js, etc.), skip json/sh/bash
-        for &i in odd_indices.iter().rev() {
-            let b = blocks[i].trim();
-            let first_line = b.lines().next().unwrap_or("");
-            let is_skippable = skip_langs.iter().any(|s| first_line.starts_with(s));
-            let is_tagged = !first_line.is_empty() && !first_line.contains(' ') && first_line.len() < 20;
-            if is_tagged && !is_skippable {
-                code_block = blocks[i];
-                break;
-            }
-        }
-        
-        // Pass 2: If no language-tagged block found, take any non-skip block
-        if code_block.is_empty() {
+        let file_ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        // Pass 1: "Strict Match" — Prefer blocks that match the file extension
+        if !file_ext.is_empty() {
             for &i in odd_indices.iter().rev() {
                 let b = blocks[i].trim();
-                let first_line = b.lines().next().unwrap_or("");
-                let is_skippable = skip_langs.iter().any(|s| first_line.starts_with(s));
-                if !is_skippable && !b.is_empty() {
+                let first_line = b.lines().next().unwrap_or("").to_lowercase();
+                if first_line == file_ext || (file_ext == "sh" && first_line == "bash") || (file_ext == "js" && first_line == "javascript") {
                     code_block = blocks[i];
                     break;
                 }
             }
+        }
+        
+        // Pass 2: "Heuristic Match" — skip noisy blocks (json) unless we specifically want them
+        if code_block.is_empty() {
+            let skip_langs = if file_ext == "json" { vec![] } else { vec!["json"] };
+            
+            for &i in odd_indices.iter().rev() {
+                let b = blocks[i].trim();
+                let first_line = b.lines().next().unwrap_or("").to_lowercase();
+                
+                // Skip JSON blocks if we aren't writing a JSON file
+                if skip_langs.iter().any(|&s| first_line.starts_with(s)) {
+                    continue;
+                }
+
+                // Skip generic shell blocks if we aren't writing a script
+                let is_shell_block = ["sh", "bash", "zsh", "shell"].iter().any(|&s| first_line == s);
+                let is_writing_script = ["sh", "bash", "zsh"].contains(&file_ext);
+                if is_shell_block && !is_writing_script {
+                    continue;
+                }
+
+                let is_tagged = !first_line.is_empty() && !first_line.contains(' ') && first_line.len() < 20;
+                if is_tagged {
+                    code_block = blocks[i];
+                    break;
+                }
+            }
+        }
+
+        // Pass 3: Last Resort — take the first non-empty block that isn't JSON
+        if code_block.is_empty() {
+             for &i in odd_indices.iter().rev() {
+                let b = blocks[i].trim();
+                let first_line = b.lines().next().unwrap_or("");
+                if !first_line.starts_with("json") && !b.is_empty() {
+                    code_block = blocks[i];
+                    break;
+                }
+             }
         }
 
         if !code_block.is_empty() {

@@ -100,6 +100,7 @@ impl Agent {
         desc
     }
 
+    #[allow(dead_code)]
     pub fn get_tool_names(&self) -> Vec<String> {
         self.tools.iter().map(|t| t.name().to_string()).collect()
     }
