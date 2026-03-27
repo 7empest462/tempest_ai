@@ -145,7 +145,8 @@ impl Agent {
 
     pub async fn run(&mut self, initial_user_prompt: String) -> Result<()> {
         println!("{}", "=".repeat(60).blue());
-        println!("{}", "🚀 Tempest AI Agent Initialized".green().bold());
+        let build_time = env!("BUILD_TIME");
+        println!("{} {} (Build: {})", "🚀".green(), "Tempest AI Agent Initialized".bold(), build_time.cyan());
         println!("{} {}", "Model:".blue(), self.model);
         println!("{}", "=".repeat(60).blue());
 
@@ -413,6 +414,22 @@ impl Agent {
             let abs_start = search_from + start + 7;
             if let Some(end_offset) = content[abs_start..].find("```") {
                 let block = content[abs_start..abs_start + end_offset].trim();
+                
+                // 🚑 PRE-PARSE RESCUE: If the block contains shell redirection, it's almost certainly a mangled write_file.
+                if block.contains("<<EOF") || block.contains("cat >") || block.contains("$(") {
+                    let re_path = regex::Regex::new(r#""path"\s*:\s*"(./)?([^"]+)""#).unwrap();
+                    if let Some(p_cap) = re_path.captures(block) {
+                        let path = p_cap.get(2).unwrap().as_str();
+                         println!("{}", format!("🚑 Pre-Parse Rescue: Detected shell-injection intent for '{}'. Forcing extract_and_write.", path).yellow());
+                         calls.push(serde_json::json!({
+                            "tool": "extract_and_write",
+                            "arguments": { "path": path }
+                        }));
+                        search_from = abs_start + end_offset + 3;
+                        continue;
+                    }
+                }
+
                 match serde_json::from_str::<Value>(block) {
                     Ok(val) => {
                         if val.get("tool").is_some() && val.get("arguments").is_some() {

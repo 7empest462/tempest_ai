@@ -39,3 +39,5 @@ zeroize = { version = "1.8", features = ["derive"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 arboard = "3.4"
+[build-dependencies]
+chrono = "0.4"
