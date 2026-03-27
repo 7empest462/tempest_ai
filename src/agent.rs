@@ -150,15 +150,8 @@ impl Agent {
             }
             self.history.retain(|m| m.content != "[trimmed]");
 
-            // 📏 Hard-cap history to prevent context overflow (keep system + last 39 messages)
-            const MAX_HISTORY: usize = 40;
-            if self.history.len() > MAX_HISTORY {
-                let system_msg = self.history[0].clone();
-                let keep_from = self.history.len() - (MAX_HISTORY - 1);
-                let mut new_history = vec![system_msg];
-                new_history.extend_from_slice(&self.history[keep_from..]);
-                self.history = new_history;
-            }
+            // 🧠 Compress old history when it gets too long (instead of hard-dropping)
+            let _ = self.auto_summarize_memory().await;
 
             // Build the request with moderate options (8k context)
             let options = GenerationOptions::default()
@@ -330,8 +323,8 @@ impl Agent {
     }
 
     async fn auto_summarize_memory(&mut self) -> Result<()> {
-        let max_history = 15;
-        let num_to_summarize = 10;
+        let max_history = 40;
+        let num_to_summarize = 20;
         
         let chat_messages = self.history.len().saturating_sub(1);
         
