@@ -732,8 +732,13 @@ impl AgentTool for ExtractAndWriteTool {
         let mut code_block = "";
         let skip_langs = ["json", "sh", "bash", "shell", "zsh"];
         
+        // Collect odd indices (actual code blocks between ``` markers)
+        // CRITICAL: (1..len).rev().step_by(2) gives EVEN indices, which is WRONG.
+        // We must use step_by(2) FIRST to get odd indices, then reverse.
+        let odd_indices: Vec<usize> = (1..blocks.len()).step_by(2).collect();
+        
         // Pass 1: Prefer language-tagged blocks (python, rust, js, etc.), skip json/sh/bash
-        for i in (1..blocks.len()).rev().step_by(2) {
+        for &i in odd_indices.iter().rev() {
             let b = blocks[i].trim();
             let first_line = b.lines().next().unwrap_or("");
             let is_skippable = skip_langs.iter().any(|s| first_line.starts_with(s));
@@ -746,7 +751,7 @@ impl AgentTool for ExtractAndWriteTool {
         
         // Pass 2: If no language-tagged block found, take any non-skip block
         if code_block.is_empty() {
-            for i in (1..blocks.len()).rev().step_by(2) {
+            for &i in odd_indices.iter().rev() {
                 let b = blocks[i].trim();
                 let first_line = b.lines().next().unwrap_or("");
                 let is_skippable = skip_langs.iter().any(|s| first_line.starts_with(s));
