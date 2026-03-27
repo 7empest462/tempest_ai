@@ -459,7 +459,9 @@ impl Agent {
                             }
                         }
                         
-                        return Err(format!("[System Guardrail] Invalid JSON in tool call. If you are trying to save a file, use: ```json\n{{ \"tool\": \"extract_and_write\", \"arguments\": {{ \"path\": \"filename\" }} }}\n```"));
+                        // 🚨 HARD BREAK: If we actually SAW a JSON block but couldn't parse or rescue it, we MUST error. 
+                        // Returning an empty call list at this point would let the model continue thinking it succeeded.
+                        return Err(format!("[System Guardrail] CRITICAL: Invalid JSON in code block. I saw a ```json block but was unable to parse it correctly. If you are trying to save code, use: ```json\n{{ \"tool\": \"extract_and_write\", \"arguments\": {{ \"path\": \"filename\" }} }}\n```"));
                     }
                 }
                 search_from = abs_start + end_offset + 3;
@@ -471,9 +473,10 @@ impl Agent {
         // Final fallback: If no JSON tools found but model wrote a code block AND mentioned "save"/"extract"/"write"
         if calls.is_empty() {
             let has_code = content.contains("```");
+            let is_json_intent = content.contains("```json"); // Special check for malformed intents
             let wants_to_save = content.to_lowercase().contains("save") || content.to_lowercase().contains("extract") || content.to_lowercase().contains("write");
             
-            if has_code && wants_to_save {
+            if (has_code || is_json_intent) && wants_to_save {
                 let re_path = regex::Regex::new(r#"(?:path|to|file|as)\s*['":\s]+([^"'\s,]+)"#).unwrap();
                 if let Some(cap) = re_path.captures(content) {
                     let path = cap.get(1).unwrap().as_str().trim_matches('.');
@@ -485,6 +488,11 @@ impl Agent {
                         }));
                         return Ok(calls);
                     }
+                }
+                
+                // If it looks like a save intent but we can't find a path, don't just finish silently.
+                if is_json_intent {
+                    return Err("[System Guardrail] I detected a ```json block but could not parse any valid tool arguments. Please specify the tool and arguments clearly.".to_string());
                 }
             }
         }
