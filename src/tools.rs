@@ -53,6 +53,10 @@ impl AgentTool for RunCommandTool {
                 "command": {
                     "type": "string",
                     "description": "The command string to execute (e.g., 'ls -la' or 'cat Cargo.toml')."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional absolute path to use as the current working directory for the command."
                 }
             },
             "required": ["command"]
@@ -64,18 +68,29 @@ impl AgentTool for RunCommandTool {
             .and_then(|c| c.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
 
-        println!(">> [TOOL CALL: run_command] Executing: {}", cmd);
+        let cwd = args.get("cwd").and_then(|c| c.as_str());
+
+        if let Some(c) = cwd {
+            println!(">> [TOOL CALL: run_command] Executing: {} (in {})", cmd, c);
+        } else {
+            println!(">> [TOOL CALL: run_command] Executing: {}", cmd);
+        }
         
         let current_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
         
-        let mut child = Command::new("sh")
-            .env("PATH", new_path)
-            .arg("-c")
-            .arg(cmd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+        let mut command = std::process::Command::new("sh");
+        command.env("PATH", new_path)
+               .arg("-c")
+               .arg(cmd)
+               .stdout(std::process::Stdio::piped())
+               .stderr(std::process::Stdio::piped());
+
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+
+        let mut child = command.spawn()?;
 
         // Wait with timeout
         let timeout_duration = std::time::Duration::from_secs(15);
