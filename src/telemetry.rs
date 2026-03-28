@@ -45,12 +45,41 @@ impl AgentTool for AdvancedSystemOracleTool {
         }
 
         out.push_str("\n🔥 COMPONENTS & THERMALS\n");
-        let components = Components::new_with_refreshed_list();
-        if components.is_empty() {
-            out.push_str("(No thermal sensors exposed to user space)\n");
+        #[cfg(target_os = "linux")]
+        {
+            // Direct sysfs/hwmon reading for Linux
+            let mut entries = std::fs::read_dir("/sys/class/thermal").ok();
+            let mut found = false;
+            if let Some(dirs) = entries {
+                for dir in dirs.flatten() {
+                    let path = dir.path();
+                    let type_path = path.join("type");
+                    let temp_path = path.join("temp");
+                    
+                    if let (Ok(t), Ok(v)) = (std::fs::read_to_string(type_path), std::fs::read_to_string(temp_path)) {
+                        let temp_f = v.trim().parse::<f32>().unwrap_or(0.0) / 1000.0;
+                        out.push_str(&format!("- {}: {:.2}°C\n", t.trim(), temp_f));
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                out.push_str("(No sysfs thermal data found. Reverting to basic sensors...)\n");
+                let components = Components::new_with_refreshed_list();
+                for comp in &components {
+                    out.push_str(&format!("- {}: {:?}°C\n", comp.label(), comp.temperature()));
+                }
+            }
         }
-        for comp in &components {
-            out.push_str(&format!("- {}: {:?}°C (Max: {:?}°C)\n", comp.label(), comp.temperature(), comp.max()));
+        #[cfg(not(target_os = "linux"))]
+        {
+            let components = Components::new_with_refreshed_list();
+            if components.is_empty() {
+                out.push_str("(No thermal sensors exposed to user space)\n");
+            }
+            for comp in &components {
+                out.push_str(&format!("- {}: {:?}°C (Max: {:?}°C)\n", comp.label(), comp.temperature(), comp.max()));
+            }
         }
         
         out.push_str("\n🕸️  NETWORKS\n");

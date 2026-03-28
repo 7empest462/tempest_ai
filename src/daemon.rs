@@ -23,25 +23,36 @@ pub async fn run_daemon() {
         if used_ram >= memory_threshold_mb {
             println!("[{}] ⚠️ CRITICAL RAM SPIKE: {} / {} MB", Local::now().format("%H:%M:%S"), used_ram, total_ram);
             let message = format!("CRITICAL RAM SPIKE: {} MB currently mapped. System integrity in danger.", used_ram);
-            notify_macos("Tempest AI Daemon", &message);
+            notify_system("Tempest AI Daemon", &message);
         }
 
-        // We could also do PNET packet drops here, but for now just system stats.
-        
         // Wait 5 minutes before the next sweep
         tokio::time::sleep(Duration::from_secs(300)).await;
     }
 }
 
-fn notify_macos(title: &str, message: &str) {
-    let script = format!(
-        "display notification \"{}\" with title \"{}\" sound name \"Basso\"",
-        message.replace('"', "\\\""),
-        title.replace('"', "\\\"")
-    );
+fn notify_system(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\" sound name \"Basso\"",
+            message.replace('"', "\\\""),
+            title.replace('"', "\\\"")
+        );
 
-    let _ = Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output();
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("notify-send")
+            .arg("-u")
+            .arg("critical")
+            .arg(title)
+            .arg(message)
+            .output();
+    }
 }

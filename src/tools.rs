@@ -1801,3 +1801,54 @@ impl AgentTool for RecallMemoryTool {
         }
     }
 }
+pub struct SystemdManagerTool;
+
+#[async_trait::async_trait]
+impl AgentTool for SystemdManagerTool {
+    fn name(&self) -> &'static str { "systemd_manager" }
+    fn description(&self) -> &'static str { "Natively monitor and manage Systemd services on Linux. Use 'action': 'list' to see all units, or 'start'/'stop'/'restart'/'status' with a 'unit' name. REQUIRES LINUX HOST." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["list", "start", "stop", "restart", "status"], "description": "The systemctl action to perform." },
+                "unit": { "type": "string", "description": "The name of the service unit (e.g. 'nginx.service')." }
+            },
+            "required": ["action"]
+        })
+    }
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list");
+            let unit = args.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+
+            let mut cmd = std::process::Command::new("systemctl");
+            match action {
+                "list" => {
+                    cmd.args(["list-units", "--type=service", "--all", "--no-pager"]);
+                }
+                "start" | "stop" | "restart" | "status" => {
+                    if unit.is_empty() { return Ok("Error: Unit name required for this action.".to_string()); }
+                    cmd.args([action, unit]);
+                }
+                _ => return Ok("Error: Unsupported action.".to_string()),
+            }
+
+            let output = cmd.output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if !stderr.is_empty() {
+                Ok(format!("Systemd Output:\n{}\nErrors:\n{}", stdout, stderr))
+            } else {
+                Ok(format!("Systemd Output:\n{}", stdout))
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = args;
+            Ok("Error: The systemd_manager tool is exclusive to Linux environments. Your host OS does not use systemd.".to_string())
+        }
+    }
+}

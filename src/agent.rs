@@ -48,6 +48,7 @@ impl Agent {
                 Box::new(crate::telemetry::AdvancedSystemOracleTool),
                 Box::new(crate::telemetry::KernelDiagnosticTool),
                 Box::new(crate::telemetry::NetworkSnifferTool),
+                Box::new(crate::tools::SystemdManagerTool),
                 Box::new(RunCommandTool),
                 Box::new(ReadFileTool),
                 Box::new(WriteFileTool),
@@ -166,13 +167,11 @@ impl Agent {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn clear_history(&mut self) {
         self.history.clear();
         let _ = std::fs::remove_file(&self.history_path);
     }
 
-    #[allow(dead_code)]
     pub async fn run(&mut self, initial_user_prompt: String) -> Result<()> {
         println!("{}", "=".repeat(60).blue());
         let build_time = env!("BUILD_TIME");

@@ -32,6 +32,10 @@ struct Cli {
     /// Run the Tempest Headless Background Watcher
     #[arg(long)]
     daemon: bool,
+
+    /// Run the original Tempest CLI (Command Line Interface) mode
+    #[arg(short = 'c', long)]
+    cli: bool,
 }
 
 #[allow(dead_code)]
@@ -97,16 +101,6 @@ async fn main() -> Result<()> {
     if cli.no_color {
         colored::control::set_override(false);
     }
-
-    // Initialize structured logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
-        )
-        .with_target(false)
-        .compact()
-        .init();
 
     let config = load_config(cli.config.as_deref());
 
@@ -179,7 +173,13 @@ FORMAT: Output a JSON block to call a tool:
     }
     
     let _ = agent.load_history();
+
+    if cli.cli {
+        run_cli_mode(agent).await?;
+        return Ok(());
+    }
     
+    // Default to TUI mode
     let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(100);
 
@@ -262,5 +262,43 @@ FORMAT: Output a JSON block to call a tool:
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
     
+    Ok(())
+}
+
+async fn run_cli_mode(mut agent: Agent) -> Result<()> {
+    use rustyline::DefaultEditor;
+    let mut rl = DefaultEditor::new()?;
+    
+    println!("{}", "=".repeat(60).blue());
+    println!("{} {} Mode: ON", "🚀".green(), "Tempest Command".bold());
+    println!("Type /help for internal commands or /quit to exit.");
+    println!("{}", "=".repeat(60).blue());
+
+    loop {
+        let readline = rl.readline(">> ");
+        match readline {
+            Ok(line) => {
+                let p = line.trim();
+                if p.is_empty() { continue; }
+                let _ = rl.add_history_entry(p);
+                
+                if p == "/quit" || p == "/exit" { break; }
+                if p == "/clear" {
+                    agent.clear_history();
+                    println!("{} History wiped.", "🧹".yellow());
+                    continue;
+                }
+                
+                if let Err(e) = agent.run(p.to_string()).await {
+                    println!("{} {}", "❌ Error:".red().bold(), e);
+                }
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) | Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(err) => {
+                println!("Error: {:?}", err);
+                break;
+            }
+        }
+    }
     Ok(())
 }
