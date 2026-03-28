@@ -4,6 +4,7 @@ mod error;
 mod memory;
 mod tools;
 mod hardware;
+mod telemetry;
 
 use agent::Agent;
 use anyhow::Result;
