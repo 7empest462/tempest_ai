@@ -202,13 +202,27 @@ impl Agent {
                 self.history.clone(),
             ).options(options);
 
-            println!("{}", "📡 Connected to Ollama. Streaming response...".dimmed());
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+            spinner.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✔"])
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap()
+            );
+            spinner.set_message("📡 Connected to Ollama. Thinking...".dimmed().to_string());
+
             let mut stream = self.ollama.send_chat_messages_stream(request).await?;
             let mut full_content = String::new();
             let mut in_thinking = false;
+            let mut first_token = true;
 
-            print!("\n"); 
             while let Some(res) = stream.next().await {
+                if first_token {
+                    spinner.finish_and_clear();
+                    first_token = false;
+                    print!("\n");
+                }
                 let chunk = res.map_err(|e| anyhow::anyhow!("Ollama stream error: {:?}", e))?;
                 let text = chunk.message.content;
                 full_content.push_str(&text);
@@ -269,12 +283,10 @@ impl Agent {
 
                             let tool_result_str;
                             if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
-                                println!("\n{} {}", "🛠️  Attempting to run:".magenta().bold(), tool_name);
-                                
                                 let mut allowed = true;
                                 let mut feedback = String::new();
                                 if tool.requires_confirmation() {
-                                    println!("{} \n{}", "⚠️  Agent wants to execute:".yellow().bold(), serde_json::to_string_pretty(args).unwrap_or_default().cyan());
+                                    println!("\n{} \n{}", "⚠️  Agent wants to execute:".yellow().bold(), serde_json::to_string_pretty(args).unwrap_or_default().cyan());
                                     print!("Allow? [Y/n]: ");
                                     let _ = std::io::Write::flush(&mut std::io::stdout());
                                     let mut input = String::new();
@@ -285,25 +297,40 @@ impl Agent {
                                             if ans != "n" && ans != "no" { feedback = input.trim().to_string(); }
                                         }
                                     }
+                                } else {
+                                    println!(); // Add a newline before auto-executing tools
                                 }
 
                                 if !allowed {
                                     tool_result_str = if feedback.is_empty() { "Error: User denied permission.".to_string() } else { format!("Error: User feedback: '{}'", feedback) };
                                 } else {
+                                    let tool_spinner = indicatif::ProgressBar::new_spinner();
+                                    tool_spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+                                    tool_spinner.set_style(
+                                        indicatif::ProgressStyle::default_spinner()
+                                            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✔", "❌"])
+                                            .template("{spinner:.magenta} {msg}")
+                                            .unwrap()
+                                    );
+                                    tool_spinner.set_message(format!("{} {}", "Executing tool:".magenta().bold(), tool_name.cyan()));
+
                                     match tool.execute(args, &content).await {
                                         Ok(res) => {
-                                            println!("{}", "✅ Tool execution successful".green());
+                                            tool_spinner.finish_and_clear();
+                                            println!("{} {} {}", "✔".green().bold(), "Tool execution successful:".green(), tool_name.cyan());
                                             tool_result_str = res;
                                         }
                                         Err(e) => {
+                                            tool_spinner.finish_and_clear();
                                             let err_str = format!("{}", e);
-                                            println!("{} {}", "❌ Tool execution failed:".red(), err_str);
+                                            println!("{} {} {}", "❌".red().bold(), "Tool execution failed:".red(), err_str);
                                             let retry_hint = if err_str.contains("403") { " [HINT: Try a different URL.]" } 
                                                 else if err_str.contains("404") { " [HINT: Page not found. Try searching again.]" }
                                                 else if err_str.contains("timeout") { " [HINT: Server slow. Use network_check.]" }
                                                 else { "" };
                                             tool_result_str = format!("Error: {}{}", e, retry_hint);
                                         }
+
                                     }
                                 }
                             } else {
