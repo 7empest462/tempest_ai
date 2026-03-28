@@ -3,6 +3,7 @@ mod crypto;
 mod error;
 mod memory;
 mod tools;
+mod hardware;
 
 use agent::Agent;
 use anyhow::Result;

@@ -39,5 +39,10 @@ zeroize = { version = "1.8", features = ["derive"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 arboard = "3.4"
+plotters = "0.3.7"
 [build-dependencies]
 chrono = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nvml-wrapper = "0.12.0"
+procfs = "0.18.0"

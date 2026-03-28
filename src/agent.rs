@@ -40,6 +40,9 @@ impl Agent {
             tools: vec![
                 Box::new(crate::tools::StoreMemoryTool::new(memory_store.clone())),
                 Box::new(crate::tools::RecallMemoryTool::new(memory_store.clone())),
+                Box::new(crate::hardware::LinuxProcessAnalyzerTool),
+                Box::new(crate::hardware::GpuDiagnosticsTool),
+                Box::new(crate::hardware::TelemetryChartTool),
                 Box::new(RunCommandTool),
                 Box::new(ReadFileTool),
                 Box::new(WriteFileTool),
