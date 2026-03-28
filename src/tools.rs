@@ -804,6 +804,10 @@ impl AgentTool for ExtractAndWriteTool {
                 code_block
             };
 
+            if clean_code.trim().is_empty() {
+                anyhow::bail!("CRITICAL ERROR: The extracted code block was empty! You must write your actual code inside the triple backticks BEFORE calling this tool.");
+            }
+
             if let Some(parent) = std::path::PathBuf::from(path).parent() {
                 if !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent)?;
