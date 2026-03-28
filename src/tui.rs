@@ -146,22 +146,24 @@ fn ui(f: &mut Frame, app: &mut App) {
         let (prefix, color) = if is_user { ("You: ", Color::Blue) } else { ("Tempest: ", Color::Cyan) };
         
         let mut first = true;
+        let mut prefix_added = false;
+        
         for line in text.split('\n') {
             let content = if first && text.starts_with(prefix) {
                 first = false;
-                text[prefix.len()..].to_string()
+                &text[prefix.len()..]
             } else {
-                line.to_string()
+                first = false;
+                line
             };
 
-            let mut current = content.as_str();
-            let mut prefix_added = false;
+            let mut current = content;
 
             while current.len() > chat_width {
                 let split_idx = current.char_indices().nth(chat_width).map(|(i, _)| i).unwrap_or(current.len());
                 let (chunk, rest) = current.split_at(split_idx);
                 
-                let line_content = if !prefix_added && is_user == (text.starts_with(prefix)) {
+                let line_content = if !prefix_added && text.starts_with(prefix) {
                     prefix_added = true;
                     Line::from(vec![
                         Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
@@ -176,6 +178,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             
             let final_line = if !prefix_added && text.starts_with(prefix) {
+                prefix_added = true;
                 Line::from(vec![
                     Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::raw(current.to_string()),
