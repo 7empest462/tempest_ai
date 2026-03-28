@@ -330,25 +330,8 @@ impl Agent {
                 }
                 Ok(_) => {
                     guardrail_retries = 0; // Reset on clean response
-                    // Only nudge if the model outputs a non-shell code block without tool calls.
-                    // Shell blocks (sh, bash, shell, zsh) are allowed as suggestions.
-                    let has_non_shell_code = content.contains("```") 
-                        && !content.contains("```sh") 
-                        && !content.contains("```bash") 
-                        && !content.contains("```shell")
-                        && !content.contains("```zsh");
-                    if !executed_tools && has_non_shell_code && !content.to_lowercase().contains("finished task") {
-                        guardrail_retries += 1;
-                        if guardrail_retries >= MAX_GUARDRAIL_RETRIES {
-                            println!("\n{}", "🛑 Max nudge retries reached. Stopping.".red().bold());
-                            break;
-                        }
-                        println!("\n{}", "⚠️  Agent provided code but forgot tools. Nudging...".yellow().bold());
-                        let nudge = "[System Guardrail] You provided code but didn't use tools like `extract_and_write`. YOU MUST USE TOOLS. Rewrite your response using tool calls.".to_string();
-                        self.history.push(ChatMessage::new(MessageRole::User, nudge));
-                        let _ = self.save_history();
-                        continue;
-                    }
+                    // We removed the legacy string-matching nudge here because `extract_tool_calls`
+                    // now has a much smarter logic to identify actual unsaved code vs informational blocks.
                 }
             }
 
