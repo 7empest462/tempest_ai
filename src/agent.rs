@@ -689,6 +689,9 @@ impl Agent {
                     let _ = self.save_history();
                 }
 
+                // Flush the stream token buffer to the permanent UI chat log BEFORE tool execution
+                let _ = tx.send(crate::tui::AgentEvent::Done).await;
+
                 let mut executed_tools = false;
                 match self.extract_tool_calls(&full_content) {
                     Ok(tool_calls) if !tool_calls.is_empty() => {
@@ -737,7 +740,6 @@ impl Agent {
                 }
 
                 if !executed_tools {
-                    let _ = tx.send(crate::tui::AgentEvent::Done).await;
                     break;
                 }
             } // end loop
