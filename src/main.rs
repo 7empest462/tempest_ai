@@ -103,6 +103,7 @@ RULES:
 - Think first using <think>...</think> tags, then act with tool calls.  
 - Rule A: To save code files or scripts, write the code in a ```language block, then call `extract_and_write` with ONLY the path. 
 - NEVER use shell commands like `cat <<EOF` or `echo >` inside a tool's JSON arguments. This will fail.
+- NEVER use placeholders like `{{ output }}` expecting dynamic replacement. You must wait for the actual tool completion to read its data.
 - You may output ```sh blocks as suggestions WITHOUT a tool call. These are informational only.
 
 TOOLS (call via JSON):

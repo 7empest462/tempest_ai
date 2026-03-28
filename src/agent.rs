@@ -533,17 +533,20 @@ impl Agent {
         if calls.is_empty() && !content.contains("tool") {
             let blocks: Vec<&str> = content.split("```").collect();
             for i in (1..blocks.len()).step_by(2) {
-                let b = blocks[i].trim();
-                let lines = b.lines().count();
-                let first_line = b.lines().next().unwrap_or("").trim().to_lowercase();
+                let b_orig = blocks[i];
+                let first_newline_idx = b_orig.find('\n').unwrap_or(b_orig.len());
+                let lang_tag = b_orig[..first_newline_idx].trim().to_lowercase();
+                
+                let b_trimmed = b_orig.trim();
+                let lines = b_trimmed.lines().count();
                 
                 let ignore_tags = ["json", "", "txt", "text", "log", "output", "console", "markdown", "md", "sh", "bash", "zsh"];
                 
-                if lines > 3 && !ignore_tags.contains(&first_line.as_str()) {
+                if lines > 3 && !ignore_tags.contains(&lang_tag.as_str()) {
                      return Err("You provided a code block but did not call a tool. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"filename\" } }\n```".to_string());
                 }
                 
-                if lines > 5 && ["sh", "bash", "zsh"].contains(&first_line.as_str()) {
+                if lines > 5 && ["sh", "bash", "zsh"].contains(&lang_tag.as_str()) {
                      return Err("You provided a script but did not call a tool to save it. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"script.sh\" } }\n```".to_string());
                 }
             }
