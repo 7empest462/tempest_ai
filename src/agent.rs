@@ -535,9 +535,11 @@ impl Agent {
             for i in (1..blocks.len()).step_by(2) {
                 let b = blocks[i].trim();
                 let lines = b.lines().count();
-                let first_line = b.lines().next().unwrap_or("").to_lowercase();
+                let first_line = b.lines().next().unwrap_or("").trim().to_lowercase();
                 
-                if lines > 3 && first_line != "json" && !["sh", "bash", "zsh"].contains(&first_line.as_str()) {
+                let ignore_tags = ["json", "", "txt", "text", "log", "output", "console", "markdown", "md", "sh", "bash", "zsh"];
+                
+                if lines > 3 && !ignore_tags.contains(&first_line.as_str()) {
                      return Err("You provided a code block but did not call a tool. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"filename\" } }\n```".to_string());
                 }
                 
