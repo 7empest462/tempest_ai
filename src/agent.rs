@@ -28,13 +28,18 @@ pub struct Agent {
     theme_set: ThemeSet,
 }
 
+use std::sync::{Arc, Mutex};
+use crate::memory::MemoryStore;
+
 impl Agent {
-    pub fn new(model: String, system_prompt: String, history_path: String) -> Self {
+    pub fn new(model: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>) -> Self {
         let mut agent = Agent {
             ollama: Ollama::default(),
             model,
             history: vec![],
             tools: vec![
+                Box::new(crate::tools::StoreMemoryTool::new(memory_store.clone())),
+                Box::new(crate::tools::RecallMemoryTool::new(memory_store.clone())),
                 Box::new(RunCommandTool),
                 Box::new(ReadFileTool),
                 Box::new(WriteFileTool),
@@ -74,7 +79,16 @@ impl Agent {
 
         // Dynamically inject tool descriptions into the system prompt
         let tool_desc = agent.get_tool_descriptions();
-        agent.system_prompt = system_prompt.replace("{tool_descriptions}", &tool_desc);
+        let mut prompt = system_prompt.replace("{tool_descriptions}", &tool_desc);
+
+        if let Ok(topics) = memory_store.lock().unwrap().list_topics() {
+            if !topics.is_empty() {
+                let topics_str = topics.join(", ");
+                prompt.push_str(&format!("\n\n[SYSTEM MEMORY]: You have the following topics stored in your encrypted long-term memory: [{}]. Use the `recall_memory` tool to retrieve their full contents if they seem relevant.", topics_str));
+            }
+        }
+
+        agent.system_prompt = prompt;
         
         // Add system message to history
         agent.history.push(ChatMessage::new(MessageRole::System, agent.system_prompt.clone()));

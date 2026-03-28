@@ -1,6 +1,7 @@
 mod agent;
 mod crypto;
 mod error;
+mod memory;
 mod tools;
 
 use agent::Agent;
@@ -134,7 +135,30 @@ FORMAT: Output a JSON block to call a tool:
 
     let history_path = config.history_path.unwrap_or_else(|| "history.json".to_string());
     
-    let mut agent = Agent::new(model, system_prompt, history_path);
+    let mut config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    config_dir.push("tempest_ai");
+    let key_path = config_dir.join("master.key");
+    
+    let passphrase = if key_path.exists() {
+        std::fs::read_to_string(&key_path).unwrap_or_else(|_| "fallback_key".to_string())
+    } else {
+        let new_key = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
+        let _ = std::fs::create_dir_all(&config_dir);
+        let _ = std::fs::write(&key_path, &new_key);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(mut perms) = std::fs::metadata(&key_path).map(|m| m.permissions()) {
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&key_path, perms);
+            }
+        }
+        new_key
+    };
+
+    let memory_store = std::sync::Arc::new(std::sync::Mutex::new(crate::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
+
+    let mut agent = Agent::new(model, system_prompt, history_path, memory_store.clone());
     
     if let Err(e) = agent.check_connection().await {
         println!("{}", format!("Agent Error: {}", e).red());

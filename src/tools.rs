@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::collections::HashMap;
 use std::{fs, path::PathBuf};
+use crate::memory::MemoryStore;
 
 type ProcessLogs = Arc<Mutex<String>>;
 
@@ -1730,5 +1731,73 @@ impl AgentTool for DownloadFileTool {
         }
         std::fs::write(&path, &bytes)?;
         Ok(format!("✅ Downloaded {} bytes from {} → {}", bytes.len(), url, path))
+    }
+}
+
+pub struct StoreMemoryTool {
+    mem: Arc<Mutex<MemoryStore>>,
+}
+
+impl StoreMemoryTool {
+    pub fn new(mem: Arc<Mutex<MemoryStore>>) -> Self { Self { mem } }
+}
+
+#[async_trait::async_trait]
+impl AgentTool for StoreMemoryTool {
+    fn name(&self) -> &'static str { "store_memory" }
+    fn description(&self) -> &'static str { "Save a crucial fact, preference, API key, or architectural detail to your long-term encrypted memory database. You will retain this fact forever across reboots." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "topic": { "type": "string", "description": "A short, unique keyword identifying this memory (e.g., 'user_github_email', 'project_build_commands')." },
+                "content": { "type": "string", "description": "The detailed fact to remember." }
+            },
+            "required": ["topic", "content"]
+        })
+    }
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let topic = args.get("topic").and_then(|t| t.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'topic'"))?;
+        let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
+        println!(">> [TOOL CALL: store_memory] Saving fact to brain under topic: {}", topic);
+        self.mem.lock().unwrap().store(topic, content)?;
+        Ok(format!("Memory '{}' stored securely in the encrypted brain.", topic))
+    }
+}
+
+pub struct RecallMemoryTool {
+    mem: Arc<Mutex<MemoryStore>>,
+}
+
+impl RecallMemoryTool {
+    pub fn new(mem: Arc<Mutex<MemoryStore>>) -> Self { Self { mem } }
+}
+
+#[async_trait::async_trait]
+impl AgentTool for RecallMemoryTool {
+    fn name(&self) -> &'static str { "recall_memory" }
+    fn description(&self) -> &'static str { "Search your encrypted long-term memory database for previously saved facts." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "keyword": { "type": "string", "description": "The keyword to search for in your memory topics (use '%' for wildcard)." }
+            },
+            "required": ["keyword"]
+        })
+    }
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let keyword = args.get("keyword").and_then(|k| k.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'keyword'"))?;
+        println!(">> [TOOL CALL: recall_memory] Searching brain for: {}", keyword);
+        let results = self.mem.lock().unwrap().recall(keyword)?;
+        if results.is_empty() {
+            Ok(format!("No memories found matching '{}'.", keyword))
+        } else {
+            let mut out = format!("Recalled {} memories:\n", results.len());
+            for (t, c) in results {
+                out.push_str(&format!("- [{}]: {}\n", t, c));
+            }
+            Ok(out)
+        }
     }
 }
