@@ -104,7 +104,7 @@ pub struct TelemetryChartTool;
 #[async_trait::async_trait]
 impl AgentTool for TelemetryChartTool {
     fn name(&self) -> &'static str { "generate_telemetry_chart" }
-    fn description(&self) -> &'static str { "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes." }
+    fn description(&self) -> &'static str { "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes. CRITICAL: data_points MUST be raw numbers (e.g. 0.707), DO NOT put JavaScript math expressions like Math.sin() in the JSON." }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -115,7 +115,7 @@ impl AgentTool for TelemetryChartTool {
                 "series_name": { "type": "string", "description": "Name of the line series" },
                 "data_points": {
                     "type": "array",
-                    "description": "An array of precise [X, Y] arrays (e.g. [[1, 5], [2, 10], [3, 20]]).",
+                    "description": "An array of precise [X, Y] arrays (e.g. [[1, 5], [2, 10], [3, 20]]). CRITICAL: MUST BE RAW FLOATS. DO NOT use expressions like Math.sin()",
                     "items": {
                         "type": "array",
                         "items": { "type": "number" }
