@@ -219,7 +219,7 @@ impl Agent {
             self.history.retain(|m| m.content != "[trimmed]");
 
             // 🧠 Compress old history when it gets too long (instead of hard-dropping)
-            let _ = self.auto_summarize_memory().await;
+            let _ = self.auto_summarize_memory(false).await;
 
             // Build the request with moderate options (8k context)
             let options = GenerationOptions::default()
@@ -440,14 +440,16 @@ impl Agent {
         Ok(())
     }
 
-    async fn auto_summarize_memory(&mut self) -> Result<()> {
+    async fn auto_summarize_memory(&mut self, silent: bool) -> Result<()> {
         let max_history = 40;
         let num_to_summarize = 20;
         
         let chat_messages = self.history.len().saturating_sub(1);
         
         if chat_messages > max_history {
-            println!("\n{} {}", "🧠 Compressing old memories to preserve context window...".cyan().bold(), "");
+            if !silent {
+                println!("\n{} {}", "🧠 Compressing old memories to preserve context window...".cyan().bold(), "");
+            }
             
             let mut summary_text = String::new();
             for msg in self.history.iter().skip(1).take(num_to_summarize) {
@@ -479,7 +481,9 @@ impl Agent {
                 
                 self.history = new_history;
                 let _ = self.save_history();
-                println!("{}", "✅ Memory compression complete.".green());
+                if !silent {
+                    println!("{}", "✅ Memory compression complete.".green());
+                }
             }
         }
         Ok(())
@@ -661,7 +665,7 @@ impl Agent {
                     }
                 }
                 self.history.retain(|m| m.content != "[trimmed]");
-                let _ = self.auto_summarize_memory().await;
+                let _ = self.auto_summarize_memory(true).await;
 
                 let options = GenerationOptions::default().num_ctx(8192).num_predict(4096);
                 let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
