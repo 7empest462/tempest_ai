@@ -71,10 +71,10 @@ impl AgentTool for RunCommandTool {
 
         let cwd = args.get("cwd").and_then(|c| c.as_str());
 
-        if let Some(c) = cwd {
-            println!(">> [TOOL CALL: run_command] Executing: {} (in {})", cmd, c);
+        if let Some(_c) = cwd {
+            // println!(">> [TOOL CALL: run_command] Executing: {} (in {})", cmd, _c);
         } else {
-            println!(">> [TOOL CALL: run_command] Executing: {}", cmd);
+            // println!(">> [TOOL CALL: run_command] Executing: {}", cmd);
         }
         
         let current_path = std::env::var("PATH").unwrap_or_default();
@@ -166,7 +166,7 @@ impl AgentTool for ReadFileTool {
         let path_owned = shellexpand::tilde(path_str).to_string();
         let path = path_owned.as_str();
 
-        println!(">> [TOOL CALL: read_file] Reading: {}", path);
+        // println!(">> [TOOL CALL: read_file] Reading: {}", path);
         let content = fs::read_to_string(path)?;
         Ok(content)
     }
@@ -220,7 +220,7 @@ impl AgentTool for WriteFileTool {
             return Err(anyhow::anyhow!("[System Guardrail] CRITICAL ERROR: You attempted to write placeholder text (e.g. '...rest of file left unchanged...'). You are a machine executing a literal file-write. Placeholders will physically delete the user's code. You MUST provide the FULL, EXACT code. Re-evaluate and call the tool properly."));
         }
 
-        println!(">> [TOOL CALL: write_file] Writing to: {}", path);
+        // println!(">> [TOOL CALL: write_file] Writing to: {}", path);
         
         if let Some(parent) = PathBuf::from(path).parent() {
             fs::create_dir_all(parent)?;
@@ -263,7 +263,7 @@ impl AgentTool for ListDirTool {
         let path_owned = shellexpand::tilde(path_str).to_string();
         let path = path_owned.as_str();
             
-        println!(">> [TOOL CALL: list_dir] Listing: {}", path);
+        // println!(">> [TOOL CALL: list_dir] Listing: {}", path);
         let mut result = String::new();
         match std::fs::read_dir(path) {
             Ok(entries) => {
@@ -313,7 +313,7 @@ impl AgentTool for SearchWebTool {
 
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
-        println!(">> [TOOL CALL: search_web] Query: {}", query);
+        // println!(">> [TOOL CALL: search_web] Query: {}", query);
         
         let url = "https://lite.duckduckgo.com/lite/";
         let client = reqwest::Client::builder()
@@ -401,7 +401,7 @@ impl AgentTool for ReadUrlTool {
     
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-        println!(">> [TOOL CALL: read_url] Fetching: {}", url);
+        // println!(">> [TOOL CALL: read_url] Fetching: {}", url);
         
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -472,13 +472,13 @@ impl AgentTool for PatchFileTool {
         let path = path_owned.as_str();
         let start_line = args.get("start_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'start_line' argument"))? as usize;
         let end_line = args.get("end_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'end_line' argument"))? as usize;
-        let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
+        let content = args.get("content").and_then(|_c| _c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
 
         if content.contains("...rest of") || content.contains("left unchanged") || content.contains("... rest of") || content.contains("... existing code ...") {
             return Err(anyhow::anyhow!("[System Guardrail] CRITICAL ERROR: You attempted to write placeholder text (e.g. '...rest of file left unchanged...'). You are a machine executing a literal file-write. Placeholders will physically delete the user's code. You MUST provide the FULL, EXACT code. Re-evaluate and call the tool properly."));
         }
 
-        println!(">> [TOOL CALL: patch_file] Patching: {} from line {} to {}", path, start_line, end_line);
+        // println!(">> [TOOL CALL: patch_file] Patching: {} from line {} to {}", path, start_line, end_line);
 
         if start_line == 0 || end_line < start_line {
             anyhow::bail!("Invalid line range. Lines must be 1-indexed and start_line <= end_line.");
@@ -529,7 +529,7 @@ impl AgentTool for RunBackgroundTool {
     }
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let cmd = args.get("command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
-        println!(">> [TOOL CALL: run_background] Spawning: {}", cmd);
+        // println!(">> [TOOL CALL: run_background] Spawning: {}", cmd);
 
         use std::process::{Command, Stdio};
         use std::io::{Read, BufReader};
@@ -601,7 +601,7 @@ impl AgentTool for ReadProcessLogsTool {
     
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let pid = args.get("process_id").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'process_id' argument"))?;
-        println!(">> [TOOL CALL: read_process_logs] PID: {}", pid);
+        // println!(">> [TOOL CALL: read_process_logs] PID: {}", pid);
 
         let registry = process_registry().lock().unwrap();
         if let Some(logs) = registry.get(pid) {
@@ -644,7 +644,7 @@ impl AgentTool for SearchDirTool {
         let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
         let query = args.get("query").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'query' argument"))?;
         
-        println!(">> [TOOL CALL: search_dir] Searching for '{}' in {}", query, path);
+        // println!(">> [TOOL CALL: search_dir] Searching for '{}' in {}", query, path);
 
         // Try Ripgrep first
         let mut is_rg = true;
@@ -743,7 +743,7 @@ impl AgentTool for ExtractAndWriteTool {
         let path_owned = shellexpand::tilde(path_str).to_string();
         let path = path_owned.as_str();
 
-        println!(">> [TOOL CALL: extract_and_write] Parsing thought process for target: {}", path);
+        // println!(">> [TOOL CALL: extract_and_write] Parsing thought process for target: {}", path);
 
         let blocks: Vec<&str> = agent_content.split("```").collect();
         let mut code_block = "";
@@ -853,7 +853,7 @@ impl AgentTool for SystemInfoTool {
     }
 
     async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
-        println!(">> [TOOL CALL: system_info] Fetching hardware diagnostics...");
+        // println!(">> [TOOL CALL: system_info] Fetching hardware diagnostics...");
         let mut sys = sysinfo::System::new_all();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         sys.refresh_all();
@@ -905,7 +905,7 @@ impl AgentTool for SqliteQueryTool {
         
         let query = args.get("query").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'query' argument"))?;
 
-        println!(">> [TOOL CALL: sqlite_query] Querying: {}", db_path);
+        // println!(">> [TOOL CALL: sqlite_query] Querying: {}", db_path);
 
         let conn = rusqlite::Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -974,7 +974,7 @@ impl AgentTool for GitTool {
             }
         }
 
-        println!(">> [TOOL CALL: git_action] git {}", string_args.join(" "));
+        // println!(">> [TOOL CALL: git_action] git {}", string_args.join(" "));
 
         let output = std::process::Command::new("git")
             .current_dir(&cwd)
@@ -1022,7 +1022,7 @@ impl AgentTool for WatchDirectoryTool {
         let path = shellexpand::tilde(path_str).to_string();
         let cmd = args.get("trigger_command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'trigger_command' argument"))?.to_string();
 
-        println!(">> [TOOL CALL: watch_directory] Spawning daemon on: {}", path);
+        // println!(">> [TOOL CALL: watch_directory] Spawning daemon on: {}", path);
 
         let success_msg = format!("Successfully spawned File-Watching Daemon on directory: '{}'. It will automatically execute '{}' upon any file modifications.", path, cmd);
 
@@ -1093,7 +1093,7 @@ impl AgentTool for HttpRequestTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let method = args.get("method").and_then(|m| m.as_str()).unwrap_or("GET").to_uppercase();
         let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url' argument"))?;
-        println!(">> [TOOL CALL: http_request] {} {}", method, url);
+        // println!(">> [TOOL CALL: http_request] {} {}", method, url);
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
@@ -1160,7 +1160,7 @@ impl AgentTool for ClipboardTool {
 
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("read");
-        println!(">> [TOOL CALL: clipboard] Action: {}", action);
+        // println!(">> [TOOL CALL: clipboard] Action: {}", action);
 
         match action {
             "write" => {
@@ -1204,7 +1204,7 @@ impl AgentTool for NotifyTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let title = args.get("title").and_then(|t| t.as_str()).unwrap_or("Tempest AI");
         let message = args.get("message").and_then(|m| m.as_str()).unwrap_or("Task complete.");
-        println!(">> [TOOL CALL: notify] {} — {}", title, message);
+        // println!(">> [TOOL CALL: notify] {} — {}", title, message);
 
         let script = format!(
             "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
@@ -1258,7 +1258,7 @@ impl AgentTool for FindReplaceTool {
         let is_regex = args.get("is_regex").and_then(|r| r.as_bool()).unwrap_or(false);
         let file_pattern = args.get("file_pattern").and_then(|f| f.as_str());
 
-        println!(">> [TOOL CALL: find_replace] {} → {} in {}", find, replace, path_owned);
+        // println!(">> [TOOL CALL: find_replace] {} → {} in {}", find, replace, path_owned);
 
         let path = std::path::Path::new(&path_owned);
         let mut files_to_process: Vec<PathBuf> = vec![];
@@ -1356,7 +1356,7 @@ impl AgentTool for TreeTool {
         let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
         let path_owned = shellexpand::tilde(path_str).to_string();
         let max_depth = args.get("max_depth").and_then(|d| d.as_u64()).unwrap_or(4) as usize;
-        println!(">> [TOOL CALL: tree] {} (depth: {})", path_owned, max_depth);
+        // println!(">> [TOOL CALL: tree] {} (depth: {})", path_owned, max_depth);
 
         let skip_dirs = ["node_modules", "target", ".git", "__pycache__", ".next", "dist", "build", ".DS_Store"];
         let mut output = String::new();
@@ -1441,7 +1441,7 @@ impl AgentTool for NetworkCheckTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("ping");
         let host = args.get("host").and_then(|h| h.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'host'"))?;
-        println!(">> [TOOL CALL: network_check] {} {}", action, host);
+        // println!(">> [TOOL CALL: network_check] {} {}", action, host);
 
         match action {
             "ping" => {
@@ -1508,7 +1508,7 @@ impl AgentTool for DiffFilesTool {
         let file_b = args.get("file_b").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_b'"))?;
         let a = shellexpand::tilde(file_a).to_string();
         let b = shellexpand::tilde(file_b).to_string();
-        println!(">> [TOOL CALL: diff_files] {} vs {}", a, b);
+        // println!(">> [TOOL CALL: diff_files] {} vs {}", a, b);
 
         let output = Command::new("diff")
             .args(["-u", &a, &b])
@@ -1547,7 +1547,7 @@ impl AgentTool for KillProcessTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let pid = args.get("pid").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'pid'"))?;
         let signal = args.get("signal").and_then(|s| s.as_str()).unwrap_or("TERM");
-        println!(">> [TOOL CALL: kill_process] Sending {} to PID {}", signal, pid);
+        // println!(">> [TOOL CALL: kill_process] Sending {} to PID {}", signal, pid);
 
         let output = Command::new("kill")
             .args([&format!("-{}", signal), pid])
@@ -1582,7 +1582,7 @@ impl AgentTool for EnvVarTool {
 
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("get");
-        println!(">> [TOOL CALL: env_var] Action: {}", action);
+        // println!(">> [TOOL CALL: env_var] Action: {}", action);
 
         match action {
             "get" => {
@@ -1638,7 +1638,7 @@ impl AgentTool for ChmodTool {
         let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
         let path = shellexpand::tilde(path_str).to_string();
         let mode = args.get("mode").and_then(|m| m.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'mode'"))?;
-        println!(">> [TOOL CALL: chmod] {} {}", mode, path);
+        // println!(">> [TOOL CALL: chmod] {} {}", mode, path);
 
         let output = Command::new("chmod")
             .args([mode, &path])
@@ -1676,7 +1676,7 @@ impl AgentTool for AppendFileTool {
         let path = shellexpand::tilde(path_str).to_string();
         let content = args.get("content").and_then(|c| c.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
-        println!(">> [TOOL CALL: append_file] Appending to: {}", path);
+        // println!(">> [TOOL CALL: append_file] Appending to: {}", path);
 
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -1710,7 +1710,7 @@ impl AgentTool for DownloadFileTool {
         let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url'"))?;
         let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
         let path = shellexpand::tilde(path_str).to_string();
-        println!(">> [TOOL CALL: download_file] {} → {}", url, path);
+        // println!(">> [TOOL CALL: download_file] {} → {}", url, path);
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
@@ -1759,7 +1759,7 @@ impl AgentTool for StoreMemoryTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let topic = args.get("topic").and_then(|t| t.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'topic'"))?;
         let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
-        println!(">> [TOOL CALL: store_memory] Saving fact to brain under topic: {}", topic);
+        // println!(">> [TOOL CALL: store_memory] Saving fact to brain under topic: {}", topic);
         self.mem.lock().unwrap().store(topic, content)?;
         Ok(format!("Memory '{}' stored securely in the encrypted brain.", topic))
     }
@@ -1788,7 +1788,7 @@ impl AgentTool for RecallMemoryTool {
     }
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let keyword = args.get("keyword").and_then(|k| k.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'keyword'"))?;
-        println!(">> [TOOL CALL: recall_memory] Searching brain for: {}", keyword);
+        // println!(">> [TOOL CALL: recall_memory] Searching brain for: {}", keyword);
         let results = self.mem.lock().unwrap().recall(keyword)?;
         if results.is_empty() {
             Ok(format!("No memories found matching '{}'.", keyword))

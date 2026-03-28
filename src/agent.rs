@@ -24,7 +24,9 @@ pub struct Agent {
     history_path: String,
     #[allow(dead_code)]
     pub session_id: String,
+    #[allow(dead_code)]
     syntax_set: SyntaxSet,
+    #[allow(dead_code)]
     theme_set: ThemeSet,
 }
 
@@ -164,11 +166,13 @@ impl Agent {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn clear_history(&mut self) {
         self.history.clear();
         let _ = std::fs::remove_file(&self.history_path);
     }
 
+    #[allow(dead_code)]
     pub async fn run(&mut self, initial_user_prompt: String) -> Result<()> {
         println!("{}", "=".repeat(60).blue());
         let build_time = env!("BUILD_TIME");
@@ -496,7 +500,7 @@ impl Agent {
                     let re_path = regex::Regex::new(r#""path"\s*:\s*"(./)?([^"]+)""#).unwrap();
                     if let Some(p_cap) = re_path.captures(block) {
                         let path = p_cap.get(2).unwrap().as_str();
-                         println!("{}", format!("🚑 Pre-Parse Rescue: Detected shell-injection intent for '{}'. Forcing extract_and_write.", path).yellow());
+                         // println!("{}", format!("🚑 Pre-Parse Rescue: Detected shell-injection intent for '{}'. Forcing extract_and_write.", path).yellow());
                          calls.push(serde_json::json!({
                             "tool": "extract_and_write",
                             "arguments": { "path": path }
@@ -532,7 +536,7 @@ impl Agent {
                                 if let Some(content_val) = args.and_then(|a| a.get("content")).and_then(|c| c.as_str()) {
                                     if content_val.contains("<<EOF") || content_val.contains("cat >") || content_val.contains("$(") {
                                         let path = args.and_then(|a| a.get("path")).and_then(|p| p.as_str()).unwrap_or("file");
-                                        println!("{}", "🚑 Auto-Rescue: Redirecting shell-injection 'write_file' → 'extract_and_write'".yellow());
+                                        // println!("{}", "🚑 Auto-Rescue: Redirecting shell-injection 'write_file' → 'extract_and_write'".yellow());
                                         calls.push(serde_json::json!({
                                             "tool": "extract_and_write",
                                             "arguments": { "path": path }
@@ -556,7 +560,7 @@ impl Agent {
                             let path = p_cap.get(1).unwrap().as_str();
                             
                             if !tool_name.is_empty() && !path.is_empty() {
-                                println!("{}", format!("🚑 Emergency Recovery: Rescued '{}' for '{}' from malformed JSON.", tool_name, path).yellow());
+                                // println!("{}", format!("🚑 Emergency Recovery: Rescued '{}' for '{}' from malformed JSON.", tool_name, path).yellow());
                                 let target_tool = if tool_name == "write_file" { "extract_and_write" } else { tool_name };
                                 calls.push(serde_json::json!({
                                     "tool": target_tool,
@@ -589,7 +593,7 @@ impl Agent {
                 if let Some(cap) = re_path.captures(content) {
                     let path = cap.get(1).unwrap().as_str().trim_matches('.');
                     if !path.is_empty() && path.contains('.') {
-                         println!("{}", format!("🚑 Heuristic Recovery: Detected intent to save '{}'. Triggering extract_and_write.", path).yellow());
+                         // println!("{}", format!("🚑 Heuristic Recovery: Detected intent to save '{}'. Triggering extract_and_write.", path).yellow());
                          calls.push(serde_json::json!({
                             "tool": "extract_and_write",
                             "arguments": { "path": path }
@@ -629,5 +633,116 @@ impl Agent {
         }
         
         Ok(calls)
+    }
+
+    pub async fn run_tui_mode(&mut self, mut user_rx: tokio::sync::mpsc::Receiver<String>, tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>) -> Result<()> {
+        let full_system_prompt = self.system_prompt.clone();
+        
+        while let Some(msg) = user_rx.recv().await {
+            if let Some(pos) = self.history.iter().position(|m| m.role == MessageRole::System) {
+                if self.history[pos].content != full_system_prompt {
+                    self.history[pos] = ChatMessage::new(MessageRole::System, full_system_prompt.clone());
+                }
+            } else {
+                self.history.insert(0, ChatMessage::new(MessageRole::System, full_system_prompt.clone()));
+            }
+
+            self.history.push(ChatMessage::new(MessageRole::User, msg));
+            let _ = self.save_history();
+            
+            let mut guardrail_retries = 0;
+            const MAX_GUARDRAIL_RETRIES: usize = 3;
+
+            loop {
+                self.history.retain(|m| !m.content.trim().is_empty() || !m.tool_calls.is_empty());
+                let guardrail_cutoff = self.history.len().saturating_sub(4);
+                for i in 0..guardrail_cutoff {
+                    if self.history[i].content.contains("[System Guardrail]") {
+                        self.history[i] = ChatMessage::new(MessageRole::User, "[trimmed]".to_string());
+                    }
+                }
+                self.history.retain(|m| m.content != "[trimmed]");
+                let _ = self.auto_summarize_memory().await;
+
+                let options = GenerationOptions::default().num_ctx(8192).num_predict(4096);
+                let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
+
+                let mut stream = match self.ollama.send_chat_messages_stream(request).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Ollama Error: {}", e))).await;
+                        break;
+                    }
+                };
+                
+                let mut full_content = String::new();
+
+                while let Some(res) = stream.next().await {
+                    if let Ok(chunk) = res {
+                        let text = chunk.message.content;
+                        full_content.push_str(&text);
+                        let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
+                    }
+                }
+
+                if !full_content.trim().is_empty() {
+                    self.history.push(ChatMessage::new(MessageRole::Assistant, full_content.clone()));
+                    let _ = self.save_history();
+                }
+
+                let mut executed_tools = false;
+                match self.extract_tool_calls(&full_content) {
+                    Ok(tool_calls) if !tool_calls.is_empty() => {
+                        guardrail_retries = 0;
+                        for tool_req in &tool_calls {
+                            if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
+                                let args = tool_req.get("arguments").unwrap_or(&serde_json::Value::Null);
+                                
+                                let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
+                                if self.recent_tool_calls.contains(&current_call_hash) {
+                                    self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n[System Guardrail] LOOP DETECTED.", tool_name)));
+                                    self.recent_tool_calls.clear();
+                                    continue;
+                                }
+                                self.recent_tool_calls.push_back(current_call_hash);
+                                if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
+
+                                let tool_result_str;
+                                if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
+                                    let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_string())).await;
+                                    
+                                    // Notice: Auto-executing bypassing TUI confirm right now!
+                                    match tool.execute(args, &full_content).await {
+                                        Ok(res) => tool_result_str = res,
+                                        Err(e) => tool_result_str = format!("Error: {}", e),
+                                    }
+                                    let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
+                                } else {
+                                    tool_result_str = format!("Error: No such tool '{}'", tool_name);
+                                }
+                                
+                                self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                                let _ = self.save_history();
+                                executed_tools = true;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        if guardrail_retries < MAX_GUARDRAIL_RETRIES {
+                            guardrail_retries += 1;
+                            self.history.push(ChatMessage::new(MessageRole::User, format!("[System Guardrail] JSON parsing failed: {}. REPAIR IT AND TRY AGAIN.", e)));
+                            executed_tools = true; 
+                        }
+                    }
+                }
+
+                if !executed_tools {
+                    let _ = tx.send(crate::tui::AgentEvent::Done).await;
+                    break;
+                }
+            } // end loop
+        } // end while user_rx
+        Ok(())
     }
 }

@@ -5,6 +5,8 @@ mod memory;
 mod tools;
 mod hardware;
 mod telemetry;
+mod daemon;
+mod tui;
 
 use agent::Agent;
 use anyhow::Result;
@@ -26,6 +28,10 @@ struct Cli {
     /// Path to a TOML config file
     #[arg(short, long)]
     config: Option<String>,
+
+    /// Run the Tempest Headless Background Watcher
+    #[arg(long)]
+    daemon: bool,
 }
 
 #[allow(dead_code)]
@@ -82,6 +88,11 @@ fn load_config(cli_config_path: Option<&str>) -> AppConfig {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.daemon {
+        crate::daemon::run_daemon().await;
+        return Ok(());
+    }
 
     if cli.no_color {
         colored::control::set_override(false);
@@ -169,70 +180,86 @@ FORMAT: Output a JSON block to call a tool:
     
     let _ = agent.load_history();
     
-    let mut rl = rustyline::DefaultEditor::new()?;
-    loop {
-        let readline = rl.readline(">> ");
-        match readline {
-            Ok(line) => {
-                let input = line.trim();
-                if input == "exit" || input == "quit" {
-                    break;
+    let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(100);
+
+    let app = crate::tui::App::new();
+
+    let agent_tx_metrics = agent_tx.clone();
+    tokio::spawn(async move {
+        use sysinfo::{System, Networks, Components};
+        let mut sys = System::new_all();
+        let mut networks = Networks::new_with_refreshed_list();
+        let mut components = Components::new_with_refreshed_list();
+        
+        loop {
+            sys.refresh_all();
+            networks.refresh(true);
+            components.refresh(true);
+            
+            let cpus = sys.cpus();
+            let mut total_cpu = 0.0;
+            for cpu in cpus { total_cpu += cpu.cpu_usage(); }
+            let avg_cpu = if !cpus.is_empty() { total_cpu / cpus.len() as f32 } else { 0.0 };
+            
+            let used_mb = sys.used_memory() / 1024 / 1024;
+            let total_mb = sys.total_memory() / 1024 / 1024;
+            let mem_perc = if total_mb > 0 { (used_mb as f32 / total_mb as f32) * 100.0 } else { 0.0 };
+            
+            let used_swap = sys.used_swap() / 1024 / 1024;
+            let total_swap = sys.total_swap() / 1024 / 1024;
+            let swap_perc = if total_swap > 0 { (used_swap as f32 / total_swap as f32) * 100.0 } else { 0.0 };
+            
+            let mut total_rx = 0;
+            let mut total_tx = 0;
+            for (interface_name, data) in &networks {
+                if interface_name == "en0" || interface_name.starts_with("eth") || interface_name.starts_with("wlan") {
+                    total_rx += data.received();
+                    total_tx += data.transmitted();
                 }
-                if input.is_empty() {
-                    continue;
+            }
+            
+            let mut max_temp = 0.0;
+            let mut sum_temp = 0.0;
+            let mut count_temp = 0;
+            for comp in &components {
+                if let Some(temp) = comp.temperature() {
+                    if temp > 0.0 {
+                        if temp > max_temp { max_temp = temp; }
+                        sum_temp += temp;
+                        count_temp += 1;
+                    }
                 }
-                if input == "help" {
-                    println!("{}", "═".repeat(60).blue());
-                    println!("{}", "🌪️  TEMPEST AI — Quick Reference".green().bold());
-                    println!("{}", "═".repeat(60).blue());
-                    println!("{}", "\n📦 BUILT-IN TOOLS:".yellow().bold());
-                    println!("  run_command      — Execute bash/zsh commands");
-                    println!("  read_file        — Read file contents");
-                    println!("  write_file       — Write/create files");
-                    println!("  patch_file       — Surgically edit files");
-                    println!("  extract_and_write— Write code from markdown blocks");
-                    println!("  list_dir         — List directory contents");
-                    println!("  search_dir       — Ripgrep search in directories");
-                    println!("  search_web       — DuckDuckGo web search");
-                    println!("  read_url         — Fetch and read web pages");
-                    println!("  run_background   — Spawn long-running processes");
-                    println!("  read_process_logs— Check background process output");
-                    println!("  system_info      — Hardware diagnostics (CPU/RAM/OS)");
-                    println!("  sqlite_query     — Direct SQLite database access");
-                    println!("  git_action       — Native Git operations");
-                    println!("  watch_directory  — File-watching daemon");
-                    println!("  ask_user         — Ask for human input");
-                    println!("  http_request     — REST API calls (GET/POST/PUT/DELETE)");
-                    println!("  clipboard        — Read/write system clipboard");
-                    println!("  notify           — macOS desktop notifications");
-                    println!("  find_replace     — Regex find-and-replace across files");
-                    println!("  tree             — Recursive directory tree view");
-                    println!("  network_check    — Safe ping/DNS/port check");
-                    println!("{}", "\n⌨️  SHELL COMMANDS:".yellow().bold());
-                    println!("  help             — Show this reference card");
-                    println!("  clear            — Clear conversation history");
-                    println!("  exit / quit      — Exit Tempest AI");
-                    println!("{}", "\n🚀 CLI FLAGS:".yellow().bold());
-                    println!("  --model <name>   — Swap Ollama model");
-                    println!("  --no-color       — Disable colored output");
-                    println!("  --config <path>  — Custom TOML config file");
-                    println!("{}", "\n📁 CONFIG:".yellow().bold());
-                    println!("  ~/.config/tempest_ai/config.toml");
-                    println!("{}", "═".repeat(60).blue());
-                    continue;
-                }
-                if input == "clear" {
-                    agent.clear_history();
-                    println!("{}", "🧹 Conversation history cleared.".green());
-                    continue;
-                }
-                let _ = rl.add_history_entry(input);
-                if let Err(e) = agent.run(input.to_string()).await {
-                    println!("{}", format!("Agent Error: {}", e).red());
-                }
-            },
-            Err(_) => break,
+            }
+            let avg_temp = if count_temp > 0 { sum_temp / count_temp as f32 } else { 0.0 };
+            
+            let uptime = System::uptime();
+            let hours = uptime / 3600;
+            let minutes = (uptime % 3600) / 60;
+            let secs = uptime % 60;
+            
+            let proc_count = sys.processes().len();
+            
+            let update_str = format!(
+                "🔥 CPU LOAD      : {:.1}% ({} Cores)\n\n🚀 MEMORY ALLOC  : {}/{} MB ({:.1}%)\n\n💾 SWAP CACHE    : {}/{} MB ({:.1}%)\n\n----------------------------------\n\n🌐 TRUNK [en0]   : {} B ▼ | {} B ▲\n\n🌡️ AVG THERMALS  : {:.1} °C (Max: {:.1} °C)\n\n⚙️ ACTIVE PROCS  : {}\n\n⏱️ CORE UPTIME   : {}h {}m {}s\n\n----------------------------------\n\n[ Live Topology Sweep: Active ]",
+                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, used_swap, total_swap, swap_perc,
+                total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
+            );
+            
+            let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+    });
+
+    let agent_tx_agent = agent_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = agent.run_tui_mode(user_rx, agent_tx_agent).await {
+            let _ = agent_tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
+        }
+    });
+
+    if let Err(e) = crate::tui::run_tui(app, agent_rx, user_tx).await {
+        println!("{}", format!("TUI Render Error: {}", e).red());
     }
     
     Ok(())

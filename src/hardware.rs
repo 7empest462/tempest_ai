@@ -20,6 +20,7 @@ impl AgentTool for LinuxProcessAnalyzerTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         #[cfg(target_os = "linux")]
         {
+            use procfs::WithCurrentSystemInfo;
             let pid = args.get("pid").and_then(|p| p.as_i64()).ok_or_else(|| anyhow::anyhow!("Missing 'pid'"))? as i32;
             let process = procfs::process::Process::new(pid)?;
             
@@ -81,8 +82,8 @@ impl AgentTool for GpuDiagnosticsTool {
             let util_mem = util.as_ref().map(|u| format!("{}%", u.memory)).unwrap_or_else(|_| "N/A".to_string());
             
             let mem = device.memory_info().ok();
-            let mem_used = mem.as_ref().map(|m| format!("{} MB", m.used / 1024 / 1024)).unwrap_or_else(|_| "N/A".to_string());
-            let mem_total = mem.as_ref().map(|m| format!("{} MB", m.total / 1024 / 1024)).unwrap_or_else(|_| "N/A".to_string());
+            let mem_used = mem.as_ref().map(|m| format!("{} MB", m.used / 1024 / 1024)).unwrap_or_else(|| "N/A".to_string());
+            let mem_total = mem.as_ref().map(|m| format!("{} MB", m.total / 1024 / 1024)).unwrap_or_else(|| "N/A".to_string());
 
             let mut out = format!("Device {}: {}\n", gpu_id, name);
             out.push_str(&format!("Temperature: {}\n", temp));
