@@ -11,6 +11,8 @@ use ollama_rs::{
 use serde_json::Value;
 use futures::StreamExt;
 use std::io::Write;
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::ThemeSet;
 
 pub struct Agent {
     ollama: Ollama,
@@ -22,6 +24,8 @@ pub struct Agent {
     history_path: String,
     #[allow(dead_code)]
     pub session_id: String,
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
 }
 
 impl Agent {
@@ -64,6 +68,8 @@ impl Agent {
             recent_tool_calls: std::collections::VecDeque::new(),
             history_path,
             session_id: uuid::Uuid::new_v4().to_string(),
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
         };
 
         // Dynamically inject tool descriptions into the system prompt
@@ -217,6 +223,11 @@ impl Agent {
             let mut in_thinking = false;
             let mut first_token = true;
 
+            let theme = &self.theme_set.themes["base16-ocean.dark"];
+            let mut highlighter: Option<syntect::easy::HighlightLines> = None;
+            let mut line_buffer = String::new();
+            let mut in_code_block = false;
+
             while let Some(res) = stream.next().await {
                 if first_token {
                     spinner.finish_and_clear();
@@ -226,30 +237,65 @@ impl Agent {
                 let chunk = res.map_err(|e| anyhow::anyhow!("Ollama stream error: {:?}", e))?;
                 let text = chunk.message.content;
                 full_content.push_str(&text);
+                line_buffer.push_str(&text);
 
-                // Live Highlight Thinking tags
-                if text.contains("<think>") {
-                    in_thinking = true;
-                    print!("{}", "<think>".bright_black());
+                // Process all full lines in the buffer
+                while let Some(idx) = line_buffer.find('\n') {
+                    let line = line_buffer[..=idx].to_string(); // keep newline
+                    line_buffer = line_buffer[idx + 1..].to_string();
+
+                    if line.starts_with("```") {
+                        if in_code_block {
+                            in_code_block = false;
+                            highlighter = None;
+                            print!("{}", line); 
+                        } else {
+                            in_code_block = true;
+                            let lang = line.trim_start_matches("```").trim();
+                            if let Some(syntax) = self.syntax_set.find_syntax_by_extension(lang).or_else(|| self.syntax_set.find_syntax_by_token(lang)) {
+                                highlighter = Some(syntect::easy::HighlightLines::new(syntax, theme));
+                            } else {
+                                highlighter = Some(syntect::easy::HighlightLines::new(self.syntax_set.find_syntax_plain_text(), theme));
+                            }
+                            print!("{}", line);
+                        }
+                    } else if in_code_block {
+                        if let Some(ref mut h) = highlighter {
+                            let ranges: Vec<(syntect::highlighting::Style, &str)> = h.highlight_line(&line, &self.syntax_set).unwrap_or_default();
+                            let escaped = syntect::util::as_24_bit_terminal_escaped(&ranges[..], true);
+                            print!("{}", escaped);
+                        } else {
+                            print!("{}", line);
+                        }
+                    } else {
+                        if line.contains("<think>") { in_thinking = true; }
+                        
+                        let clean_line = line.replace("<think>", &"<think>".bright_black().to_string())
+                                             .replace("</think>", &"</think>".bright_black().to_string());
+                        
+                        if in_thinking {
+                            print!("{}", clean_line.bright_black());
+                        } else {
+                            print!("{}", clean_line);
+                        }
+                        
+                        if line.contains("</think>") { in_thinking = false; }
+                    }
+                    let _ = std::io::stdout().flush();
                 }
-                
-                let clean_text = text.replace("<think>", "").replace("</think>", "");
+            }
+
+            // Print any remaining text in the buffer
+            if !line_buffer.is_empty() {
                 if in_thinking {
-                    print!("{}", clean_text.bright_black());
-                } else if !clean_text.is_empty() {
-                    print!("{}", clean_text);
+                    print!("{}", line_buffer.bright_black());
                 } else {
-                    // Pulse to show we are receiving data even if text is empty
-                    print!("{}", ".".dimmed());
-                }
-
-                if text.contains("</think>") {
-                    in_thinking = false;
-                    println!("{}", "</think>".bright_black());
+                    print!("{}", line_buffer);
                 }
                 let _ = std::io::stdout().flush();
             }
-            println!();
+            println!("\x1b[0m"); // Reset terminal colors
+
 
             // Only save if we actually got something
             if !full_content.trim().is_empty() {
