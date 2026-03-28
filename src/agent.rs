@@ -431,8 +431,14 @@ impl Agent {
                 }
 
                 match serde_json::from_str::<Value>(block) {
-                    Ok(val) => {
-                        if val.get("tool").is_some() && val.get("arguments").is_some() {
+                    Ok(mut val) => {
+                        if val.get("tool").is_some() {
+                            if val.get("arguments").is_none() {
+                                if let Some(obj) = val.as_object_mut() {
+                                    obj.insert("arguments".to_string(), serde_json::json!({}));
+                                }
+                            }
+                            
                             let tool_name = val.get("tool").and_then(|t| t.as_str()).unwrap_or("");
                             let args = val.get("arguments").and_then(|a| a.as_object());
 
