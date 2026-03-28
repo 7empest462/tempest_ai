@@ -435,7 +435,16 @@ impl Agent {
                         if val.get("tool").is_some() {
                             if val.get("arguments").is_none() {
                                 if let Some(obj) = val.as_object_mut() {
-                                    obj.insert("arguments".to_string(), serde_json::json!({}));
+                                    let mut args_map = serde_json::Map::new();
+                                    let keys: Vec<String> = obj.keys().cloned().collect();
+                                    for k in keys {
+                                        if k != "tool" {
+                                            if let Some(v) = obj.remove(&k) {
+                                                args_map.insert(k, v);
+                                            }
+                                        }
+                                    }
+                                    obj.insert("arguments".to_string(), serde_json::Value::Object(args_map));
                                 }
                             }
                             
