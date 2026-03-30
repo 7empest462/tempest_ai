@@ -56,3 +56,65 @@ fn notify_system(title: &str, message: &str) {
             .output();
     }
 }
+
+pub fn install_daemon() {
+    println!("Installing persistent background service...");
+    #[cfg(target_os = "macos")]
+    {
+        let plist_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tempest.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/tempest_ai</string>
+        <string>--daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>"#;
+
+        let plist_path = "/Library/LaunchDaemons/com.tempest.daemon.plist";
+        if let Err(e) = std::fs::write(plist_path, plist_content) {
+            println!("❌ Failed to write plist. Make sure to run with 'sudo tempest_ai --install-daemon'. Error: {}", e);
+            return;
+        }
+        
+        let _ = Command::new("launchctl").arg("unload").arg(plist_path).output();
+        let _ = Command::new("launchctl").arg("load").arg(plist_path).output();
+        println!("✅ Installed to {}", plist_path);
+        println!("🚀 Background persistence engaged via launchctl.");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let service_content = r#"[Unit]
+Description=Tempest AI Hardware Sentinel Daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/tempest_ai --daemon
+Restart=always
+User=root
+Environment=RUST_BACKTRACE=1
+
+[Install]
+WantedBy=multi-user.target"#;
+
+        let service_path = "/etc/systemd/system/tempest-daemon.service";
+        if let Err(e) = std::fs::write(service_path, service_content) {
+            println!("❌ Failed to write service file. Make sure to run with 'sudo tempest_ai --install-daemon'. Error: {}", e);
+            return;
+        }
+
+        let _ = Command::new("systemctl").arg("daemon-reload").output();
+        let _ = Command::new("systemctl").arg("enable").arg("--now").arg("tempest-daemon").output();
+        println!("✅ Installed to {}", service_path);
+        println!("🚀 Background persistence engaged via systemctl.");
+    }
+}

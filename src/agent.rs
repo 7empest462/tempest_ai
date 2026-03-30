@@ -638,10 +638,12 @@ impl Agent {
         Ok(calls)
     }
 
-    pub async fn run_tui_mode(&mut self, mut user_rx: tokio::sync::mpsc::Receiver<String>, tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>) -> Result<()> {
+    pub async fn run_tui_mode(&mut self, mut user_rx: tokio::sync::mpsc::Receiver<String>, tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>, mut tool_rx: tokio::sync::mpsc::Receiver<bool>, stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
         let full_system_prompt = self.system_prompt.clone();
         
         while let Some(msg) = user_rx.recv().await {
+            // Note: This logic was adapted to match the requested signature change
+            stop_flag.store(false, std::sync::atomic::Ordering::SeqCst);
             if let Some(pos) = self.history.iter().position(|m| m.role == MessageRole::System) {
                 if self.history[pos].content != full_system_prompt {
                     self.history[pos] = ChatMessage::new(MessageRole::System, full_system_prompt.clone());
@@ -667,7 +669,11 @@ impl Agent {
                 self.history.retain(|m| m.content != "[trimmed]");
                 let _ = self.auto_summarize_memory(true).await;
 
-                let options = GenerationOptions::default().num_ctx(8192).num_predict(4096);
+                let options = GenerationOptions::default()
+                    .num_ctx(8192)
+                    .num_predict(4096)
+                    .repeat_penalty(1.1)
+                    .temperature(0.7);
                 let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
 
                 let mut stream = match self.ollama.send_chat_messages_stream(request).await {
@@ -681,6 +687,11 @@ impl Agent {
                 let mut full_content = String::new();
 
                 while let Some(res) = stream.next().await {
+                    if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        full_content.push_str("\n\n[USER INTERRUPTED GENERATION]");
+                        let _ = tx.send(crate::tui::AgentEvent::StreamToken("\n\n🛑 [GENERATION STOPPED]".to_string())).await;
+                        break;
+                    }
                     if let Ok(chunk) = res {
                         let text = chunk.message.content;
                         full_content.push_str(&text);
@@ -706,23 +717,37 @@ impl Agent {
                                 
                                 let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
                                 if self.recent_tool_calls.contains(&current_call_hash) {
-                                    self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n[System Guardrail] LOOP DETECTED.", tool_name)));
+                                    let diag = format!("🛑 [System Guardrail] LOOP DETECTED: You have called tool '{}' with identical arguments twice in a row. ABORTING PROJECT TO PREVENT SPAM.", tool_name);
+                                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(diag.clone())).await;
+                                    self.history.push(ChatMessage::new(MessageRole::User, diag));
                                     self.recent_tool_calls.clear();
-                                    continue;
+                                    executed_tools = false; // Force stop
+                                    break; 
                                 }
                                 self.recent_tool_calls.push_back(current_call_hash);
                                 if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
 
                                 let tool_result_str;
                                 if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
-                                    let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_string())).await;
-                                    
-                                    // Notice: Auto-executing bypassing TUI confirm right now!
-                                    match tool.execute(args, &full_content).await {
-                                        Ok(res) => tool_result_str = res,
-                                        Err(e) => tool_result_str = format!("Error: {}", e),
+                                    let mut allowed = true;
+                                    if tool.requires_confirmation() {
+                                        // Drain the channel first to remove any stale inputs from previous calls
+                                        while let Ok(_) = tool_rx.try_recv() {}
+                                        
+                                        let _ = tx.send(crate::tui::AgentEvent::RequestConfirmation(tool_name.to_string(), serde_json::to_string_pretty(args).unwrap_or_default())).await;
+                                        allowed = tool_rx.recv().await.unwrap_or(false);
                                     }
-                                    let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
+
+                                    if allowed {
+                                        let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_string())).await;
+                                        match tool.execute(args, &full_content).await {
+                                            Ok(res) => tool_result_str = res,
+                                            Err(e) => tool_result_str = format!("Error: {}", e),
+                                        }
+                                        let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
+                                    } else {
+                                        tool_result_str = "Error: User denied permission via TUI Modal.".to_string();
+                                    }
                                 } else {
                                     tool_result_str = format!("Error: No such tool '{}'", tool_name);
                                 }
@@ -745,6 +770,25 @@ impl Agent {
 
                 if !executed_tools {
                     break;
+                }
+                
+                // Final safety: Prune history of redundant guardrail messages to prevent context drift
+                let mut prune_indices = Vec::new();
+                let mut guardrail_streak = 0;
+                for (i, msg) in self.history.iter().enumerate().rev() {
+                    if msg.content.contains("[System Guardrail]") {
+                        guardrail_streak += 1;
+                        if guardrail_streak > 2 {
+                            prune_indices.push(i);
+                        }
+                    } else {
+                        guardrail_streak = 0;
+                    }
+                }
+                for i in prune_indices {
+                    if i < self.history.len() {
+                        self.history.remove(i);
+                    }
                 }
             } // end loop
         } // end while user_rx

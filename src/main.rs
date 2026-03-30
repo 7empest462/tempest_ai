@@ -33,6 +33,10 @@ struct Cli {
     #[arg(long)]
     daemon: bool,
 
+    /// Install the Tempest Daemon to run automatically on system boot (requires Root)
+    #[arg(long)]
+    install_daemon: bool,
+
     /// Run the original Tempest CLI (Command Line Interface) mode
     #[arg(short = 'c', long)]
     cli: bool,
@@ -93,6 +97,11 @@ fn load_config(cli_config_path: Option<&str>) -> AppConfig {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if cli.install_daemon {
+        crate::daemon::install_daemon();
+        return Ok(());
+    }
+
     if cli.daemon {
         crate::daemon::run_daemon().await;
         return Ok(());
@@ -104,8 +113,17 @@ async fn main() -> Result<()> {
 
     let config = load_config(cli.config.as_deref());
 
+    let current_user = std::env::var("USER").unwrap_or_else(|_| "unknown_user".to_string());
+    let home_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string());
+    let cwd = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| ".".to_string());
+
     let system_prompt = format!(r#"You are Tempest AI, an autonomous assistant running on {os}/{arch}. You have direct access to tools. 
 YOU MUST USE TOOLS TO COMPLETE TASKS. Never tell the user to run commands themselves. Never output code without saving it via a tool.
+
+[ENVIRONMENT]:
+- Current User: {user}
+- Home Directory: {home}
+- Current Working Directory: {cwd}
 
 RULES:
 - Think first using <think>...</think> tags, then act with tool calls.  
@@ -121,7 +139,12 @@ FORMAT: Output a JSON block to call a tool:
 ```json
 {{ "tool": "tool_name", "arguments": {{}} }}
 ```
-"#, os = std::env::consts::OS, arch = std::env::consts::ARCH).to_string();
+"#, 
+    os = std::env::consts::OS, 
+    arch = std::env::consts::ARCH,
+    user = current_user,
+    home = home_dir,
+    cwd = cwd).to_string();
 
 
     use sysinfo::System;
@@ -182,8 +205,13 @@ FORMAT: Output a JSON block to call a tool:
     // Default to TUI mode
     let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(100);
+    let (tool_tx, tool_rx) = tokio::sync::mpsc::channel(1);
 
     let app = crate::tui::App::new();
+
+    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag_agent = stop_flag.clone();
+    let stop_flag_tui = stop_flag.clone();
 
     let agent_tx_metrics = agent_tx.clone();
     tokio::spawn(async move {
@@ -205,7 +233,7 @@ FORMAT: Output a JSON block to call a tool:
             let used_mb = sys.used_memory() / 1024 / 1024;
             let total_mb = sys.total_memory() / 1024 / 1024;
             let mem_perc = if total_mb > 0 { (used_mb as f32 / total_mb as f32) * 100.0 } else { 0.0 };
-            
+
             let used_swap = sys.used_swap() / 1024 / 1024;
             let total_swap = sys.total_swap() / 1024 / 1024;
             let swap_perc = if total_swap > 0 { (used_swap as f32 / total_swap as f32) * 100.0 } else { 0.0 };
@@ -253,12 +281,12 @@ FORMAT: Output a JSON block to call a tool:
 
     let agent_tx_agent = agent_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = agent.run_tui_mode(user_rx, agent_tx_agent).await {
+        if let Err(e) = agent.run_tui_mode(user_rx, agent_tx_agent, tool_rx, stop_flag_agent).await {
             let _ = agent_tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
         }
     });
 
-    if let Err(e) = crate::tui::run_tui(app, agent_rx, user_tx).await {
+    if let Err(e) = crate::tui::run_tui(app, agent_rx, user_tx, tool_tx, stop_flag_tui).await {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
     

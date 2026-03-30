@@ -20,7 +20,6 @@ impl AgentTool for LinuxProcessAnalyzerTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         #[cfg(target_os = "linux")]
         {
-            use procfs::WithCurrentSystemInfo;
             let pid = args.get("pid").and_then(|p| p.as_i64()).ok_or_else(|| anyhow::anyhow!("Missing 'pid'"))? as i32;
             let process = procfs::process::Process::new(pid)?;
             
@@ -31,7 +30,7 @@ impl AgentTool for LinuxProcessAnalyzerTool {
             let mut out = format!("Process [{}] - {}\n", pid, cmdline);
             out.push_str(&format!("State: {:?}\n", stat.state));
             out.push_str(&format!("Threads: {}\n", stat.num_threads));
-            out.push_str(&format!("RSS Memory: {} bytes\n", stat.rss_bytes()));
+            out.push_str(&format!("RSS Memory: {} bytes\n", stat.rss_bytes().get()));
             out.push_str(&format!("Char Read / Write: {} / {} bytes\n", io.rchar, io.wchar));
             
             Ok(out)

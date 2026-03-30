@@ -210,7 +210,11 @@ impl AgentTool for WriteFileTool {
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
         let path_owned = shellexpand::tilde(path_str).to_string();
-        let path = path_owned.as_str();
+        let path = PathBuf::from(&path_owned);
+        let absolute_path = match path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => path.clone(),
+        };
             
         let content = args.get("content")
             .and_then(|c| c.as_str())
@@ -220,14 +224,18 @@ impl AgentTool for WriteFileTool {
             return Err(anyhow::anyhow!("[System Guardrail] CRITICAL ERROR: You attempted to write placeholder text (e.g. '...rest of file left unchanged...'). You are a machine executing a literal file-write. Placeholders will physically delete the user's code. You MUST provide the FULL, EXACT code. Re-evaluate and call the tool properly."));
         }
 
-        // println!(">> [TOOL CALL: write_file] Writing to: {}", path);
-        
-        if let Some(parent) = PathBuf::from(path).parent() {
-            fs::create_dir_all(parent)?;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    anyhow::bail!("Failed to create directory structure for {}: {}. Is the path writable?", parent.display(), e);
+                }
+            }
         }
         
-        fs::write(path, content)?;
-        Ok(format!("Successfully wrote {} bytes to {}", content.len(), path))
+        match fs::write(&path, content) {
+            Ok(_) => Ok(format!("Successfully wrote {} bytes to {}", content.len(), absolute_path.display())),
+            Err(e) => anyhow::bail!("OS ERROR: Failed to write to {}: {}. HINT: Check Folder Permissions / Full Disk Access on macOS.", absolute_path.display(), e),
+        }
     }
 }
 
@@ -761,7 +769,11 @@ impl AgentTool for ExtractAndWriteTool {
             for &i in odd_indices.iter().rev() {
                 let b = blocks[i].trim();
                 let first_line = b.lines().next().unwrap_or("").to_lowercase();
-                if first_line == file_ext || (file_ext == "sh" && first_line == "bash") || (file_ext == "js" && first_line == "javascript") {
+                if first_line == file_ext 
+                   || (file_ext == "sh" && first_line == "bash")
+                   || (file_ext == "js" && first_line == "javascript")
+                   || (file_ext == "rs" && first_line == "rust")
+                   || (file_ext == "py" && first_line == "python") {
                     code_block = blocks[i];
                     break;
                 }
@@ -824,13 +836,23 @@ impl AgentTool for ExtractAndWriteTool {
                 anyhow::bail!("CRITICAL ERROR: The extracted code block was empty! You must write your actual code inside the triple backticks BEFORE calling this tool.");
             }
 
-            if let Some(parent) = std::path::PathBuf::from(path).parent() {
+            if let Some(parent) = std::path::PathBuf::from(&path_owned).parent() {
                 if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        anyhow::bail!("Failed to create directory structure for {}: {}. Is path writable?", parent.display(), e);
+                    }
                 }
             }
-            std::fs::write(path, clean_code.trim_matches('\n'))?;
-            Ok(format!("Successfully extracted code block and wrote {} bytes to {}", clean_code.len(), path))
+
+            let absolute_path = match std::path::Path::new(&path_owned).canonicalize() {
+                Ok(p) => p,
+                Err(_) => std::path::PathBuf::from(&path_owned),
+            };
+
+            match std::fs::write(&path_owned, clean_code.trim_matches('\n')) {
+                Ok(_) => Ok(format!("Successfully extracted code block and wrote {} bytes to {}", clean_code.len(), absolute_path.display())),
+                Err(e) => anyhow::bail!("OS ERROR: Failed to write to {}: {}. HINT: Check Folder Permissions / Full Disk Access on macOS.", absolute_path.display(), e),
+            }
         } else {
             anyhow::bail!("Could not find a valid markdown code block (` ``` `) in your thought process to extract! You must write the code inside triple backticks explicitly before calling this tool.")
         }
@@ -842,7 +864,7 @@ pub struct SystemInfoTool;
 #[async_trait::async_trait]
 impl AgentTool for SystemInfoTool {
     fn name(&self) -> &'static str { "system_info" }
-    fn description(&self) -> &'static str { "Reads your Host PC's operating system, CPU architecture, active CPU load, and RAM limits. Call this tool to make sure your background tasks aren't crashing the local machine." }
+    fn description(&self) -> &'static str { "Reads your Host PC's operating system, CPU architecture, current USER shell identity, HOME directory, and hardware limits (CPU/RAM)." }
 
     fn parameters(&self) -> Value {
         serde_json::json!({
@@ -853,28 +875,28 @@ impl AgentTool for SystemInfoTool {
     }
 
     async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
-        // println!(">> [TOOL CALL: system_info] Fetching hardware diagnostics...");
         let mut sys = sysinfo::System::new_all();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         sys.refresh_all();
-
-        let total_mem = sys.total_memory() / 1024 / 1024; // MB
-        let used_mem = sys.used_memory() / 1024 / 1024; // MB
-        let cpu_count = sys.cpus().len();
         
-        let mut total_cpu_usage = 0.0;
-        for cpu in sys.cpus() {
-            total_cpu_usage += cpu.cpu_usage();
-        }
-        let avg_cpu_usage = if cpu_count > 0 { total_cpu_usage / cpu_count as f32 } else { 0.0 };
+        let cpu_count = sys.cpus().len();
+        let avg_load: f32 = if cpu_count > 0 {
+            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_count as f32
+        } else {
+            0.0
+        };
+
+        let user = std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string());
+        let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "Unknown".to_string());
+        let cwd = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "Unknown".to_string());
 
         let os_name = sysinfo::System::name().unwrap_or_else(|| "Unknown".to_owned());
         let os_ver = sysinfo::System::os_version().unwrap_or_else(|| "Unknown".to_owned());
         let host = sysinfo::System::host_name().unwrap_or_else(|| "Unknown".to_owned());
 
         let report = format!(
-            "Hardware Diagnostic Report:\nOS: {} {}\nHostname: {}\nCPU Cores: {}\nAverage CPU Load: {:.1}%\nTotal RAM: {} MB\nUsed RAM: {} MB",
-            os_name, os_ver, host, cpu_count, avg_cpu_usage, total_mem, used_mem
+            "Tempest AI System Diagnostics:\n--------------------------\nUSER: {}\nHOME: {}\nCWD:  {}\n--------------------------\nOS: {} {}\nHostname: {}\nCPU Cores: {}\nAverage CPU Load: {:.1}%\nTotal RAM: {} MB\nUsed RAM: {} MB",
+            user, home, cwd, os_name, os_ver, host, cpu_count, avg_load, sys.total_memory() / 1024 / 1024, sys.used_memory() / 1024 / 1024
         );
 
         Ok(report)

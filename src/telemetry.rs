@@ -48,7 +48,7 @@ impl AgentTool for AdvancedSystemOracleTool {
         #[cfg(target_os = "linux")]
         {
             // Direct sysfs/hwmon reading for Linux
-            let mut entries = std::fs::read_dir("/sys/class/thermal").ok();
+            let entries = std::fs::read_dir("/sys/class/thermal").ok();
             let mut found = false;
             if let Some(dirs) = entries {
                 for dir in dirs.flatten() {
