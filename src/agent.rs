@@ -1,4 +1,4 @@
-use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool, DiffFilesTool, KillProcessTool, EnvVarTool, ChmodTool, AppendFileTool, DownloadFileTool, TogglePlanningTool};
+use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool, DiffFilesTool, KillProcessTool, EnvVarTool, ChmodTool, AppendFileTool, DownloadFileTool, TogglePlanningTool, ListSkillsTool, SkillRecallTool, DistillKnowledgeTool, RecallBrainTool};
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
@@ -79,6 +79,10 @@ impl Agent {
                 Box::new(AppendFileTool),
                 Box::new(DownloadFileTool),
                 Box::new(TogglePlanningTool),
+                Box::new(ListSkillsTool),
+                Box::new(SkillRecallTool),
+                Box::new(DistillKnowledgeTool),
+                Box::new(RecallBrainTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
@@ -98,6 +102,20 @@ impl Agent {
                 let topics_str = topics.join(", ");
                 prompt.push_str(&format!("\n\n[SYSTEM MEMORY]: You have the following topics stored in your encrypted long-term memory: [{}]. Use the `recall_memory` tool to retrieve their full contents if they seem relevant.", topics_str));
             }
+        }
+
+        // Inject available skills
+        let skills = crate::skills::load_skills();
+        if !skills.is_empty() {
+            let skill_list: Vec<String> = skills.iter().map(|s| format!("{} ({})", s.name, s.description)).collect();
+            prompt.push_str(&format!("\n\n[SKILLS]: You have {} reusable skills available: [{}]. Use `recall_skill` to load the full instructions for any skill before starting a related task.", skills.len(), skill_list.join(", ")));
+        }
+
+        // Inject brain knowledge items
+        let brain_items = crate::skills::load_brain_items();
+        if !brain_items.is_empty() {
+            let brain_topics: Vec<String> = brain_items.iter().map(|i| i.0.clone()).collect();
+            prompt.push_str(&format!("\n\n[BRAIN]: You have distilled knowledge from previous sessions on: [{}]. Use `recall_brain` to retrieve the full summary before starting a related task. After completing a significant task, use `distill_knowledge` to save what you learned.", brain_topics.join(", ")));
         }
 
         agent.system_prompt = prompt;

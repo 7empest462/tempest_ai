@@ -2,6 +2,7 @@ mod agent;
 mod crypto;
 mod error;
 mod memory;
+mod skills;
 mod tools;
 mod hardware;
 mod telemetry;
