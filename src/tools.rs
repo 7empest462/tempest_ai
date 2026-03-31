@@ -2053,12 +2053,11 @@ impl AgentTool for RecallBrainTool {
     }
 }
 pub struct SpawnSubAgentTool {
-    pub memory_store: Arc<Mutex<MemoryStore>>,
 }
 
 impl SpawnSubAgentTool {
-    pub fn new(memory_store: Arc<Mutex<MemoryStore>>) -> Self {
-        Self { memory_store }
+    pub fn new(_memory_store: Arc<Mutex<MemoryStore>>) -> Self {
+        Self { }
     }
 }
 
@@ -2098,7 +2097,7 @@ impl AgentTool for SpawnSubAgentTool {
             }
         }
 
-        let system_prompt = "You are a specialized 'Sub-Agent' researcher for the Tempest AI main system.\
+        let _system_prompt = "You are a specialized 'Sub-Agent' researcher for the Tempest AI main system.\
                              \nYour goal is to perform a specific mission and return a concise, high-quality summary of your findings.\
                              \nYou have full tool access, but you should favor research tools (read_file, search_web) and NOT make destructive system changes unless absolutely necessary.\
                              \nBe factual, analytical, and fast.";

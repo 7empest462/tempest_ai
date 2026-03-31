@@ -27,7 +27,7 @@ struct Cli {
     no_color: bool,
 
     /// Path to a TOML config file
-    #[arg(short, long)]
+    #[arg(short = 'C', long)]
     config: Option<String>,
 
     /// Run the Tempest Headless Background Watcher
