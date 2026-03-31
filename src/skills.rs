@@ -1,7 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
+use include_dir::{include_dir, Dir};
 
-/// Represents a single skill loaded from ~/.tempest/skills/
+/// Standard Library of skills baked into the binary
+static BUILTIN_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills");
+
+/// Represents a single skill loaded from ~/.tempest/skills/ or built-in assets
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
@@ -9,8 +13,8 @@ pub struct Skill {
     pub instructions: String,
 }
 
-/// Returns the path to the skills directory, creating it if needed.
-pub fn skills_dir() -> PathBuf {
+/// Returns the path to the user's skills directory, creating it if needed.
+pub fn user_skills_dir() -> PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push(".tempest");
     path.push("skills");
@@ -27,40 +31,43 @@ pub fn brain_dir() -> PathBuf {
     path
 }
 
-/// Load all skills from ~/.tempest/skills/*.md
-/// Each skill file has YAML frontmatter (name, description) and markdown body.
+/// Load all skills from BOTH the built-in assets and ~/.tempest/skills/*.md
+/// Local user skills override built-in ones if names match.
 pub fn load_skills() -> Vec<Skill> {
-    let dir = skills_dir();
-    let mut skills = Vec::new();
+    let mut skills_map = std::collections::HashMap::new();
 
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return skills,
-    };
+    // 1. Load Built-in Skills (Standard Library)
+    for file in BUILTIN_SKILLS.files() {
+        if let Some(content) = file.contents_utf8() {
+            if let Some(skill) = parse_skill_file(content) {
+                skills_map.insert(skill.name.clone(), skill);
+            }
+        }
+    }
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "md").unwrap_or(false) {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Some(skill) = parse_skill_file(&content) {
-                    skills.push(skill);
+    // 2. Load User Skills (Local ~/.tempest/skills)
+    let dir = user_skills_dir();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "md").unwrap_or(false) {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Some(skill) = parse_skill_file(&content) {
+                        // User skill overrides built-in
+                        skills_map.insert(skill.name.clone(), skill);
+                    }
                 }
             }
         }
     }
 
-    skills
+    let mut result: Vec<Skill> = skills_map.into_values().collect();
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    result
 }
 
 /// Parse a skill markdown file with YAML frontmatter
 fn parse_skill_file(content: &str) -> Option<Skill> {
-    // Expect format:
-    // ---
-    // name: skill_name
-    // description: What this skill does
-    // ---
-    // ## Instructions
-    // ...
     let trimmed = content.trim();
     if !trimmed.starts_with("---") {
         return None;

@@ -45,6 +45,7 @@ pnet = "0.35.0"
 ratatui = "0.30.0"
 crossterm = "0.29.0"
 rustyline = "15.0.0"
+include_dir = "0.7"
 [build-dependencies]
 chrono = "0.4"
 
