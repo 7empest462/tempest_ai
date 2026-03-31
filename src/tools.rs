@@ -2104,7 +2104,7 @@ impl AgentTool for SpawnSubAgentTool {
 
         // We can't easily run a full TUI loop for a sub-agent here without circular dependencies or complex UI state.
         // Instead, we call a simplified one-shot or few-shot execution in src/agent.rs once we expose the method.
-        Ok(format!("Sub-agent delegation for '{}' initiated. Standby for the mission report.", task))
+        Ok(format!("Sub-agent delegation for '{}' initiated using model '{}'. Standby for the mission report.", task, final_model))
     }
 }
 
