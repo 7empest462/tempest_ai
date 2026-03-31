@@ -219,7 +219,7 @@ FORMAT: Output a JSON block to call a tool:
     // Default to TUI mode
     let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(100);
-    let (tool_tx, tool_rx) = tokio::sync::mpsc::channel(1);
+    let (tool_tx, tool_rx) = tokio::sync::mpsc::channel::<crate::tui::ToolResponse>(1);
 
     let app = crate::tui::App::new();
 

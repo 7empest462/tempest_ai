@@ -23,6 +23,14 @@ pub enum AgentEvent {
     SystemUpdate(String), // Telemetry
     Done,
     RequestConfirmation(String, String),
+    RequestInput(String, String), // (tool_name, question)
+}
+
+/// Unified response type for the tool-approval channel.
+/// Carries either a boolean confirmation or freeform text input.
+pub enum ToolResponse {
+    Confirm(bool),
+    Text(String),
 }
 
 pub struct App {
@@ -35,6 +43,8 @@ pub struct App {
     pub auto_scroll: bool,
     pub list_state: ratatui::widgets::ListState,
     pub pending_confirmation: Option<(String, String)>,
+    pub pending_input: Option<(String, String)>,
+    pub input_response_buffer: String,
     pub agent_mode: String,
 }
 
@@ -50,6 +60,8 @@ impl App {
             auto_scroll: true,
             list_state: ratatui::widgets::ListState::default(),
             pending_confirmation: None,
+            pending_input: None,
+            input_response_buffer: String::new(),
             agent_mode: "PLANNING".to_string(),
         }
     }
@@ -57,7 +69,7 @@ impl App {
 
 pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
     user_tx: tokio::sync::mpsc::Sender<String>,
-    tool_tx: tokio::sync::mpsc::Sender<bool>,
+    tool_tx: tokio::sync::mpsc::Sender<ToolResponse>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     enable_raw_mode()?;
@@ -76,14 +88,15 @@ pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<
 
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Priority 1: Confirmation modal (Y/N)
                 if app.pending_confirmation.is_some() {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                            let _ = tool_tx.send(true).await;
+                            let _ = tool_tx.send(ToolResponse::Confirm(true)).await;
                             app.pending_confirmation = None;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            let _ = tool_tx.send(false).await;
+                            let _ = tool_tx.send(ToolResponse::Confirm(false)).await;
                             app.pending_confirmation = None;
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -91,6 +104,36 @@ pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<
                         }
                         _ => {}
                     }
+                // Priority 2: Text input modal (AskUser)
+                } else if app.pending_input.is_some() {
+                    match key.code {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.should_quit = true;
+                        }
+                        KeyCode::Char(c) => {
+                            app.input_response_buffer.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.input_response_buffer.pop();
+                        }
+                        KeyCode::Enter => {
+                            if !app.input_response_buffer.is_empty() {
+                                let response = app.input_response_buffer.clone();
+                                app.messages.push(format!("You: {}", response));
+                                let _ = tool_tx.send(ToolResponse::Text(response)).await;
+                                app.input_response_buffer.clear();
+                                app.pending_input = None;
+                                app.auto_scroll = true;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            let _ = tool_tx.send(ToolResponse::Text("[User cancelled input]".to_string())).await;
+                            app.input_response_buffer.clear();
+                            app.pending_input = None;
+                        }
+                        _ => {}
+                    }
+                // Priority 3: Normal input
                 } else {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -169,6 +212,10 @@ pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<
                 }
                 AgentEvent::RequestConfirmation(tool, args) => {
                     app.pending_confirmation = Some((tool, args));
+                }
+                AgentEvent::RequestInput(tool, question) => {
+                    app.pending_input = Some((tool, question));
+                    app.input_response_buffer.clear();
                 }
             }
         }
@@ -381,6 +428,55 @@ fn ui(f: &mut Frame, app: &mut App) {
         
         // Hide Hardware Cursor when Modal is open
         f.set_cursor_position((chunks[1].x, chunks[1].y));
+    }
+
+    // 5. User Input Modal (AskUser)
+    if let Some((_tool, question)) = &app.pending_input {
+        let popup_area = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Percentage(25),
+                ratatui::layout::Constraint::Percentage(50),
+                ratatui::layout::Constraint::Percentage(25),
+            ])
+            .split(f.area())[1];
+
+        let popup_area = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Percentage(15),
+                ratatui::layout::Constraint::Percentage(70),
+                ratatui::layout::Constraint::Percentage(15),
+            ])
+            .split(popup_area)[1];
+
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+
+        let content = vec![
+            Line::from(vec![Span::styled(" 🤔 AI REQUIRES YOUR INPUT ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))]),
+            Line::from(""),
+            Line::from(Span::styled(question.as_str(), Style::default().fg(Color::White))),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(" >> ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::raw(app.input_response_buffer.as_str()),
+                Span::styled("█", Style::default().fg(Color::Green)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(" [Enter: Submit | Esc: Cancel] ", Style::default().fg(Color::DarkGray))),
+        ];
+        
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(Span::styled(" USER INPUT REQUIRED ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)));
+            
+        f.render_widget(Paragraph::new(content).block(block).wrap(ratatui::widgets::Wrap { trim: true }), popup_area);
+        
+        // Position cursor in the input area of the modal
+        let cursor_x = popup_area.x + 4 + app.input_response_buffer.chars().count() as u16;
+        let cursor_y = popup_area.y + 5; // Line where the input field is
+        f.set_cursor_position((cursor_x, cursor_y));
     }
 }
 

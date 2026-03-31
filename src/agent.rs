@@ -641,7 +641,7 @@ impl Agent {
         Ok(calls)
     }
 
-    pub async fn run_tui_mode(&mut self, mut user_rx: tokio::sync::mpsc::Receiver<String>, tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>, mut tool_rx: tokio::sync::mpsc::Receiver<bool>, stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
+    pub async fn run_tui_mode(&mut self, mut user_rx: tokio::sync::mpsc::Receiver<String>, tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>, mut tool_rx: tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>, stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
         let full_system_prompt = self.system_prompt.clone();
         
         while let Some(msg) = user_rx.recv().await {
@@ -732,18 +732,33 @@ impl Agent {
 
                                 let tool_result_str;
                                 if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
-                                    // 🧠 PLANNING MODE GUARD: Block modifying tools in planning mode
+                                    // 🧠 PLANNING MODE GUARD
                                     if self.planning_mode && tool.is_modifying() {
                                         tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED during planning. Present your implementation plan to the user first. Once they approve, use the `toggle_planning` tool to switch to Execution mode.", tool_name);
                                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Blocked '{}' — Agent is in PLANNING mode", tool_name))).await;
+                                    } else if tool_name == "ask_user" {
+                                        // 🤔 SPECIAL CASE: AskUser via TUI modal
+                                        let question = args.get("question").and_then(|q| q.as_str()).unwrap_or("(No question provided)").to_string();
+                                        while let Ok(_) = tool_rx.try_recv() {}
+                                        let _ = tx.send(crate::tui::AgentEvent::RequestInput(tool_name.to_string(), question)).await;
+                                        match tool_rx.recv().await {
+                                            Some(crate::tui::ToolResponse::Text(user_answer)) => {
+                                                tool_result_str = format!("User responded: {}", user_answer);
+                                            }
+                                            _ => {
+                                                tool_result_str = "User cancelled the input request.".to_string();
+                                            }
+                                        }
                                     } else {
+                                        // Normal tool execution path
                                         let mut allowed = true;
                                         if tool.requires_confirmation() {
-                                            // Drain the channel first to remove any stale inputs from previous calls
                                             while let Ok(_) = tool_rx.try_recv() {}
-                                            
                                             let _ = tx.send(crate::tui::AgentEvent::RequestConfirmation(tool_name.to_string(), serde_json::to_string_pretty(args).unwrap_or_default())).await;
-                                            allowed = tool_rx.recv().await.unwrap_or(false);
+                                            allowed = match tool_rx.recv().await {
+                                                Some(crate::tui::ToolResponse::Confirm(b)) => b,
+                                                _ => false,
+                                            };
                                         }
 
                                         if allowed {
@@ -754,7 +769,7 @@ impl Agent {
                                             }
                                             let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
 
-                                            // ✅ VERIFICATION LOOP: After any modifying tool, inject a verification prompt
+                                            // ✅ VERIFICATION LOOP
                                             if tool.is_modifying() && !tool_result_str.starts_with("Error") {
                                                 let verify_msg = format!(
                                                     "TOOL RESULT for {}:\n{}\n\n[System Verification Required] You just executed a modifying action ('{}').\
@@ -768,7 +783,7 @@ impl Agent {
                                                 self.history.push(ChatMessage::new(MessageRole::User, verify_msg));
                                                 let _ = self.save_history();
                                                 executed_tools = true;
-                                                continue; // Skip the normal push below
+                                                continue;
                                             }
                                         } else {
                                             tool_result_str = "Error: User denied permission via TUI Modal.".to_string();
@@ -780,7 +795,7 @@ impl Agent {
                                 
                                 self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
                                 
-                                // 🧠 SENTINEL DETECTION: Check if the tool result contains a planning mode toggle
+                                // 🧠 SENTINEL DETECTION
                                 if tool_result_str.contains("[PLANNING_MODE_ON]") {
                                     self.planning_mode = true;
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🧠 Agent entered PLANNING mode".to_string())).await;
