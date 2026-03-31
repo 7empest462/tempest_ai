@@ -850,7 +850,6 @@ impl Agent {
                                         let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("(No task)").to_string();
                                         let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.model).to_string();
                                         
-                                                                 // Create a mini-agent without the sub-agent tool to prevent recursion
                                         let sub_agent_history = vec![
                                             ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the mission and provide a CONCISE summary.".to_string()),
                                             ChatMessage::new(MessageRole::User, task.clone()),
