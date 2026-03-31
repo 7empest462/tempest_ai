@@ -2104,6 +2104,27 @@ impl AgentTool for SpawnSubAgentTool {
 
         // We can't easily run a full TUI loop for a sub-agent here without circular dependencies or complex UI state.
         // Instead, we call a simplified one-shot or few-shot execution in src/agent.rs once we expose the method.
-        Ok(format!("[SUB_AGENT_SIMULATION] Initializing Sub-Agent with model '{}' for mission: '{}'... (This tool is currently being wired to the core logic in src/agent.rs)", final_model, task))
+        Ok(format!("Sub-agent delegation for '{}' initiated. Standby for the mission report.", task))
+    }
+}
+
+pub struct UpdateTaskContextTool;
+
+#[async_trait::async_trait]
+impl AgentTool for UpdateTaskContextTool {
+    fn name(&self) -> &'static str { "update_task_context" }
+    fn description(&self) -> &'static str { "Update your 'Reflective Memory' (Sketchpad) with important findings, sub-tasks, or progress updates. This context is injected into every system prompt to ensure you stay goal-oriented across long sessions." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "context": { "type": "string", "description": "The new, updated mission context or sketchpad content." }
+            },
+            "required": ["context"]
+        })
+    }
+    async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
+        // This is handled as a special case in Agent logic to mutate internal state
+        Ok("Reflective memory updated successfully.".to_string())
     }
 }

@@ -23,7 +23,7 @@ pub struct Agent {
     recent_tool_calls: std::collections::VecDeque<String>,
     history_path: String,
     pub planning_mode: bool,
-    #[allow(dead_code)]
+    pub task_context: String,
     pub session_id: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
@@ -85,11 +85,13 @@ impl Agent {
                 Box::new(DistillKnowledgeTool),
                 Box::new(RecallBrainTool),
                 Box::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone())),
+                Box::new(crate::tools::UpdateTaskContextTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
             history_path,
             planning_mode: true,
+            task_context: "Not started yet.".to_string(),
             session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
@@ -99,6 +101,9 @@ impl Agent {
         // Dynamically inject tool descriptions into the system prompt
         let tool_desc = agent.get_tool_descriptions();
         let mut prompt = system_prompt.replace("{tool_descriptions}", &tool_desc);
+        
+        // Inject Reflective Memory (Sketchpad)
+        prompt.push_str("\n\n[CURRENT_MISSION_CONTEXT]: {task_context}\n(Use the `update_task_context` tool to pin important findings, sub-tasks, or progress updates here to ensure continuity across long tasks.)");
 
         if let Ok(topics) = memory_store.lock().unwrap().list_topics() {
             if !topics.is_empty() {
@@ -743,6 +748,14 @@ impl Agent {
                 self.history.retain(|m| m.content != "[trimmed]");
                 let _ = self.auto_summarize_memory(true).await;
                 
+                // Update System Prompt with latest Task Context (Reflective Memory)
+                if !self.history.is_empty() && self.history[0].role == MessageRole::System {
+                    self.history[0] = ChatMessage::new(
+                        MessageRole::System, 
+                        self.system_prompt.replace("{task_context}", &self.task_context)
+                    );
+                }
+
                 // 📡 INJECT SYSTEM SENTIENCE (Hardware Telemetry)
                 let telemetry = {
                     let lock = self.telemetry.lock().unwrap();
@@ -837,9 +850,7 @@ impl Agent {
                                         let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("(No task)").to_string();
                                         let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.model).to_string();
                                         
-                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🕵️ Sub-Agent Mission: {}...", task))).await;
-                                        
-                                        // Create a mini-agent without the sub-agent tool to prevent recursion
+                                                                 // Create a mini-agent without the sub-agent tool to prevent recursion
                                         let sub_agent_history = vec![
                                             ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the mission and provide a CONCISE summary.".to_string()),
                                             ChatMessage::new(MessageRole::User, task.clone()),
@@ -852,6 +863,13 @@ impl Agent {
                                             }
                                             Err(e) => tool_result_str = format!("Sub-Agent Error: {}", e),
                                         }
+                                        executed_tools = true;
+                                    } else if tool_name == "update_task_context" {
+                                        // 🧠 REFLECTIVE MEMORY (SKETCHPAD)
+                                        let context = args.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                                        self.task_context = context;
+                                        tool_result_str = "Reflective memory (Sketchpad) updated successfully.".to_string();
+                                        executed_tools = true;
                                     } else {
                                         // Normal tool execution path
                                         let mut allowed = true;
