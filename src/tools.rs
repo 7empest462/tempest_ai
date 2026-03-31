@@ -2053,7 +2053,9 @@ impl AgentTool for RecallBrainTool {
     }
 }
 pub struct SpawnSubAgentTool {
+    #[allow(dead_code)]
     memory_store: Arc<Mutex<crate::memory::MemoryStore>>,
+    #[allow(dead_code)]
     sub_agent_model: String,
 }
 

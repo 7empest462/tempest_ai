@@ -25,6 +25,7 @@ pub struct Agent {
     pub planning_mode: bool,
     pub task_context: String,
     pub vector_brain: Arc<Mutex<crate::vector_brain::VectorBrain>>,
+    #[allow(dead_code)]
     pub sub_agent_model: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
