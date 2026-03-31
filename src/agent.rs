@@ -807,8 +807,8 @@ impl Agent {
                                                        Proceed to summarize the findings for the user immediately.", tool_name);
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(diag.clone())).await;
                                     self.history.push(ChatMessage::new(MessageRole::System, diag));
-                                    executed_tools = true; // Let it run one more time to see the system message
-                                    break; 
+                                    executed_tools = true;
+                                    continue; // Skip this one, but don't break the whole loop yet
                                 }
                                 self.recent_tool_calls.push_back(current_call_hash);
                                 if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
