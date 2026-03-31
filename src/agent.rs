@@ -24,7 +24,6 @@ pub struct Agent {
     history_path: String,
     pub planning_mode: bool,
     pub task_context: String,
-    pub session_id: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
     #[allow(dead_code)]
@@ -92,7 +91,6 @@ impl Agent {
             history_path,
             planning_mode: true,
             task_context: "Not started yet.".to_string(),
-            session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             telemetry: Arc::new(Mutex::new("No telemetry data yet.".to_string())),
@@ -211,8 +209,6 @@ impl Agent {
         // Initialize history with system prompt
         let full_system_prompt = self.system_prompt.clone();
 
-        // If history has a system prompt but it's different from the current one, update it.
-        // Otherwise, if no system prompt exists, insert it.
         if let Some(pos) = self.history.iter().position(|m| m.role == MessageRole::System) {
             if self.history[pos].content != full_system_prompt {
                 self.history[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
@@ -862,13 +858,11 @@ impl Agent {
                                             }
                                             Err(e) => tool_result_str = format!("Sub-Agent Error: {}", e),
                                         }
-                                        executed_tools = true;
                                     } else if tool_name == "update_task_context" {
                                         // 🧠 REFLECTIVE MEMORY (SKETCHPAD)
                                         let context = args.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string();
                                         self.task_context = context;
                                         tool_result_str = "Reflective memory (Sketchpad) updated successfully.".to_string();
-                                        executed_tools = true;
                                     } else {
                                         // Normal tool execution path
                                         let mut allowed = true;
