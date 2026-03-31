@@ -29,6 +29,11 @@ pub trait AgentTool: Send + Sync {
     fn requires_confirmation(&self) -> bool {
         false
     }
+
+    /// Whether this tool modifies the system state (files, processes, services).
+    fn is_modifying(&self) -> bool {
+        false
+    }
 }
 
 pub struct RunCommandTool;
@@ -44,6 +49,9 @@ impl AgentTool for RunCommandTool {
     }
 
     fn requires_confirmation(&self) -> bool {
+        true
+    }
+    fn is_modifying(&self) -> bool {
         true
     }
 
@@ -185,6 +193,9 @@ impl AgentTool for WriteFileTool {
     }
 
     fn requires_confirmation(&self) -> bool {
+        true
+    }
+    fn is_modifying(&self) -> bool {
         true
     }
 
@@ -448,6 +459,9 @@ impl AgentTool for PatchFileTool {
     fn requires_confirmation(&self) -> bool {
         true
     }
+    fn is_modifying(&self) -> bool {
+        true
+    }
 
     fn parameters(&self) -> Value {
         serde_json::json!({
@@ -526,6 +540,7 @@ impl AgentTool for RunBackgroundTool {
     fn name(&self) -> &'static str { "run_background" }
     fn description(&self) -> &'static str { "Spawns a long-running bash/zsh command in the background (like starting a web server). Returns a process_id immediately. Use read_process_logs to check its output." }
     fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -732,6 +747,7 @@ pub struct ExtractAndWriteTool;
 impl AgentTool for ExtractAndWriteTool {
     fn name(&self) -> &'static str { "extract_and_write" }
     fn description(&self) -> &'static str { "Extracts the latest markdown code block from your thought process and writes it to a file. Use this for complex files to avoid JSON escaping issues. MUST wrap your code in triple backticks BEFORE calling this tool." }
+    fn is_modifying(&self) -> bool { true }
 
     fn parameters(&self) -> Value {
         serde_json::json!({
@@ -972,6 +988,7 @@ pub struct GitTool;
 impl AgentTool for GitTool {
     fn name(&self) -> &'static str { "git_action" }
     fn description(&self) -> &'static str { "Natively executes a secure 'git' command using the local OS bindings. Bypasses bash explicitly. Provide arguments as an array of strings (e.g., ['commit', '-m', 'Initial commit'])." }
+    fn is_modifying(&self) -> bool { true }
 
     fn parameters(&self) -> Value {
         serde_json::json!({
@@ -1271,6 +1288,7 @@ impl AgentTool for FindReplaceTool {
     }
 
     fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
 
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
@@ -1555,6 +1573,7 @@ impl AgentTool for KillProcessTool {
     fn name(&self) -> &'static str { "kill_process" }
     fn description(&self) -> &'static str { "Kill a running background process by its process ID." }
     fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -1645,6 +1664,7 @@ impl AgentTool for ChmodTool {
     fn name(&self) -> &'static str { "chmod" }
     fn description(&self) -> &'static str { "Change file or directory permissions using standard Unix mode strings (e.g., '755', '644', '+x')." }
     fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -1682,6 +1702,7 @@ impl AgentTool for AppendFileTool {
     fn name(&self) -> &'static str { "append_file" }
     fn description(&self) -> &'static str { "Append content to the end of an existing file without overwriting it. Creates the file if it doesn't exist." }
     fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -1717,6 +1738,7 @@ impl AgentTool for DownloadFileTool {
     fn name(&self) -> &'static str { "download_file" }
     fn description(&self) -> &'static str { "Download a file from a URL and save it to a local path. Useful for fetching remote resources, images, scripts, or data files." }
     fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -1829,6 +1851,7 @@ pub struct SystemdManagerTool;
 impl AgentTool for SystemdManagerTool {
     fn name(&self) -> &'static str { "systemd_manager" }
     fn description(&self) -> &'static str { "Natively monitor and manage Systemd services on Linux. Use 'action': 'list' to see all units, or 'start'/'stop'/'restart'/'status' with a 'unit' name. REQUIRES LINUX HOST." }
+    fn is_modifying(&self) -> bool { true }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -1871,6 +1894,35 @@ impl AgentTool for SystemdManagerTool {
         {
             let _ = args;
             Ok("Error: The systemd_manager tool is exclusive to Linux environments. Your host OS does not use systemd.".to_string())
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 🧠 META-COGNITIVE TOOLS: Agent Self-Management
+// ═══════════════════════════════════════════════════════════════════
+
+pub struct TogglePlanningTool;
+
+#[async_trait::async_trait]
+impl AgentTool for TogglePlanningTool {
+    fn name(&self) -> &'static str { "toggle_planning" }
+    fn description(&self) -> &'static str { "Toggle between PLANNING mode (research only, no file writes) and EXECUTING mode (full tool access). Use 'on' to enter planning mode, 'off' to enter execution mode after the user approves your plan." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mode": { "type": "string", "enum": ["on", "off"], "description": "'on' = enter planning mode (block writes), 'off' = enter execution mode (allow writes)" }
+            },
+            "required": ["mode"]
+        })
+    }
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("on");
+        match mode {
+            "on" => Ok("[PLANNING_MODE_ON] You are now in PLANNING mode. You may use read-only tools (read_file, list_dir, search_dir, search_web, system_info) to research. All file writes and commands are BLOCKED until you present a plan and switch to execution mode.".to_string()),
+            "off" => Ok("[PLANNING_MODE_OFF] You are now in EXECUTION mode. All tools are available. Remember to VERIFY your work after every modification.".to_string()),
+            _ => Ok("Error: mode must be 'on' or 'off'".to_string()),
         }
     }
 }

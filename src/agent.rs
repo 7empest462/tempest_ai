@@ -1,4 +1,4 @@
-use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool, DiffFilesTool, KillProcessTool, EnvVarTool, ChmodTool, AppendFileTool, DownloadFileTool};
+use crate::tools::{AgentTool, RunCommandTool, ReadFileTool, WriteFileTool, PatchFileTool, RunBackgroundTool, ReadProcessLogsTool, ListDirTool, SearchWebTool, ReadUrlTool, SearchDirTool, AskUserTool, ExtractAndWriteTool, SystemInfoTool, SqliteQueryTool, GitTool, WatchDirectoryTool, HttpRequestTool, ClipboardTool, NotifyTool, FindReplaceTool, TreeTool, NetworkCheckTool, DiffFilesTool, KillProcessTool, EnvVarTool, ChmodTool, AppendFileTool, DownloadFileTool, TogglePlanningTool};
 use anyhow::Result;
 use colored::*;
 use ollama_rs::{
@@ -22,6 +22,7 @@ pub struct Agent {
     system_prompt: String,
     recent_tool_calls: std::collections::VecDeque<String>,
     history_path: String,
+    pub planning_mode: bool,
     #[allow(dead_code)]
     pub session_id: String,
     #[allow(dead_code)]
@@ -77,10 +78,12 @@ impl Agent {
                 Box::new(ChmodTool),
                 Box::new(AppendFileTool),
                 Box::new(DownloadFileTool),
+                Box::new(TogglePlanningTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
             history_path,
+            planning_mode: false,
             session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
@@ -729,30 +732,63 @@ impl Agent {
 
                                 let tool_result_str;
                                 if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
-                                    let mut allowed = true;
-                                    if tool.requires_confirmation() {
-                                        // Drain the channel first to remove any stale inputs from previous calls
-                                        while let Ok(_) = tool_rx.try_recv() {}
-                                        
-                                        let _ = tx.send(crate::tui::AgentEvent::RequestConfirmation(tool_name.to_string(), serde_json::to_string_pretty(args).unwrap_or_default())).await;
-                                        allowed = tool_rx.recv().await.unwrap_or(false);
-                                    }
-
-                                    if allowed {
-                                        let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_string())).await;
-                                        match tool.execute(args, &full_content).await {
-                                            Ok(res) => tool_result_str = res,
-                                            Err(e) => tool_result_str = format!("Error: {}", e),
-                                        }
-                                        let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
+                                    // 🧠 PLANNING MODE GUARD: Block modifying tools in planning mode
+                                    if self.planning_mode && tool.is_modifying() {
+                                        tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED during planning. Present your implementation plan to the user first. Once they approve, use the `toggle_planning` tool to switch to Execution mode.", tool_name);
+                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Blocked '{}' — Agent is in PLANNING mode", tool_name))).await;
                                     } else {
-                                        tool_result_str = "Error: User denied permission via TUI Modal.".to_string();
+                                        let mut allowed = true;
+                                        if tool.requires_confirmation() {
+                                            // Drain the channel first to remove any stale inputs from previous calls
+                                            while let Ok(_) = tool_rx.try_recv() {}
+                                            
+                                            let _ = tx.send(crate::tui::AgentEvent::RequestConfirmation(tool_name.to_string(), serde_json::to_string_pretty(args).unwrap_or_default())).await;
+                                            allowed = tool_rx.recv().await.unwrap_or(false);
+                                        }
+
+                                        if allowed {
+                                            let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_string())).await;
+                                            match tool.execute(args, &full_content).await {
+                                                Ok(res) => tool_result_str = res,
+                                                Err(e) => tool_result_str = format!("Error: {}", e),
+                                            }
+                                            let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
+
+                                            // ✅ VERIFICATION LOOP: After any modifying tool, inject a verification prompt
+                                            if tool.is_modifying() && !tool_result_str.starts_with("Error") {
+                                                let verify_msg = format!(
+                                                    "TOOL RESULT for {}:\n{}\n\n[System Verification Required] You just executed a modifying action ('{}').\
+                                                    \nBEFORE continuing or declaring success, you MUST verify your work.\
+                                                    \n- If you wrote a file: use `read_file` or `run_command` with `cat` to confirm the contents.\
+                                                    \n- If you ran a command: check the output for errors.\
+                                                    \n- If you edited code: use `run_command` to run the compiler/linter.\
+                                                    \nDo NOT skip this step.",
+                                                    tool_name, tool_result_str, tool_name
+                                                );
+                                                self.history.push(ChatMessage::new(MessageRole::User, verify_msg));
+                                                let _ = self.save_history();
+                                                executed_tools = true;
+                                                continue; // Skip the normal push below
+                                            }
+                                        } else {
+                                            tool_result_str = "Error: User denied permission via TUI Modal.".to_string();
+                                        }
                                     }
                                 } else {
                                     tool_result_str = format!("Error: No such tool '{}'", tool_name);
                                 }
                                 
                                 self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                                
+                                // 🧠 SENTINEL DETECTION: Check if the tool result contains a planning mode toggle
+                                if tool_result_str.contains("[PLANNING_MODE_ON]") {
+                                    self.planning_mode = true;
+                                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🧠 Agent entered PLANNING mode".to_string())).await;
+                                } else if tool_result_str.contains("[PLANNING_MODE_OFF]") {
+                                    self.planning_mode = false;
+                                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("⚡ Agent entered EXECUTION mode".to_string())).await;
+                                }
+                                
                                 let _ = self.save_history();
                                 executed_tools = true;
                             }

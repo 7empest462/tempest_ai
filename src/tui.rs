@@ -35,6 +35,7 @@ pub struct App {
     pub auto_scroll: bool,
     pub list_state: ratatui::widgets::ListState,
     pub pending_confirmation: Option<(String, String)>,
+    pub agent_mode: String,
 }
 
 impl App {
@@ -49,6 +50,7 @@ impl App {
             auto_scroll: true,
             list_state: ratatui::widgets::ListState::default(),
             pending_confirmation: None,
+            agent_mode: "EXECUTING".to_string(),
         }
     }
 }
@@ -153,7 +155,14 @@ pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<
                 AgentEvent::StreamToken(t) => app.current_stream.push_str(&t),
                 AgentEvent::ToolStart(t) => app.active_tool = Some(t),
                 AgentEvent::ToolFinish => app.active_tool = None,
-                AgentEvent::SystemUpdate(u) => app.telemetry_text = u,
+                AgentEvent::SystemUpdate(u) => {
+                    if u.contains("PLANNING mode") {
+                        app.agent_mode = "PLANNING".to_string();
+                    } else if u.contains("EXECUTION mode") {
+                        app.agent_mode = "EXECUTING".to_string();
+                    }
+                    app.telemetry_text = u;
+                }
                 AgentEvent::Done => {
                     app.messages.push(format!("Tempest: {}", app.current_stream));
                     app.current_stream.clear();
@@ -265,14 +274,20 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
     
     let scroll_status = if app.auto_scroll { " [ FOLLOW: ON ] " } else { " [ SCROLL LOCK: ON ] " };
+    let mode_indicator = if app.agent_mode == "PLANNING" {
+        Span::styled(" [\u{1f9e0} PLANNING] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" [\u{26a1} EXECUTING] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    };
     let chat_list = List::new(list_items.clone())
         .block(Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(vec![
-                Span::styled(" TEMPEST AI - COMMUNICATION LINK ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(" TEMPEST AI ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                mode_indicator,
                 Span::styled(scroll_status, Style::default().fg(Color::Yellow)),
-                Span::styled(" [Arrows: Scroll | Ctrl+S: Stop | Shift+Mouse: Copy] ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                Span::styled(" [Ctrl+S: Stop] ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
             ]));
     
     // Auto-scroll logic: Anchor to bottom if follow mode is active
