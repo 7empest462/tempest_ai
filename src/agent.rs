@@ -802,11 +802,12 @@ impl Agent {
                                 
                                 let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
                                 if self.recent_tool_calls.contains(&current_call_hash) {
-                                    let diag = format!("🛑 [System Guardrail] LOOP DETECTED: You have called tool '{}' with identical arguments twice in a row. ABORTING PROJECT TO PREVENT SPAM.", tool_name);
+                                    let diag = format!("🛑 [System Guardrail] LOOP DETECTED: You just called '{}' with these exact arguments. \
+                                                       DO NOT call it again. You already have the result in your history. \
+                                                       Proceed to summarize the findings for the user immediately.", tool_name);
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(diag.clone())).await;
-                                    self.history.push(ChatMessage::new(MessageRole::User, diag));
-                                    self.recent_tool_calls.clear();
-                                    executed_tools = false; // Force stop
+                                    self.history.push(ChatMessage::new(MessageRole::System, diag));
+                                    executed_tools = true; // Let it run one more time to see the system message
                                     break; 
                                 }
                                 self.recent_tool_calls.push_back(current_call_hash);
@@ -847,7 +848,7 @@ impl Agent {
                                         let request = ChatMessageRequest::new(model_name, sub_agent_history);
                                         match self.ollama.send_chat_messages(request).await {
                                             Ok(res) => {
-                                                tool_result_str = format!("[SUB_AGENT_REPORT]\n{}\n\n[System Instruction]: The sub-agent has completed its mission. READ the report above and SUMMARIZE the findings for the user. Do NOT call `spawn_sub_agent` again for this task.", res.message.content);
+                                                tool_result_str = format!("[MISSION REPORT]: {}\n\n[INSTRUCTION]: MISSION ACCOMPLISHED. Read the provided research above and summarize it for the user. Do NOT call this tool again for the same task.", res.message.content);
                                             }
                                             Err(e) => tool_result_str = format!("Sub-Agent Error: {}", e),
                                         }
@@ -893,7 +894,7 @@ impl Agent {
                                     tool_result_str = format!("Error: No such tool '{}'", tool_name);
                                 }
                                 
-                                self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                                self.history.push(ChatMessage::new(MessageRole::System, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
                                 
                                 // 🧠 SENTINEL DETECTION
                                 if tool_result_str.contains("[PLANNING_MODE_ON]") {
