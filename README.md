@@ -1,73 +1,78 @@
-# 🌪️ Tempest AI V2
-**The fully autonomous, multi-threaded LLM engineer for your local terminal.**
+# 🌪️ Tempest AI (Project Smart-Brain)
+**The Hardware-Aware, RAG-Powered Autonomous Engineer.**
 
-Tempest AI is a blazing-fast, Rust-based autonomous coding agent powered entirely by local LLMs via Ollama. Once you give it a prompt, it enters an infinite context-protected loop where it natively searches your hard drive, scrapes the web for documentation, patches code surgically, and even spawns concurrent backend servers—all while preserving your privacy.
-
-If it ever gets confused, it pauses its execution matrix and asks you for clarification. It's the open-source equivalent to Anthropic's multi-billion dollar Claude agent.
-
-## 🚀 Features
-- **Semantic Code Search**: Instant `.gitignore`-aware file querying powered by Mac Unix native `rg` (Ripgrep) binaries.
-- **Surgical File Editing**: Allows the LLM to rewrite specific code blocks by targeting exact line numbers instead of randomly regenerating massive multi-thousand-line files.
-- **Background Servers**: The agent can boot `npm run dev` or `cargo run` cleanly into a parallel thread and instantly query its output logs without crashing the active environment.
-- **Rolling Memory Compression**: Natively slides your conversation history via a hidden `.HistorySummarizer()` to ensure you never max out your LLM token limit.
-- **Interactive Prompts**: A mid-task LLM suspension architecture that automatically requests STDIN feedback from the human if ambiguity blocks an execution.
-- **Dynamic Guardrails**: Instantly intercepts hallucinated terminal outputs and forces the LLM to recursively structure its thoughts inside secure JSON schemas.
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat aliases, Tempest is a **Stateful Intelligence** that monitors your hardware, manages a persistent conceptual brain, and operates with a disciplined Planning/Execution lifecycle.
 
 ---
 
-## 🛠️ Prerequisites
-Before running Tempest AI, make sure you have the following installed on your machine:
+## 🚀 "Smart-Brain" Capabilities
 
-1. **Rust & Cargo**: [Install Rust](https://www.rust-lang.org/tools/install)
-2. **Ollama**: [Install Ollama](https://ollama.ai/download) to run models locally.
-3. **Ripgrep** *(Optional but Highly Recommended)*: `brew install ripgrep` (Mac) or `sudo apt install ripgrep` (Linux) for blazing-fast codebase search.
-4. **OpenSSL** *(Linux Only)*: `sudo apt install libssl-dev` or `sudo dnf install openssl-devel` is required to compile the web-crawler networking crates.
+### 🌡️ 1. Hardware-Aware Sentience
+Tempest is the first local agent that is "Sentient" of its host. It injects real-time **CPU, GPU, RAM, and Thermal telemetry** into its reasoning loop, allowing it to pace complex builds and multi-threaded tasks based on your machine's actual load.
+
+### 🛡️ 2. Disciplined Guardrails
+- **Planning vs. Execution**: Tempest starts every session in **PLANNING MODE**. It researches your codebase and presents a strategy. It CANNOT modify your system until you explicitly approve the plan.
+- **Loop Interception**: Implements a "Sentinel" layer that detects duplicate tool calls and hallucinations, forcing the agent to pivot or ask for help before wasting tokens.
+
+### 🧠 3. Reflective Memory (The Sketchpad)
+Tempest maintains a persistent `{task_context}` known as the **Sketchpad**. This ensures mission continuity across long-running tasks, preventing the "forgetting" common in long LLM conversations.
+
+### 📂 4. Deep Semantic Search (Vector RAG)
+Powered by `nomic-embed-text`, Tempest features a local **Vector Brain**.
+- **`index_file_semantically`**: Tempest "digests" your code into mathematical concepts.
+- **`semantic_search`**: Search your codebase by *meaning* rather than keywords. ("Find where we handle the telemetry overflow.")
+
+### 🕵️ 5. Sub-Agent Delegation
+For complex research missions, Tempest can spawn specialized **Sub-Agents**. These assistants perform deep-dives on documentation or logs in parallel, returning a distilled "Mission Report" to the Principal Agent.
+
+### 🧹 6. Autonomous Verification (Clippy)
+Every file modification triggers an automatic **Self-Correction Hook**. Tempest lint-checks and verifies its own work immediately after writing, catching syntax errors before you even see them.
+
+---
+
+## 🛠️ Setup & Configuration
+
+### Prerequisites
+1. **Ollama**: [Download Ollama](https://ollama.com)
+2. **Models**:
+   ```bash
+   ollama pull qwen2.5-coder:7b      # Recommended Principal Model
+   ollama pull nomic-embed-text      # Required for Semantic Brain
+   ollama pull phi3:latest           # Recommended Sub-Agent Model
+   ```
+
+### Configuration (`config.toml`)
+Tempest looks for a config file at `~/.config/tempest_ai/config.toml`.
+```toml
+model = "qwen2.5-coder:7b"
+sub_agent_model = "phi3:latest"
+history_path = "~/.tempest_history"
+encrypt_history = true
+```
 
 ---
 
 ## 📦 Installation
 
-To test Tempest AI locally or install it entirely onto your global path:
-
-1. **Clone the repository**
-```bash
-git clone https://github.com/yourusername/tempest_ai.git
-cd tempest_ai
-```
-
-2. **Pull the Qwen Model**
-Tempest AI defaults to utilizing the highly capable `qwen2.5-coder:7b` programming model.
-```bash
-ollama run qwen2.5-coder:7b
-```
-
-3. **Compile the Release Binary**
-Compile the optimized version for maximum speed.
-```bash
-cargo build --release
-```
-
-4. **Install Globally (Optional)**
-Move the binary into your PATH so you can summon it from any folder on your computer!
-```bash
-sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
-```
+1. **Build the Binary**:
+   ```bash
+   cargo build --release
+   ```
+2. **Install Globally**:
+   ```bash
+   sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
+   ```
 
 ---
 
-## 💻 Usage
-To start using Tempest AI, navigate to any empty directory or existing project folder and simply type:
+## 💻 Usage Lifecycle
 
-```bash
-tempest_ai
-```
+1. **RESEARCH**: Tempest analyzes the environment in Planning Mode.
+2. **PLAN**: It presents a numbered list of actions.
+3. **APPROVE**: You say "Go ahead" or "Proceed."
+4. **EXECUTE**: Tempest toggles out of planning mode and begins the work.
+5. **VERIFY**: Tempest run-checks its output and summarizes the mission.
 
-The system will verify the Ollama connection, validate your system's OS and architectures dynamically, and prompt you:
-```text
->> 
-```
+---
 
-**Just type what you want built!**
-> *"Spin up a Next.js server locally, navigate to `app/page.tsx`, and convert the hero component into a dark-mode tailwind layout. Once it's built, ping the localhost router to ensure it renders correctly."*
-
-The LLM will automatically launch tools, write files, inspect logs, and communicate directly with you until the job is done.
+**Tempest AI is built for engineers who value privacy, speed, and autonomous reliability.** 🌬️🦾
