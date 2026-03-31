@@ -25,7 +25,6 @@ pub struct Agent {
     pub planning_mode: bool,
     pub task_context: String,
     pub vector_brain: Arc<Mutex<crate::vector_brain::VectorBrain>>,
-    pub session_id: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
     #[allow(dead_code)]
@@ -99,7 +98,6 @@ impl Agent {
             vector_brain: Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(
                 Path::new(&history_path).with_file_name("brain_vectors.json")
             ).unwrap_or_else(|_| crate::vector_brain::VectorBrain::new()))),
-            session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             telemetry: Arc::new(Mutex::new("No telemetry data yet.".to_string())),
