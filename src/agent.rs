@@ -847,7 +847,6 @@ impl Agent {
                                                 \nDo NOT attempt to use this tool again until the user has approved your plan and you have used `toggle_planning` to enter EXECUTION mode.", tool_name);
                                         }
                                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Guardrail: Blocked '{}' (Planning Mode)", tool_name))).await;
-                                        executed_tools = true;
                                     } else if tool_name == "ask_user" {
                                         // 🤔 SPECIAL CASE: AskUser via TUI modal
                                         let question = args.get("question").and_then(|q| q.as_str()).unwrap_or("(No question provided)").to_string();
