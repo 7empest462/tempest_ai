@@ -8,6 +8,7 @@ mod hardware;
 mod telemetry;
 mod daemon;
 mod tui;
+mod vector_brain;
 
 use agent::Agent;
 use anyhow::Result;

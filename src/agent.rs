@@ -24,6 +24,8 @@ pub struct Agent {
     history_path: String,
     pub planning_mode: bool,
     pub task_context: String,
+    pub vector_brain: Arc<Mutex<crate::vector_brain::VectorBrain>>,
+    pub session_id: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
     #[allow(dead_code)]
@@ -32,6 +34,7 @@ pub struct Agent {
 }
 
 use std::sync::{Arc, Mutex};
+use std::path::Path;
 use crate::memory::MemoryStore;
 
 impl Agent {
@@ -85,12 +88,18 @@ impl Agent {
                 Box::new(RecallBrainTool),
                 Box::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone())),
                 Box::new(crate::tools::UpdateTaskContextTool),
+                Box::new(crate::tools::IndexFileSemanticallyTool),
+                Box::new(crate::tools::SemanticSearchTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
-            history_path,
+            history_path: history_path.clone(),
             planning_mode: true,
             task_context: "Not started yet.".to_string(),
+            vector_brain: Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(
+                Path::new(&history_path).with_file_name("brain_vectors.json")
+            ).unwrap_or_else(|_| crate::vector_brain::VectorBrain::new()))),
+            session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             telemetry: Arc::new(Mutex::new("No telemetry data yet.".to_string())),
@@ -873,6 +882,65 @@ impl Agent {
                                         let context = args.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string();
                                         self.task_context = context;
                                         tool_result_str = "Reflective memory (Sketchpad) updated successfully.".to_string();
+                                    } else if tool_name == "semantic_search" {
+                                        // 🔍 SEMANTIC SEARCH
+                                        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+                                        let top_k = args.get("top_k").and_then(|k| k.as_u64()).unwrap_or(5) as usize;
+                                        
+                                        let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                                            "nomic-embed-text".to_string(),
+                                            query.clone().into()
+                                        );
+                                        
+                                        match self.ollama.generate_embeddings(req).await {
+                                            Ok(res) => {
+                                                if let Some(embedding) = res.embeddings.first() {
+                                                    let hits = self.vector_brain.lock().unwrap().search(embedding, top_k);
+                                                    let mut report = format!("Conceptual results for: '{}'\n\n", query);
+                                                    for (entry, sim) in hits {
+                                                        report.push_str(&format!("[Match: {:.2}%] Source: {}\n{}\n---\n", sim * 100.0, entry.source, entry.text));
+                                                    }
+                                                    tool_result_str = report;
+                                                } else {
+                                                    tool_result_str = "Error: No embeddings generated for query.".to_string();
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tool_result_str = format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e);
+                                            }
+                                        }
+                                    } else if tool_name == "index_file_semantically" {
+                                        // 📂 SEMANTIC INDEXING
+                                        let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("📂 Concepts: Analyzing {}...", path))).await;
+                                        
+                                        match std::fs::read_to_string(&path) {
+                                            Ok(content) => {
+                                                // Simple chunking (500 chars)
+                                                let chunks: Vec<String> = content.chars().collect::<Vec<char>>()
+                                                    .chunks(500)
+                                                    .map(|c| c.iter().collect::<String>())
+                                                    .collect();
+                                                
+                                                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                                                    "nomic-embed-text".to_string(),
+                                                    chunks.clone().into()
+                                                );
+                                                
+                                                match self.ollama.generate_embeddings(req).await {
+                                                    Ok(res) => {
+                                                        let mut brain = self.vector_brain.lock().unwrap();
+                                                        for (i, emb) in res.embeddings.iter().enumerate() {
+                                                            brain.add_entry(chunks[i].clone(), emb.clone(), path.clone(), std::collections::HashMap::new());
+                                                        }
+                                                        let _ = brain.save_to_disk(std::path::Path::new(&self.history_path).with_file_name("brain_vectors.json"));
+                                                        tool_result_str = format!("Successfully indexed {} ({} conceptual chunks). Memory updated.", path, res.embeddings.len());
+                                                    }
+                                                    Err(e) => tool_result_str = format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e),
+                                                }
+                                            }
+                                            Err(e) => tool_result_str = format!("Read Error: {}", e),
+                                        }
                                     } else {
                                         // Normal tool execution path
                                         let mut allowed = true;

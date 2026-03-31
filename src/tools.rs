@@ -2128,3 +2128,46 @@ impl AgentTool for UpdateTaskContextTool {
         Ok("Reflective memory updated successfully.".to_string())
     }
 }
+
+pub struct IndexFileSemanticallyTool;
+
+#[async_trait::async_trait]
+impl AgentTool for IndexFileSemanticallyTool {
+    fn name(&self) -> &'static str { "index_file_semantically" }
+    fn description(&self) -> &'static str { "Read a file, break it into conceptual chunks, and generate semantic embeddings for each chunk. This allows for long-term conceptual recall." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "The absolute path to the file to index." }
+            },
+            "required": ["path"]
+        })
+    }
+    async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
+        // Handled as special case in Agent for vector_brain access
+        Ok("Indexing started...".to_string())
+    }
+}
+
+pub struct SemanticSearchTool;
+
+#[async_trait::async_trait]
+impl AgentTool for SemanticSearchTool {
+    fn name(&self) -> &'static str { "semantic_search" }
+    fn description(&self) -> &'static str { "Search your conceptual long-term memory for relevant information based on meaning rather than just keywords." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "The semantic query (e.g., 'how does the telemetry loop work?')." },
+                "top_k": { "type": "integer", "description": "Number of relevant results to return (default 5).", "default": 5 }
+            },
+            "required": ["query"]
+        })
+    }
+    async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
+        // Handled as special case in Agent for vector_brain access
+        Ok("Searching conceptually...".to_string())
+    }
+}
