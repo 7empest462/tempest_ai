@@ -243,6 +243,34 @@ FORMAT: Output a JSON block to call a tool:
             networks.refresh(true);
             components.refresh(true);
             
+            // 🤖 AI MEMORY (Ollama Tracking)
+            let mut ollama_mem_kb = 0;
+            for process in sys.processes().values() {
+                let name = process.name().to_string_lossy().to_lowercase();
+                if name.contains("ollama") || name.contains("llama") {
+                    ollama_mem_kb += process.memory();
+                }
+            }
+            let ollama_mb = ollama_mem_kb / 1024 / 1024;
+
+            // 🎨 GPU LOAD (Apple Silicon / macOS)
+            let mut gpu_load = 0;
+            #[cfg(target_os = "macos")]
+            {
+                let output = std::process::Command::new("ioreg")
+                    .args(["-r", "-c", "AGXAccelerator"])
+                    .output()
+                    .ok();
+                if let Some(out) = output {
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    if let Some(line) = s.lines().find(|l| l.contains("\"Device Utilization %\"")) {
+                        if let Some(val_str) = line.split('=').last() {
+                            gpu_load = val_str.trim().trim_end_matches('}').parse::<i32>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            
             let cpus = sys.cpus();
             let mut total_cpu = 0.0;
             for cpu in cpus { total_cpu += cpu.cpu_usage(); }
@@ -287,8 +315,8 @@ FORMAT: Output a JSON block to call a tool:
             let proc_count = sys.processes().len();
             
             let update_str = format!(
-                "🔥 CPU LOAD      : {:.1}% ({} Cores)\n\n🚀 MEMORY ALLOC  : {}/{} MB ({:.1}%)\n\n💾 SWAP CACHE    : {}/{} MB ({:.1}%)\n\n----------------------------------\n\n🌐 TRUNK [en0]   : {} B ▼ | {} B ▲\n\n🌡️ AVG THERMALS  : {:.1} °C (Max: {:.1} °C)\n\n⚙️ ACTIVE PROCS  : {}\n\n⏱️ CORE UPTIME   : {}h {}m {}s\n\n----------------------------------\n\n[ Live Topology Sweep: Active ]",
-                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, used_swap, total_swap, swap_perc,
+                "🔥 CPU LOAD      : {:.1}% ({} Cores)\n\n🚀 MEMORY ALLOC  : {}/{} MB ({:.1}%)\n\n🤖 AI RAM USE    : {} MB (Ollama)\n\n🎨 GPU LOAD      : {}% (Graphics)\n\n💾 SWAP CACHE    : {}/{} MB ({:.1}%)\n\n----------------------------------\n\n🌐 TRUNK [en0]   : {} B ▼ | {} B ▲\n\n🌡️ AVG THERMALS  : {:.1} °C (Max: {:.1} °C)\n\n⚙️ ACTIVE PROCS  : {}\n\n⏱️ CORE UPTIME   : {}h {}m {}s\n\n----------------------------------\n\n[ Live Topology Sweep: Active ]",
+                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ollama_mb, gpu_load, used_swap, total_swap, swap_perc,
                 total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
             );
             
