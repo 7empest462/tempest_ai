@@ -83,7 +83,7 @@ impl Agent {
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
             history_path,
-            planning_mode: false,
+            planning_mode: true,
             session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),

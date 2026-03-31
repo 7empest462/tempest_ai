@@ -50,7 +50,7 @@ impl App {
             auto_scroll: true,
             list_state: ratatui::widgets::ListState::default(),
             pending_confirmation: None,
-            agent_mode: "EXECUTING".to_string(),
+            agent_mode: "PLANNING".to_string(),
         }
     }
 }
