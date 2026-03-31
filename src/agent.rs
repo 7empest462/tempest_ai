@@ -826,8 +826,18 @@ impl Agent {
                                 if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
                                     // 🧠 PLANNING MODE GUARD
                                     if self.planning_mode && tool.is_modifying() {
-                                        tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED during planning. Present your implementation plan to the user first. Once they approve, use the `toggle_planning` tool to switch to Execution mode.", tool_name);
-                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Blocked '{}' — Agent is in PLANNING mode", tool_name))).await;
+                                        guardrail_retries += 1;
+                                        if guardrail_retries > 2 {
+                                            tool_result_str = "[System Guardrail] [SAFETY PIVOT]: You have hit the Planning Mode block multiple times. \
+                                                STOP calling modifying tools. You must immediately provide a text-only implementation plan for the user to approve. \
+                                                Once they approve, you must use `toggle_planning` to unlock these tools.".to_string();
+                                        } else {
+                                            tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED.\
+                                                \n[INSTRUCTION]: You MUST present a clear implementation plan to the user for approval first.\
+                                                \nDo NOT attempt to use this tool again until the user has approved your plan and you have used `toggle_planning` to enter EXECUTION mode.", tool_name);
+                                        }
+                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Guardrail: Blocked '{}' (Planning Mode)", tool_name))).await;
+                                        executed_tools = true;
                                     } else if tool_name == "ask_user" {
                                         // 🤔 SPECIAL CASE: AskUser via TUI modal
                                         let question = args.get("question").and_then(|q| q.as_str()).unwrap_or("(No question provided)").to_string();
