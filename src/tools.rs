@@ -2053,25 +2053,27 @@ impl AgentTool for RecallBrainTool {
     }
 }
 pub struct SpawnSubAgentTool {
+    memory_store: Arc<Mutex<crate::memory::MemoryStore>>,
+    sub_agent_model: String,
 }
 
 impl SpawnSubAgentTool {
-    pub fn new(_memory_store: Arc<Mutex<MemoryStore>>) -> Self {
-        Self { }
+    pub fn new(memory_store: Arc<Mutex<crate::memory::MemoryStore>>, sub_agent_model: String) -> Self {
+        Self { memory_store, sub_agent_model }
     }
 }
 
 #[async_trait::async_trait]
 impl AgentTool for SpawnSubAgentTool {
     fn name(&self) -> &'static str { "spawn_sub_agent" }
-    fn description(&self) -> &'static str { "Spawn a specialized 'Sub-Agent' to perform a research mission or a specific sub-task. Use a lighter model (like 'llama3:8b' or 'phi3') for research to save resources. Returns the distilled findings. Useful for delegating non-destructive work without cluttering your main history." }
+    fn description(&self) -> &'static str { "DELEGATE a complex sub-task to a specialized sub-agent. Returns the final report." }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "task": { "type": "string", "description": "The specific mission or question for the sub-agent." },
-                "context": { "type": "string", "description": "Optional background context file paths or snippets for the sub-agent." },
-                "model": { "type": "string", "description": "The model to use (e.g. 'llama3:8b', 'phi3:mini'). Defaults to a light model if available." }
+                "task": { "type": "string", "description": "The specific mission or research task for the sub-agent. Be descriptive." },
+                "model": { "type": "string", "description": "Optional: override the default sub-agent model." },
+                "context": { "type": "string", "description": "Optional: relevant context or findings from the current session." }
             },
             "required": ["task"]
         })

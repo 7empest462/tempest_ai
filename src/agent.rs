@@ -25,6 +25,7 @@ pub struct Agent {
     pub planning_mode: bool,
     pub task_context: String,
     pub vector_brain: Arc<Mutex<crate::vector_brain::VectorBrain>>,
+    pub sub_agent_model: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
     #[allow(dead_code)]
@@ -37,7 +38,7 @@ use std::path::Path;
 use crate::memory::MemoryStore;
 
 impl Agent {
-    pub fn new(model: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>) -> Self {
+    pub fn new(model: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>, sub_agent_model: String) -> Self {
         let mut agent = Agent {
             ollama: Ollama::default(),
             model,
@@ -85,7 +86,7 @@ impl Agent {
                 Box::new(SkillRecallTool),
                 Box::new(DistillKnowledgeTool),
                 Box::new(RecallBrainTool),
-                Box::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone())),
+                Box::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone(), sub_agent_model.clone())),
                 Box::new(crate::tools::UpdateTaskContextTool),
                 Box::new(crate::tools::IndexFileSemanticallyTool),
                 Box::new(crate::tools::SemanticSearchTool),
@@ -98,6 +99,7 @@ impl Agent {
             vector_brain: Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(
                 Path::new(&history_path).with_file_name("brain_vectors.json")
             ).unwrap_or_else(|_| crate::vector_brain::VectorBrain::new()))),
+            sub_agent_model,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             telemetry: Arc::new(Mutex::new("No telemetry data yet.".to_string())),

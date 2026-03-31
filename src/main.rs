@@ -51,6 +51,7 @@ struct AppConfig {
     history_path: Option<String>,
     db_path: Option<String>,
     encrypt_history: Option<bool>,
+    pub sub_agent_model: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -60,6 +61,7 @@ impl Default for AppConfig {
             history_path: Some("history.json".to_string()),
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
+            sub_agent_model: Some("phi3:latest".to_string()),
         }
     }
 }
@@ -206,8 +208,10 @@ FORMAT: Output a JSON block to call a tool:
     };
 
     let memory_store = std::sync::Arc::new(std::sync::Mutex::new(crate::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
-
-    let mut agent = Agent::new(model, system_prompt, history_path, memory_store.clone());
+    
+    let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "phi3:latest".to_string());
+    
+    let mut agent = Agent::new(model, system_prompt, history_path, memory_store, sub_agent_model);
     
     if let Err(e) = agent.check_connection().await {
         println!("{}", format!("Agent Error: {}", e).red());
