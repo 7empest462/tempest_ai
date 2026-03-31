@@ -847,7 +847,7 @@ impl Agent {
                                         let request = ChatMessageRequest::new(model_name, sub_agent_history);
                                         match self.ollama.send_chat_messages(request).await {
                                             Ok(res) => {
-                                                tool_result_str = format!("[SUB_AGENT_REPORT]\n{}", res.message.content);
+                                                tool_result_str = format!("[SUB_AGENT_REPORT]\n{}\n\n[System Instruction]: The sub-agent has completed its mission. READ the report above and SUMMARIZE the findings for the user. Do NOT call `spawn_sub_agent` again for this task.", res.message.content);
                                             }
                                             Err(e) => tool_result_str = format!("Sub-Agent Error: {}", e),
                                         }
