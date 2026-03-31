@@ -29,6 +29,7 @@ pub struct Agent {
     syntax_set: SyntaxSet,
     #[allow(dead_code)]
     theme_set: ThemeSet,
+    pub telemetry: Arc<Mutex<String>>,
 }
 
 use std::sync::{Arc, Mutex};
@@ -83,6 +84,7 @@ impl Agent {
                 Box::new(SkillRecallTool),
                 Box::new(DistillKnowledgeTool),
                 Box::new(RecallBrainTool),
+                Box::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone())),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
@@ -91,6 +93,7 @@ impl Agent {
             session_id: uuid::Uuid::new_v4().to_string(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
+            telemetry: Arc::new(Mutex::new("No telemetry data yet.".to_string())),
         };
 
         // Dynamically inject tool descriptions into the system prompt
@@ -659,6 +662,56 @@ impl Agent {
         Ok(calls)
     }
 
+    pub async fn perform_autonomous_verification(&self) -> String {
+        let mut report = String::new();
+        
+        // 🦀 RUST: Check for Cargo.toml
+        if std::path::Path::new("Cargo.toml").exists() {
+            let output = tokio::process::Command::new("cargo")
+                .args(["check", "--message-format=short"])
+                .output()
+                .await;
+            
+            if let Ok(out) = output {
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    report.push_str(&format!("\n[AUTONOMOUS_CLIPPY] 🦀 Rust Compiler Errors detected:\n{}\n", stderr));
+                }
+            }
+        }
+
+        // 🐍 PYTHON: Check for .py files
+        let has_py = std::fs::read_dir(".").ok()
+            .map(|entries| entries.flatten().any(|e| e.path().extension().map_or(false, |ext| ext == "py")))
+            .unwrap_or(false);
+        if has_py {
+             let output = tokio::process::Command::new("flake8")
+                .arg(".")
+                .output()
+                .await;
+            if let Ok(out) = output {
+                if !out.status.success() {
+                    report.push_str(&format!("\n[AUTONOMOUS_CLIPPY] 🐍 Python Linter (flake8) Errors:\n{}\n", String::from_utf8_lossy(&out.stdout)));
+                }
+            }
+        }
+
+        // 📦 NODE.JS: Check for package.json
+        if std::path::Path::new("package.json").exists() {
+            let output = tokio::process::Command::new("npm")
+                .args(["run", "lint"])
+                .output()
+                .await;
+            if let Ok(out) = output {
+                if !out.status.success() {
+                     report.push_str("\n[AUTONOMOUS_CLIPPY] 📦 Node.js Linter Errors detected in `npm run lint`.\n");
+                }
+            }
+        }
+
+        report
+    }
+
     pub async fn run_tui_mode(&mut self, mut user_rx: tokio::sync::mpsc::Receiver<String>, tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>, mut tool_rx: tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>, stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
         let full_system_prompt = self.system_prompt.clone();
         
@@ -689,6 +742,14 @@ impl Agent {
                 }
                 self.history.retain(|m| m.content != "[trimmed]");
                 let _ = self.auto_summarize_memory(true).await;
+                
+                // 📡 INJECT SYSTEM SENTIENCE (Hardware Telemetry)
+                let telemetry = {
+                    let lock = self.telemetry.lock().unwrap();
+                    lock.clone()
+                };
+                let telemetry_msg = format!("[SYSTEM_TELEMETRY] Current Host State:\n{}\n\nUse this information to pace your actions. If the GPU is under heavy load or thermals are high, favor lighter tools or wait.", telemetry);
+                self.history.push(ChatMessage::new(MessageRole::System, telemetry_msg));
 
                 let options = GenerationOptions::default()
                     .num_ctx(8192)
@@ -696,6 +757,9 @@ impl Agent {
                     .repeat_penalty(1.1)
                     .temperature(0.7);
                 let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
+
+                // Remove the telemetry message before we continue so history stays clean
+                self.history.pop();
 
                 let mut stream = match self.ollama.send_chat_messages_stream(request).await {
                     Ok(s) => s,
@@ -767,6 +831,26 @@ impl Agent {
                                                 tool_result_str = "User cancelled the input request.".to_string();
                                             }
                                         }
+                                    } else if tool_name == "spawn_sub_agent" {
+                                        // 🕵️ SUB-AGENT DELEGATION
+                                        let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("(No task)").to_string();
+                                        let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.model).to_string();
+                                        
+                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🕵️ Sub-Agent Mission: {}...", task))).await;
+                                        
+                                        // Create a mini-agent without the sub-agent tool to prevent recursion
+                                        let sub_agent_history = vec![
+                                            ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the mission and provide a CONCISE summary.".to_string()),
+                                            ChatMessage::new(MessageRole::User, task.clone()),
+                                        ];
+                                        
+                                        let request = ChatMessageRequest::new(model_name, sub_agent_history);
+                                        match self.ollama.send_chat_messages(request).await {
+                                            Ok(res) => {
+                                                tool_result_str = format!("[SUB_AGENT_REPORT]\n{}", res.message.content);
+                                            }
+                                            Err(e) => tool_result_str = format!("Sub-Agent Error: {}", e),
+                                        }
                                     } else {
                                         // Normal tool execution path
                                         let mut allowed = true;
@@ -787,16 +871,14 @@ impl Agent {
                                             }
                                             let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
 
-                                            // ✅ VERIFICATION LOOP
+                                            // ✅ VERIFICATION LOOP (AUTONOMOUS CLIPPY)
                                             if tool.is_modifying() && !tool_result_str.starts_with("Error") {
+                                                let auto_errors = self.perform_autonomous_verification().await;
                                                 let verify_msg = format!(
-                                                    "TOOL RESULT for {}:\n{}\n\n[System Verification Required] You just executed a modifying action ('{}').\
+                                                    "TOOL RESULT for {}:\n{}\n{}\n\n[System Verification Required] You just executed a modifying action ('{}').\
                                                     \nBEFORE continuing or declaring success, you MUST verify your work.\
-                                                    \n- If you wrote a file: use `read_file` or `run_command` with `cat` to confirm the contents.\
-                                                    \n- If you ran a command: check the output for errors.\
-                                                    \n- If you edited code: use `run_command` to run the compiler/linter.\
-                                                    \nDo NOT skip this step.",
-                                                    tool_name, tool_result_str, tool_name
+                                                     Do NOT skip this step.",
+                                                    tool_name, tool_result_str, auto_errors, tool_name
                                                 );
                                                 self.history.push(ChatMessage::new(MessageRole::User, verify_msg));
                                                 let _ = self.save_history();

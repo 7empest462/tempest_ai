@@ -2052,3 +2052,59 @@ impl AgentTool for RecallBrainTool {
         }
     }
 }
+pub struct SpawnSubAgentTool {
+    pub memory_store: Arc<Mutex<MemoryStore>>,
+}
+
+impl SpawnSubAgentTool {
+    pub fn new(memory_store: Arc<Mutex<MemoryStore>>) -> Self {
+        Self { memory_store }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentTool for SpawnSubAgentTool {
+    fn name(&self) -> &'static str { "spawn_sub_agent" }
+    fn description(&self) -> &'static str { "Spawn a specialized 'Sub-Agent' to perform a research mission or a specific sub-task. Use a lighter model (like 'llama3:8b' or 'phi3') for research to save resources. Returns the distilled findings. Useful for delegating non-destructive work without cluttering your main history." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": { "type": "string", "description": "The specific mission or question for the sub-agent." },
+                "context": { "type": "string", "description": "Optional background context file paths or snippets for the sub-agent." },
+                "model": { "type": "string", "description": "The model to use (e.g. 'llama3:8b', 'phi3:mini'). Defaults to a light model if available." }
+            },
+            "required": ["task"]
+        })
+    }
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let task = args.get("task").and_then(|t| t.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'task'"))?;
+        let _context = args.get("context").and_then(|c| c.as_str()).unwrap_or_default();
+        let model_req = args.get("model").and_then(|m| m.as_str());
+
+        // 🤖 MODEL SELECTION: Favor light models for research
+        let mut final_model = model_req.unwrap_or("llama3:8b").to_string();
+        
+        // Check if the requested model exists, otherwise fallback to something common
+        let ollama = ollama_rs::Ollama::default();
+        if let Ok(models) = ollama.list_local_models().await {
+            if !models.iter().any(|m| m.name == final_model) {
+                // If llama3:8b doesn't exist, try phi3 or fallback to llama3
+                if models.iter().any(|m| m.name == "phi3") {
+                    final_model = "phi3".to_string();
+                } else if let Some(first) = models.get(0) {
+                     final_model = first.name.clone();
+                }
+            }
+        }
+
+        let system_prompt = "You are a specialized 'Sub-Agent' researcher for the Tempest AI main system.\
+                             \nYour goal is to perform a specific mission and return a concise, high-quality summary of your findings.\
+                             \nYou have full tool access, but you should favor research tools (read_file, search_web) and NOT make destructive system changes unless absolutely necessary.\
+                             \nBe factual, analytical, and fast.";
+
+        // We can't easily run a full TUI loop for a sub-agent here without circular dependencies or complex UI state.
+        // Instead, we call a simplified one-shot or few-shot execution in src/agent.rs once we expose the method.
+        Ok(format!("[SUB_AGENT_SIMULATION] Initializing Sub-Agent with model '{}' for mission: '{}'... (This tool is currently being wired to the core logic in src/agent.rs)", final_model, task))
+    }
+}

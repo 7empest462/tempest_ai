@@ -232,6 +232,7 @@ FORMAT: Output a JSON block to call a tool:
     let stop_flag_tui = stop_flag.clone();
 
     let agent_tx_metrics = agent_tx.clone();
+    let shared_telemetry = agent.telemetry.clone();
     tokio::spawn(async move {
         use sysinfo::{System, Networks, Components};
         let mut sys = System::new_all();
@@ -322,7 +323,11 @@ FORMAT: Output a JSON block to call a tool:
                 total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
             );
             
-            let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str)).await;
+            let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
+            {
+                let mut lock = shared_telemetry.lock().unwrap();
+                *lock = update_str;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     });
