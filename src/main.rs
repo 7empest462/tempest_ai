@@ -263,9 +263,11 @@ FORMAT: Output a JSON block to call a tool:
                     .ok();
                 if let Some(out) = output {
                     let s = String::from_utf8_lossy(&out.stdout);
-                    if let Some(line) = s.lines().find(|l| l.contains("\"Device Utilization %\"")) {
-                        if let Some(val_str) = line.split('=').last() {
-                            gpu_load = val_str.trim().trim_end_matches('}').parse::<i32>().unwrap_or(0);
+                    // Use a regex to find "Device Utilization %"=XX
+                    let re = regex::Regex::new(r#""Device Utilization %"=(\d+)"#).unwrap();
+                    if let Some(caps) = re.captures(&s) {
+                        if let Some(m) = caps.get(1) {
+                            gpu_load = m.as_str().parse::<i32>().unwrap_or(0);
                         }
                     }
                 }
