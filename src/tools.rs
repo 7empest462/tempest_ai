@@ -690,7 +690,6 @@ impl AgentTool for SearchDirTool {
         if output.is_err() {
             is_rg = false;
             output = std::process::Command::new("grep")
-                .arg("-rni")
                 .arg("--exclude-dir=target")
                 .arg("--exclude-dir=node_modules")
                 .arg("--exclude-dir=.git")
@@ -1755,7 +1754,6 @@ impl AgentTool for AppendFileTool {
 }
 
 pub struct DownloadFileTool;
-
 #[async_trait::async_trait]
 impl AgentTool for DownloadFileTool {
     fn name(&self) -> &'static str { "download_file" }

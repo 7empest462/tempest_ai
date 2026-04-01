@@ -91,6 +91,7 @@ impl Agent {
                 Box::new(crate::tools::UpdateTaskContextTool),
                 Box::new(crate::tools::IndexFileSemanticallyTool),
                 Box::new(crate::tools::SemanticSearchTool),
+                Box::new(crate::tools::TogglePlanningTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
@@ -952,10 +953,14 @@ impl Agent {
                 // BEFORE any fallible operations, so it can never leak into persistent history.
                 self.history.pop();
 
-                let mut stream = match self.ollama.send_chat_messages_stream(request).await {
-                    Ok(s) => s,
-                    Err(e) => {
+                let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(120), self.ollama.send_chat_messages_stream(request)).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Ollama Error: {}", e))).await;
+                        break;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("Ollama Error: Connection Timed Out (120s)".to_string())).await;
                         break;
                     }
                 };
@@ -977,6 +982,16 @@ impl Agent {
 
                 if !full_content.trim().is_empty() {
                     self.history.push(ChatMessage::new(MessageRole::Assistant, full_content.clone()));
+                    
+                    // 🧠 ASSISTANT TEXT SENTINEL DETECTION (Sync Internal State)
+                    if full_content.contains("[PLANNING_MODE_OFF]") {
+                        self.planning_mode = false;
+                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("⚡ Agent synced to EXECUTION mode".to_string())).await;
+                    } else if full_content.contains("[PLANNING_MODE_ON]") {
+                        self.planning_mode = true;
+                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🧠 Agent synced to PLANNING mode".to_string())).await;
+                    }
+
                     let _ = self.save_history();
                 }
 
