@@ -244,6 +244,10 @@ FORMAT: Output a JSON block to call a tool:
         let mut networks = Networks::new_with_refreshed_list();
         let mut components = Components::new_with_refreshed_list();
         
+        // Compile regex once outside the loop (was being compiled every 1s tick)
+        #[cfg(target_os = "macos")]
+        let gpu_re = regex::Regex::new(r#""Device Utilization %"=(\d+)"#).unwrap();
+
         loop {
             sys.refresh_all();
             networks.refresh(true);
@@ -270,9 +274,7 @@ FORMAT: Output a JSON block to call a tool:
                     .ok();
                 if let Some(out) = output {
                     let s = String::from_utf8_lossy(&out.stdout);
-                    // Use a regex to find "Device Utilization %"=XX
-                    let re = regex::Regex::new(r#""Device Utilization %"=(\d+)"#).unwrap();
-                    if let Some(caps) = re.captures(&s) {
+                    if let Some(caps) = gpu_re.captures(&s) {
                         if let Some(m) = caps.get(1) {
                             gpu_load = m.as_str().parse::<i32>().unwrap_or(0);
                         }

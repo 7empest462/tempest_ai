@@ -175,6 +175,14 @@ impl AgentTool for ReadFileTool {
         let path = path_owned.as_str();
 
         // println!(">> [TOOL CALL: read_file] Reading: {}", path);
+        
+        // Size guard: prevent reading huge files that would blow out the context window
+        let metadata = fs::metadata(path)?;
+        let max_size = 1_000_000; // 1MB
+        if metadata.len() > max_size {
+            anyhow::bail!("File is too large ({:.1}MB). Maximum readable size is 1MB. Use `run_command` with `head` or `tail` to read portions of large files.", metadata.len() as f64 / 1_000_000.0);
+        }
+        
         let content = fs::read_to_string(path)?;
         Ok(content)
     }
@@ -1243,24 +1251,45 @@ impl AgentTool for NotifyTool {
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let title = args.get("title").and_then(|t| t.as_str()).unwrap_or("Tempest AI");
         let message = args.get("message").and_then(|m| m.as_str()).unwrap_or("Task complete.");
-        // println!(">> [TOOL CALL: notify] {} — {}", title, message);
 
-        let script = format!(
-            "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
-            message.replace('"', "\\\""),
-            title.replace('"', "\\\"")
-        );
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!(
+                "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
+                message.replace('"', "\\\""),
+                title.replace('"', "\\\"")
+            );
+            let output = Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output()?;
+            if output.status.success() {
+                Ok(format!("🔔 Notification sent: {} — {}", title, message))
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to send notification: {}", err)
+            }
+        }
 
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()?;
+        #[cfg(target_os = "linux")]
+        {
+            let output = Command::new("notify-send")
+                .arg(title)
+                .arg(message)
+                .output();
+            match output {
+                Ok(o) if o.status.success() => Ok(format!("🔔 Notification sent: {} — {}", title, message)),
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    anyhow::bail!("Failed to send notification (is libnotify installed?): {}", err)
+                }
+                Err(_) => anyhow::bail!("notify-send not found. Install with: sudo apt install libnotify-bin"),
+            }
+        }
 
-        if output.status.success() {
-            Ok(format!("🔔 Notification sent: {} — {}", title, message))
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to send notification: {}", err)
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Ok(format!("Notification not supported on this platform. Title: {} Message: {}", title, message))
         }
     }
 }

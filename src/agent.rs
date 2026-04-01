@@ -237,7 +237,7 @@ impl Agent {
         loop {
             iteration_count += 1;
             if iteration_count > max_iterations {
-                println!("\n{}", "🛑 Execution limit reached (10 turns). Stopping to prevent infinite loop.".red());
+                println!("\n{}", "🛑 Execution limit reached (30 turns). Stopping to prevent infinite loop.".red());
                 break;
             }
             // 🧠 Autonomously clear empty/useless messages from history before sending
