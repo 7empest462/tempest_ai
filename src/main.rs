@@ -184,10 +184,20 @@ FORMAT: Output a JSON block to call a tool:
         .or(config.model)
         .unwrap_or_else(|| "qwen2.5-coder:7b".to_string());
 
-    let history_path = config.history_path.unwrap_or_else(|| "history.json".to_string());
-    
     let mut config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     config_dir.push("tempest_ai");
+    let _ = std::fs::create_dir_all(&config_dir);
+
+    // Standardize history path: config file > default (~/.config/tempest_ai/history.json)
+    let history_raw = config.history_path
+        .unwrap_or_else(|| "history.json".to_string());
+    
+    let history_path = if std::path::Path::new(&history_raw).is_absolute() {
+        history_raw
+    } else {
+        config_dir.join(&history_raw).to_string_lossy().to_string()
+    };
+    
     let key_path = config_dir.join("master.key");
     
     let passphrase = if key_path.exists() {

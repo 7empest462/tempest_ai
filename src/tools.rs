@@ -1637,14 +1637,13 @@ pub struct EnvVarTool;
 #[async_trait::async_trait]
 impl AgentTool for EnvVarTool {
     fn name(&self) -> &'static str { "env_var" }
-    fn description(&self) -> &'static str { "Get or set environment variables. Use 'get' to read a variable, 'set' to set one for the current session, or 'list' to show all." }
+    fn description(&self) -> &'static str { "Read environment variables. Use 'get' to read a specific variable or 'list' to show all exported variables." }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "description": "'get', 'set', or 'list'" },
-                "name": { "type": "string", "description": "Variable name (required for get/set)" },
-                "value": { "type": "string", "description": "Variable value (required for set)" }
+                "action": { "type": "string", "description": "'get' or 'list'" },
+                "name": { "type": "string", "description": "Variable name (required for get)" }
             },
             "required": ["action"]
         })
@@ -1664,12 +1663,7 @@ impl AgentTool for EnvVarTool {
                 }
             },
             "set" => {
-                let name = args.get("name").and_then(|n| n.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'name' for env set"))?;
-                let value = args.get("value").and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'value' for env set"))?;
-                unsafe { std::env::set_var(name, value); }
-                Ok(format!("✅ Set {}={}", name, value))
+                Err(anyhow::anyhow!("The 'set' action is disabled for security and thread-safety reasons in this async environment."))
             },
             "list" => {
                 let vars: Vec<String> = std::env::vars()

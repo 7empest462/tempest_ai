@@ -30,19 +30,27 @@ Every file modification triggers an automatic **Self-Correction Hook**. Tempest 
 
 ---
 
+## 🚀 Quick Start (One-Liner)
+
+```bash
+git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo build --release && sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
+```
+
+---
+
 ## 🛠️ Setup & Configuration
 
-### Prerequisites
+### 💎 Prerequisites
 1. **Ollama**: [Download Ollama](https://ollama.com)
 2. **Models**:
    ```bash
-   ollama pull qwen2.5-coder:7b      # Recommended Principal Model
-   ollama pull nomic-embed-text      # Required for Semantic Brain
-   ollama pull phi3:latest           # Recommended Sub-Agent Model
+   ollama pull qwen2.5-coder:7b      # Principal Model (Best for Coding)
+   ollama pull nomic-embed-text      # REQUIRED: For the Vector Brain (Semantic RAG)
+   ollama pull phi3:latest           # Recommended: For Sub-Agent tasks
    ```
 
-### Configuration (`config.toml`)
-Tempest looks for a config file at `~/.config/tempest_ai/config.toml`.
+### ⚙️ Configuration
+Tempest looks for its config at `~/.config/tempest_ai/config.toml`.
 ```toml
 model = "qwen2.5-coder:7b"
 sub_agent_model = "phi3:latest"
@@ -52,13 +60,19 @@ encrypt_history = true
 
 ---
 
-## 📦 Installation
+## 📦 Manual Installation
 
-1. **Build the Binary**:
+If you prefer to perform the steps individually:
+
+1. **Clone & Enter**:
+   ```bash
+   git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai
+   ```
+2. **Build the Binary**:
    ```bash
    cargo build --release
    ```
-2. **Install Globally**:
+3. **Install Globally**:
    ```bash
    sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
    ```

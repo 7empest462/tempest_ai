@@ -98,7 +98,7 @@ impl Agent {
             planning_mode: true,
             task_context: "Not started yet.".to_string(),
             vector_brain: Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(
-                Path::new(&history_path).with_file_name("brain_vectors.json")
+                Path::new(&history_path).parent().unwrap_or(Path::new(".")).join("brain_vectors.json")
             ).unwrap_or_else(|_| crate::vector_brain::VectorBrain::new()))),
             sub_agent_model,
             syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -549,6 +549,136 @@ impl Agent {
         Ok(())
     }
 
+    /// Handles tools that require direct agent state access (planning guard, sub-agents, 
+    /// semantic brain, reflective memory, TUI modals). Returns `Some(result)` if handled,
+    /// `None` if the tool should go through the normal execution path.
+    async fn handle_agent_tool(
+        &mut self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        tx: &tokio::sync::mpsc::Sender<crate::tui::AgentEvent>,
+        tool_rx: &mut tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>,
+        guardrail_retries: &mut usize,
+        is_modifying: bool,
+    ) -> Option<String> {
+        // 🧠 PLANNING MODE GUARD
+        if self.planning_mode && is_modifying {
+            *guardrail_retries += 1;
+            let result = if *guardrail_retries > 2 {
+                "[System Guardrail] [SAFETY PIVOT]: You have hit the Planning Mode block multiple times. \
+                    STOP calling modifying tools. You must immediately provide a text-only implementation plan for the user to approve. \
+                    Once they approve, you must use `toggle_planning` to unlock these tools.".to_string()
+            } else {
+                format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED.\
+                    \n[INSTRUCTION]: You MUST present a clear implementation plan to the user for approval first.\
+                    \nDo NOT attempt to use this tool again until the user has approved your plan and you have used `toggle_planning` to enter EXECUTION mode.", tool_name)
+            };
+            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Guardrail: Blocked '{}' (Planning Mode)", tool_name))).await;
+            return Some(result);
+        }
+
+        match tool_name {
+            "ask_user" => {
+                let question = args.get("question").and_then(|q| q.as_str()).unwrap_or("(No question provided)").to_string();
+                while let Ok(_) = tool_rx.try_recv() {}
+                let _ = tx.send(crate::tui::AgentEvent::RequestInput(tool_name.to_string(), question)).await;
+                match tool_rx.recv().await {
+                    Some(crate::tui::ToolResponse::Text(user_answer)) => Some(format!("User responded: {}", user_answer)),
+                    _ => Some("User cancelled the input request.".to_string()),
+                }
+            }
+            "spawn_sub_agent" => {
+                let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("(No task)").to_string();
+                let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.sub_agent_model).to_string();
+                let sub_agent_history = vec![
+                    ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the mission and provide a CONCISE summary.".to_string()),
+                    ChatMessage::new(MessageRole::User, task.clone()),
+                ];
+                let request = ChatMessageRequest::new(model_name, sub_agent_history);
+                match self.ollama.send_chat_messages(request).await {
+                    Ok(res) => Some(format!("[MISSION REPORT]: {}\n\n[INSTRUCTION]: MISSION ACCOMPLISHED. Read the provided research above and summarize it for the user. Do NOT call this tool again for the same task.", res.message.content)),
+                    Err(e) => Some(format!("Sub-Agent Error: {}", e)),
+                }
+            }
+            "update_task_context" => {
+                let context = args.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                self.task_context = context;
+                Some("Reflective memory (Sketchpad) updated successfully.".to_string())
+            }
+            "semantic_search" => {
+                let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+                let top_k = args.get("top_k").and_then(|k| k.as_u64()).unwrap_or(5) as usize;
+                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                    "nomic-embed-text".to_string(),
+                    query.clone().into()
+                );
+                match self.ollama.generate_embeddings(req).await {
+                    Ok(res) => {
+                        if let Some(embedding) = res.embeddings.first() {
+                            let hits = self.vector_brain.lock().expect("VectorBrain Mutex Poisoned during search").search(embedding, top_k);
+                            let mut report = format!("Conceptual results for: '{}'\n\n", query);
+                            for (entry, sim) in hits {
+                                report.push_str(&format!("[Match: {:.2}%] Source: {}\n{}\n---\n", sim * 100.0, entry.source, entry.text));
+                            }
+                            Some(report)
+                        } else {
+                            Some("Error: No embeddings generated for query.".to_string())
+                        }
+                    }
+                    Err(e) => Some(format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e)),
+                }
+            }
+            "index_file_semantically" => {
+                let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("📂 Concepts: Analyzing {}...", path))).await;
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        // 🧠 SMART CHUNKING: Split by double-newlines, then subdivide if still too large.
+                        let mut chunks = Vec::new();
+                        for paragraph in content.split("\n\n") {
+                            if paragraph.trim().is_empty() { continue; }
+                            // Subdivide large paragraphs (respecting line boundaries)
+                            if paragraph.len() > 800 {
+                                let mut current_chunk = String::new();
+                                for line in paragraph.lines() {
+                                    if current_chunk.len() + line.len() > 800 && !current_chunk.is_empty() {
+                                        chunks.push(current_chunk);
+                                        current_chunk = String::new();
+                                    }
+                                    current_chunk.push_str(line);
+                                    current_chunk.push('\n');
+                                }
+                                if !current_chunk.is_empty() { chunks.push(current_chunk); }
+                            } else {
+                                chunks.push(paragraph.to_string());
+                            }
+                        }
+                        
+                        let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                            "nomic-embed-text".to_string(),
+                            chunks.clone().into()
+                        );
+                        match self.ollama.generate_embeddings(req).await {
+                            Ok(res) => {
+                                let mut brain = self.vector_brain.lock().expect("VectorBrain Mutex Poisoned during indexing");
+                                brain.entries.retain(|e| e.source != path);
+                                for (i, emb) in res.embeddings.iter().enumerate() {
+                                    brain.add_entry(chunks[i].clone(), emb.clone(), path.clone(), std::collections::HashMap::new());
+                                }
+                                let brain_path = Path::new(&self.history_path).parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
+                                let _ = brain.save_to_disk(brain_path);
+                                Some(format!("Successfully indexed {} ({} conceptual chunks). Memory updated.", path, res.embeddings.len()))
+                            }
+                            Err(e) => Some(format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e)),
+                        }
+                    }
+                    Err(e) => Some(format!("Read Error: {}", e)),
+                }
+            }
+            _ => None, // Not an agent-handled tool — fall through to normal execution
+        }
+    }
+
     fn extract_tool_calls(&self, content: &str) -> Result<Vec<Value>, String> {
         let mut calls = Vec::new();
         let mut search_from = 0;
@@ -859,118 +989,19 @@ impl Agent {
                                 if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
 
                                 let tool_result_str;
-                                if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
-                                    // 🧠 PLANNING MODE GUARD
-                                    if self.planning_mode && tool.is_modifying() {
-                                        guardrail_retries += 1;
-                                        if guardrail_retries > 2 {
-                                            tool_result_str = "[System Guardrail] [SAFETY PIVOT]: You have hit the Planning Mode block multiple times. \
-                                                STOP calling modifying tools. You must immediately provide a text-only implementation plan for the user to approve. \
-                                                Once they approve, you must use `toggle_planning` to unlock these tools.".to_string();
-                                        } else {
-                                            tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED.\
-                                                \n[INSTRUCTION]: You MUST present a clear implementation plan to the user for approval first.\
-                                                \nDo NOT attempt to use this tool again until the user has approved your plan and you have used `toggle_planning` to enter EXECUTION mode.", tool_name);
-                                        }
-                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Guardrail: Blocked '{}' (Planning Mode)", tool_name))).await;
-                                    } else if tool_name == "ask_user" {
-                                        // 🤔 SPECIAL CASE: AskUser via TUI modal
-                                        let question = args.get("question").and_then(|q| q.as_str()).unwrap_or("(No question provided)").to_string();
-                                        while let Ok(_) = tool_rx.try_recv() {}
-                                        let _ = tx.send(crate::tui::AgentEvent::RequestInput(tool_name.to_string(), question)).await;
-                                        match tool_rx.recv().await {
-                                            Some(crate::tui::ToolResponse::Text(user_answer)) => {
-                                                tool_result_str = format!("User responded: {}", user_answer);
-                                            }
-                                            _ => {
-                                                tool_result_str = "User cancelled the input request.".to_string();
-                                            }
-                                        }
-                                    } else if tool_name == "spawn_sub_agent" {
-                                        // 🕵️ SUB-AGENT DELEGATION
-                                        let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("(No task)").to_string();
-                                        let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.sub_agent_model).to_string();
-                                        
-                                        let sub_agent_history = vec![
-                                            ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the mission and provide a CONCISE summary.".to_string()),
-                                            ChatMessage::new(MessageRole::User, task.clone()),
-                                        ];
-                                        
-                                        let request = ChatMessageRequest::new(model_name, sub_agent_history);
-                                        match self.ollama.send_chat_messages(request).await {
-                                            Ok(res) => {
-                                                tool_result_str = format!("[MISSION REPORT]: {}\n\n[INSTRUCTION]: MISSION ACCOMPLISHED. Read the provided research above and summarize it for the user. Do NOT call this tool again for the same task.", res.message.content);
-                                            }
-                                            Err(e) => tool_result_str = format!("Sub-Agent Error: {}", e),
-                                        }
-                                    } else if tool_name == "update_task_context" {
-                                        // 🧠 REFLECTIVE MEMORY (SKETCHPAD)
-                                        let context = args.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string();
-                                        self.task_context = context;
-                                        tool_result_str = "Reflective memory (Sketchpad) updated successfully.".to_string();
-                                    } else if tool_name == "semantic_search" {
-                                        // 🔍 SEMANTIC SEARCH
-                                        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
-                                        let top_k = args.get("top_k").and_then(|k| k.as_u64()).unwrap_or(5) as usize;
-                                        
-                                        let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                                            "nomic-embed-text".to_string(),
-                                            query.clone().into()
-                                        );
-                                        
-                                        match self.ollama.generate_embeddings(req).await {
-                                            Ok(res) => {
-                                                if let Some(embedding) = res.embeddings.first() {
-                                                    let hits = self.vector_brain.lock().unwrap().search(embedding, top_k);
-                                                    let mut report = format!("Conceptual results for: '{}'\n\n", query);
-                                                    for (entry, sim) in hits {
-                                                        report.push_str(&format!("[Match: {:.2}%] Source: {}\n{}\n---\n", sim * 100.0, entry.source, entry.text));
-                                                    }
-                                                    tool_result_str = report;
-                                                } else {
-                                                    tool_result_str = "Error: No embeddings generated for query.".to_string();
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tool_result_str = format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e);
-                                            }
-                                        }
-                                    } else if tool_name == "index_file_semantically" {
-                                        // 📂 SEMANTIC INDEXING
-                                        let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("📂 Concepts: Analyzing {}...", path))).await;
-                                        
-                                        match std::fs::read_to_string(&path) {
-                                            Ok(content) => {
-                                                // Simple chunking (500 chars)
-                                                let chunks: Vec<String> = content.chars().collect::<Vec<char>>()
-                                                    .chunks(500)
-                                                    .map(|c| c.iter().collect::<String>())
-                                                    .collect();
-                                                
-                                                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                                                    "nomic-embed-text".to_string(),
-                                                    chunks.clone().into()
-                                                );
-                                                
-                                                match self.ollama.generate_embeddings(req).await {
-                                                    Ok(res) => {
-                                                        let mut brain = self.vector_brain.lock().unwrap();
-                                                        // Deduplicate: remove existing chunks from this source before re-indexing
-                                                        brain.entries.retain(|e| e.source != path);
-                                                        for (i, emb) in res.embeddings.iter().enumerate() {
-                                                            brain.add_entry(chunks[i].clone(), emb.clone(), path.clone(), std::collections::HashMap::new());
-                                                        }
-                                                        let _ = brain.save_to_disk(std::path::Path::new(&self.history_path).with_file_name("brain_vectors.json"));
-                                                        tool_result_str = format!("Successfully indexed {} ({} conceptual chunks). Memory updated.", path, res.embeddings.len());
-                                                    }
-                                                    Err(e) => tool_result_str = format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e),
-                                                }
-                                            }
-                                            Err(e) => tool_result_str = format!("Read Error: {}", e),
-                                        }
+                                let is_tool_known = self.tools.iter().any(|t| t.name() == tool_name);
+                                
+                                if !is_tool_known {
+                                    tool_result_str = format!("Error: No such tool '{}'", tool_name);
+                                } else {
+                                    let is_modifying = self.tools.iter().find(|t| t.name() == tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+                                    
+                                    // Phase 1: Try agent-handled tools (stateful tools that need direct agent access)
+                                    if let Some(result) = self.handle_agent_tool(tool_name, args, &tx, &mut tool_rx, &mut guardrail_retries, is_modifying).await {
+                                        tool_result_str = result;
                                     } else {
-                                        // Normal tool execution path
+                                        // Phase 2: Standard tool execution path
+                                        let tool = self.tools.iter().find(|t| t.name() == tool_name).unwrap();
                                         let mut allowed = true;
                                         if tool.requires_confirmation() {
                                             while let Ok(_) = tool_rx.try_recv() {}
@@ -1007,11 +1038,11 @@ impl Agent {
                                             tool_result_str = "Error: User denied permission via TUI Modal.".to_string();
                                         }
                                     }
-                                } else {
-                                    tool_result_str = format!("Error: No such tool '{}'", tool_name);
                                 }
-                                
+
+
                                 self.history.push(ChatMessage::new(MessageRole::System, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+
                                 
                                 // 🧠 SENTINEL DETECTION
                                 if tool_result_str.contains("[PLANNING_MODE_ON]") {
@@ -1042,23 +1073,27 @@ impl Agent {
                 }
                 
                 // Final safety: Prune history of redundant guardrail messages to prevent context drift
-                let mut prune_indices = Vec::new();
                 let mut guardrail_streak = 0;
+                let mut to_keep = vec![true; self.history.len()];
+                
                 for (i, msg) in self.history.iter().enumerate().rev() {
                     if msg.content.contains("[System Guardrail]") {
                         guardrail_streak += 1;
                         if guardrail_streak > 2 {
-                            prune_indices.push(i);
+                            to_keep[i] = false;
                         }
                     } else {
                         guardrail_streak = 0;
                     }
                 }
-                for i in prune_indices {
-                    if i < self.history.len() {
-                        self.history.remove(i);
+                
+                let mut new_history = Vec::with_capacity(self.history.len());
+                for (msg, keep) in self.history.drain(..).zip(to_keep) {
+                    if keep {
+                        new_history.push(msg);
                     }
                 }
+                self.history = new_history;
             } // end loop
         } // end while user_rx
         Ok(())
