@@ -18,7 +18,7 @@ pub struct Agent {
     ollama: Ollama,
     model: String,
     history: Vec<ChatMessage>,
-    tools: Vec<Box<dyn AgentTool>>,
+    tools: Vec<Arc<dyn AgentTool>>,
     system_prompt: String,
     recent_tool_calls: std::collections::VecDeque<String>,
     history_path: String,
@@ -45,53 +45,52 @@ impl Agent {
             model,
             history: vec![],
             tools: vec![
-                Box::new(crate::tools::StoreMemoryTool::new(memory_store.clone())),
-                Box::new(crate::tools::RecallMemoryTool::new(memory_store.clone())),
-                Box::new(crate::hardware::LinuxProcessAnalyzerTool),
-                Box::new(crate::hardware::GpuDiagnosticsTool),
-                Box::new(crate::hardware::TelemetryChartTool),
-                Box::new(crate::telemetry::AdvancedSystemOracleTool),
-                Box::new(crate::telemetry::KernelDiagnosticTool),
-                Box::new(crate::telemetry::NetworkSnifferTool),
-                Box::new(crate::tools::SystemdManagerTool),
-                Box::new(RunCommandTool),
-                Box::new(ReadFileTool),
-                Box::new(WriteFileTool),
-                Box::new(PatchFileTool),
-                Box::new(RunBackgroundTool),
-                Box::new(ReadProcessLogsTool),
-                Box::new(ListDirTool),
-                Box::new(SearchWebTool),
-                Box::new(ReadUrlTool),
-                Box::new(SearchDirTool),
-                Box::new(AskUserTool),
-                Box::new(ExtractAndWriteTool),
-                Box::new(SystemInfoTool),
-                Box::new(SqliteQueryTool),
-                Box::new(GitTool),
-                Box::new(WatchDirectoryTool),
-                Box::new(HttpRequestTool),
-                Box::new(ClipboardTool),
-                Box::new(NotifyTool),
-                Box::new(FindReplaceTool),
-                Box::new(TreeTool),
-                Box::new(NetworkCheckTool),
-                Box::new(DiffFilesTool),
-                Box::new(KillProcessTool),
-                Box::new(EnvVarTool),
-                Box::new(ChmodTool),
-                Box::new(AppendFileTool),
-                Box::new(DownloadFileTool),
-                Box::new(TogglePlanningTool),
-                Box::new(ListSkillsTool),
-                Box::new(SkillRecallTool),
-                Box::new(DistillKnowledgeTool),
-                Box::new(RecallBrainTool),
-                Box::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone(), sub_agent_model.clone())),
-                Box::new(crate::tools::UpdateTaskContextTool),
-                Box::new(crate::tools::IndexFileSemanticallyTool),
-                Box::new(crate::tools::SemanticSearchTool),
-                Box::new(crate::tools::TogglePlanningTool),
+                Arc::new(crate::tools::StoreMemoryTool::new(memory_store.clone())),
+                Arc::new(crate::tools::RecallMemoryTool::new(memory_store.clone())),
+                Arc::new(crate::hardware::LinuxProcessAnalyzerTool),
+                Arc::new(crate::hardware::GpuDiagnosticsTool),
+                Arc::new(crate::hardware::TelemetryChartTool),
+                Arc::new(crate::telemetry::AdvancedSystemOracleTool),
+                Arc::new(crate::telemetry::KernelDiagnosticTool),
+                Arc::new(crate::telemetry::NetworkSnifferTool),
+                Arc::new(crate::tools::SystemdManagerTool),
+                Arc::new(RunCommandTool),
+                Arc::new(ReadFileTool),
+                Arc::new(WriteFileTool),
+                Arc::new(PatchFileTool),
+                Arc::new(RunBackgroundTool),
+                Arc::new(ReadProcessLogsTool),
+                Arc::new(ListDirTool),
+                Arc::new(SearchWebTool),
+                Arc::new(ReadUrlTool),
+                Arc::new(SearchDirTool),
+                Arc::new(AskUserTool),
+                Arc::new(ExtractAndWriteTool),
+                Arc::new(SystemInfoTool),
+                Arc::new(SqliteQueryTool),
+                Arc::new(GitTool),
+                Arc::new(WatchDirectoryTool),
+                Arc::new(HttpRequestTool),
+                Arc::new(ClipboardTool),
+                Arc::new(NotifyTool),
+                Arc::new(FindReplaceTool),
+                Arc::new(TreeTool),
+                Arc::new(NetworkCheckTool),
+                Arc::new(DiffFilesTool),
+                Arc::new(KillProcessTool),
+                Arc::new(EnvVarTool),
+                Arc::new(ChmodTool),
+                Arc::new(AppendFileTool),
+                Arc::new(DownloadFileTool),
+                Arc::new(TogglePlanningTool),
+                Arc::new(ListSkillsTool),
+                Arc::new(SkillRecallTool),
+                Arc::new(DistillKnowledgeTool),
+                Arc::new(RecallBrainTool),
+                Arc::new(crate::tools::SpawnSubAgentTool::new(memory_store.clone(), sub_agent_model.clone())),
+                Arc::new(crate::tools::UpdateTaskContextTool),
+                Arc::new(crate::tools::IndexFileSemanticallyTool),
+                Arc::new(crate::tools::SemanticSearchTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
@@ -1006,7 +1005,73 @@ impl Agent {
                 match self.extract_tool_calls(&full_content) {
                     Ok(tool_calls) if !tool_calls.is_empty() => {
                         guardrail_retries = 0;
-                        for tool_req in &tool_calls {
+                        
+                        // 🚀 CLASSIFY TOOLS: Sequential (Modifying) vs Concurrent (Read-Only)
+                        let mut sequential_batch = Vec::new();
+                        let mut concurrent_batch = Vec::new();
+
+                        for (idx, tool_req) in tool_calls.iter().enumerate() {
+                            if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
+                                let is_known = self.tools.iter().any(|t| t.name() == tool_name);
+                                if !is_known {
+                                    sequential_batch.push((idx, tool_req.clone()));
+                                    continue;
+                                }
+
+                                let tool = self.tools.iter().find(|t| t.name() == tool_name).unwrap();
+                                // Rules for sequential execution:
+                                // 1. Modifying tools (write, patch, etc.)
+                                // 2. Tools requiring user confirmation (Y/N)
+                                // 3. Stateful agent-handled tools (ask_user, toggle_planning, etc.)
+                                let is_modifying = tool.is_modifying();
+                                let req_confirm = tool.requires_confirmation();
+                                let is_agent_handled = ["toggle_planning", "ask_user", "distill_knowledge", "recall_brain", "update_task_context", "index_file_semantically", "spawn_sub_agent", "recall_memory", "store_memory"].contains(&tool_name);
+
+                                if is_modifying || req_confirm || is_agent_handled {
+                                    sequential_batch.push((idx, tool_req.clone()));
+                                } else {
+                                    concurrent_batch.push((idx, tool_req.clone()));
+                                }
+                            }
+                        }
+
+                        let mut all_results: Vec<(usize, String)> = Vec::new();
+
+                        if !concurrent_batch.is_empty() {
+                            let tool_names: Vec<String> = concurrent_batch.iter()
+                                .map(|(_, req)| req.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown").to_string())
+                                .collect();
+                            
+                            let _ = tx.send(crate::tui::AgentEvent::ToolStart(format!("{} tools in parallel", tool_names.len()))).await;
+                            
+                            let mut join_set = tokio::task::JoinSet::new();
+                            for (idx, tool_req) in concurrent_batch {
+                                let tool_name = tool_req.get("tool").and_then(|v| v.as_str()).unwrap().to_string();
+                                let args = tool_req.get("arguments").unwrap_or(&serde_json::Value::Null).clone();
+                                let full_content_clone = full_content.clone();
+                                
+                                // Find the tool again inside the task (it must be Send + Sync)
+                                // Since 'tools' is in 'self', we need a way to call execute.
+                                // We'll find it by name.
+                                let tool_ptr = self.tools.iter().find(|t| t.name() == tool_name).cloned().unwrap();
+
+                                join_set.spawn(async move {
+                                    match tool_ptr.execute(&args, &full_content_clone).await {
+                                        Ok(res) => (idx, tool_name, res),
+                                        Err(e) => (idx, tool_name, format!("Error: {}", e)),
+                                    }
+                                });
+                            }
+
+                            while let Some(res) = join_set.join_next().await {
+                                if let Ok((idx, name, result)) = res {
+                                    all_results.push((idx, format!("TOOL RESULT for {}:\n{}", name, result)));
+                                }
+                            }
+                            let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
+                        }
+
+                        for (idx, tool_req) in sequential_batch {
                             if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
                                 let args = tool_req.get("arguments").unwrap_or(&serde_json::Value::Null);
                                 
@@ -1018,25 +1083,25 @@ impl Agent {
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(diag.clone())).await;
                                     self.history.push(ChatMessage::new(MessageRole::System, diag));
                                     executed_tools = true;
-                                    continue; // Skip this one, but don't break the whole loop yet
+                                    continue; 
                                 }
                                 self.recent_tool_calls.push_back(current_call_hash);
                                 if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
 
-                                let tool_result_str;
-                                let is_tool_known = self.tools.iter().any(|t| t.name() == tool_name);
+                                let mut tool_result_str = String::new();
+                                let mut executed_this_tool = false;
+
+                                let tool_opt = self.tools.iter().find(|t| t.name() == tool_name).cloned();
                                 
-                                if !is_tool_known {
+                                if tool_opt.is_none() {
                                     tool_result_str = format!("Error: No such tool '{}'", tool_name);
                                 } else {
-                                    let is_modifying = self.tools.iter().find(|t| t.name() == tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+                                    let is_modifying = tool_opt.as_ref().unwrap().is_modifying();
                                     
-                                    // Phase 1: Try agent-handled tools (stateful tools that need direct agent access)
                                     if let Some(result) = self.handle_agent_tool(tool_name, args, &tx, &mut tool_rx, &mut guardrail_retries, is_modifying).await {
                                         tool_result_str = result;
                                     } else {
-                                        // Phase 2: Standard tool execution path
-                                        let tool = self.tools.iter().find(|t| t.name() == tool_name).unwrap();
+                                        let tool = tool_opt.unwrap();
                                         let mut allowed = true;
                                         if tool.requires_confirmation() {
                                             while let Ok(_) = tool_rx.try_recv() {}
@@ -1055,7 +1120,6 @@ impl Agent {
                                             }
                                             let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
 
-                                            // ✅ VERIFICATION LOOP (AUTONOMOUS CLIPPY)
                                             if tool.is_modifying() && !tool_result_str.starts_with("Error") {
                                                 let auto_errors = self.perform_autonomous_verification().await;
                                                 let verify_msg = format!(
@@ -1064,9 +1128,8 @@ impl Agent {
                                                      Do NOT skip this step.",
                                                     tool_name, tool_result_str, auto_errors, tool_name
                                                 );
-                                                self.history.push(ChatMessage::new(MessageRole::User, verify_msg));
-                                                let _ = self.save_history();
-                                                executed_tools = true;
+                                                all_results.push((idx, verify_msg));
+                                                executed_this_tool = true;
                                                 continue;
                                             }
                                         } else {
@@ -1075,11 +1138,10 @@ impl Agent {
                                     }
                                 }
 
-
-                                self.history.push(ChatMessage::new(MessageRole::System, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
-
+                                if !executed_this_tool {
+                                    all_results.push((idx, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                                }
                                 
-                                // 🧠 SENTINEL DETECTION
                                 if tool_result_str.contains("[PLANNING_MODE_ON]") {
                                     self.planning_mode = true;
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🧠 Agent entered PLANNING mode".to_string())).await;
@@ -1087,11 +1149,17 @@ impl Agent {
                                     self.planning_mode = false;
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("⚡ Agent entered EXECUTION mode".to_string())).await;
                                 }
-                                
-                                let _ = self.save_history();
-                                executed_tools = true;
                             }
                         }
+
+                        // 3. MERGE RESULTS AND UPDATE HISTORY (Maintain Original Order)
+                        all_results.sort_by_key(|(idx, _)| *idx);
+                        for (_, res_text) in all_results {
+                            self.history.push(ChatMessage::new(MessageRole::System, res_text));
+                        }
+
+                        let _ = self.save_history();
+                        executed_tools = true;
                     }
                     Ok(_) => {}
                     Err(e) => {
