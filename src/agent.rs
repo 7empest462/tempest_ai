@@ -387,6 +387,20 @@ impl Agent {
 
                             let tool_result_str;
                             if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
+                                // 🧠 PLANNING MODE GUARD (CLI)
+                                if self.planning_mode && tool.is_modifying() {
+                                    guardrail_retries += 1;
+                                    if guardrail_retries > 2 {
+                                        tool_result_str = "[System Guardrail] [SAFETY PIVOT]: You have hit the Planning Mode block multiple times. \
+                                            STOP calling modifying tools. You must immediately provide a text-only implementation plan for the user to approve. \
+                                            Once they approve, you must use `toggle_planning` to unlock these tools.".to_string();
+                                    } else {
+                                        tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED.\
+                                            \n[INSTRUCTION]: You MUST present a clear implementation plan to the user for approval first.\
+                                            \nDo NOT attempt to use this tool again until the user has approved your plan and you have used `toggle_planning` to enter EXECUTION mode.", tool_name);
+                                    }
+                                    println!("\n{} {}", "🧠 Guardrail:".yellow().bold(), format!("Blocked '{}' (Planning Mode)", tool_name).yellow());
+                                } else {
                                 let mut allowed = true;
                                 let mut feedback = String::new();
                                 if tool.requires_confirmation() {
@@ -437,11 +451,22 @@ impl Agent {
 
                                     }
                                 }
+                                } // end planning mode else
                             } else {
                                 tool_result_str = format!("Error: Tool '{}' not found.", tool_name);
                             }
 
                             self.history.push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                            
+                            // 🧠 SENTINEL DETECTION (CLI)
+                            if tool_result_str.contains("[PLANNING_MODE_ON]") {
+                                self.planning_mode = true;
+                                println!("{}", "🧠 Agent entered PLANNING mode".cyan().bold());
+                            } else if tool_result_str.contains("[PLANNING_MODE_OFF]") {
+                                self.planning_mode = false;
+                                println!("{}", "⚡ Agent entered EXECUTION mode".green().bold());
+                            }
+                            
                             let _ = self.save_history();
                             executed_tools = true;
                         }
@@ -863,7 +888,7 @@ impl Agent {
                                     } else if tool_name == "spawn_sub_agent" {
                                         // 🕵️ SUB-AGENT DELEGATION
                                         let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("(No task)").to_string();
-                                        let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.model).to_string();
+                                        let model_name = args.get("model").and_then(|m| m.as_str()).unwrap_or(&self.sub_agent_model).to_string();
                                         
                                         let sub_agent_history = vec![
                                             ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the mission and provide a CONCISE summary.".to_string()),

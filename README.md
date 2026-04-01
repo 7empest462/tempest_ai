@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI (Project Smart-Brain)
+\# 🌪️ Tempest AI (Project Smart-Brain)
 **The Hardware-Aware, RAG-Powered Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat aliases, Tempest is a **Stateful Intelligence** that monitors your hardware, manages a persistent conceptual brain, and operates with a disciplined Planning/Execution lifecycle.
