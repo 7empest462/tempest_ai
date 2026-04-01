@@ -654,23 +654,39 @@ impl Agent {
                             }
                         }
                         
-                        let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                            "nomic-embed-text".to_string(),
-                            chunks.clone().into()
-                        );
-                        match self.ollama.generate_embeddings(req).await {
-                            Ok(res) => {
-                                let mut brain = self.vector_brain.lock().expect("VectorBrain Mutex Poisoned during indexing");
-                                brain.entries.retain(|e| e.source != path);
-                                for (i, emb) in res.embeddings.iter().enumerate() {
-                                    brain.add_entry(chunks[i].clone(), emb.clone(), path.clone(), std::collections::HashMap::new());
+                        // 🧠 BATCHED EMBEDDING GENERATION
+                        let mut all_embeddings = Vec::new();
+                        let batch_size = 25;
+                        let total_chunks = chunks.len();
+                        
+                        for (i, chunk_batch) in chunks.chunks(batch_size).enumerate() {
+                            let start = i * batch_size;
+                            let end = (start + chunk_batch.len()).min(total_chunks);
+                            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("📂 Concepts: Embedding chunks {}/{}...", end, total_chunks))).await;
+                            
+                            let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                                "nomic-embed-text".to_string(),
+                                chunk_batch.to_vec().into()
+                            );
+                            
+                            match self.ollama.generate_embeddings(req).await {
+                                Ok(res) => {
+                                    all_embeddings.extend(res.embeddings);
                                 }
-                                let brain_path = Path::new(&self.history_path).parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
-                                let _ = brain.save_to_disk(brain_path);
-                                Some(format!("Successfully indexed {} ({} conceptual chunks). Memory updated.", path, res.embeddings.len()))
+                                Err(e) => {
+                                    return Some(format!("Embedding Error at batch {}: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", i + 1, e));
+                                }
                             }
-                            Err(e) => Some(format!("Embedding Error: {}. (Ensure 'nomic-embed-text' is pulled in Ollama.)", e)),
                         }
+
+                        let mut brain = self.vector_brain.lock().expect("VectorBrain Mutex Poisoned during indexing");
+                        brain.entries.retain(|e| e.source != path);
+                        for (i, emb) in all_embeddings.iter().enumerate() {
+                            brain.add_entry(chunks[i].clone(), emb.clone(), path.clone(), std::collections::HashMap::new());
+                        }
+                        let brain_path = Path::new(&self.history_path).parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
+                        let _ = brain.save_to_disk(brain_path);
+                        Some(format!("Successfully indexed {} ({} conceptual chunks). Memory updated.", path, all_embeddings.len()))
                     }
                     Err(e) => Some(format!("Read Error: {}", e)),
                 }
