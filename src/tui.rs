@@ -22,6 +22,7 @@ pub enum AgentEvent {
     ToolFinish,
     SystemUpdate(String), // Telemetry
     Done,
+    Thinking(bool),
     RequestConfirmation(String, String),
     RequestInput(String, String), // (tool_name, question)
 }
@@ -46,6 +47,8 @@ pub struct App {
     pub pending_input: Option<(String, String)>,
     pub input_response_buffer: String,
     pub agent_mode: String,
+    pub is_thinking: bool,
+    pub animation_tick: u32,
 }
 
 impl App {
@@ -63,6 +66,8 @@ impl App {
             pending_input: None,
             input_response_buffer: String::new(),
             agent_mode: "PLANNING".to_string(),
+            is_thinking: false,
+            animation_tick: 0,
         }
     }
 }
@@ -210,6 +215,7 @@ pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<
                     app.messages.push(format!("Tempest: {}", app.current_stream));
                     app.current_stream.clear();
                 }
+                AgentEvent::Thinking(b) => app.is_thinking = b,
                 AgentEvent::RequestConfirmation(tool, args) => {
                     app.pending_confirmation = Some((tool, args));
                 }
@@ -225,6 +231,7 @@ pub async fn run_tui(mut app: App,    mut agent_rx: tokio::sync::mpsc::Receiver<
         }
         
         if last_tick.elapsed() >= tick_rate {
+            app.animation_tick = app.animation_tick.wrapping_add(1);
             last_tick = Instant::now();
         }
     }
@@ -313,6 +320,13 @@ fn ui(f: &mut Frame, app: &mut App) {
     
     if !app.current_stream.is_empty() {
         push_wrapped(&format!("Tempest: {}█", app.current_stream), &mut list_items, false);
+    } else if app.is_thinking {
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let frame = spinner[(app.animation_tick % spinner.len() as u32) as usize];
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("Tempest: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} Thinking...", frame), Style::default().fg(Color::Yellow)),
+        ])));
     } else if let Some(ref tool) = app.active_tool {
         list_items.push(ListItem::new(Line::from(Span::styled(
             format!(" ⚙️  EXECUTING: {}...", tool.to_uppercase()),

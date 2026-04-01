@@ -950,8 +950,9 @@ impl Agent {
                 let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
 
                 // Remove the telemetry message IMMEDIATELY after building the request,
-                // BEFORE any fallible operations, so it can never leak into persistent history.
                 self.history.pop();
+                
+                let _ = tx.send(crate::tui::AgentEvent::Thinking(true)).await;
 
                 let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(120), self.ollama.send_chat_messages_stream(request)).await {
                     Ok(Ok(s)) => s,
@@ -960,6 +961,7 @@ impl Agent {
                         break;
                     }
                     Err(_) => {
+                        let _ = tx.send(crate::tui::AgentEvent::Thinking(false)).await;
                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("Ollama Error: Connection Timed Out (120s)".to_string())).await;
                         break;
                     }
@@ -974,11 +976,13 @@ impl Agent {
                         break;
                     }
                     if let Ok(chunk) = res {
+                        let _ = tx.send(crate::tui::AgentEvent::Thinking(false)).await;
                         let text = chunk.message.content;
                         full_content.push_str(&text);
                         let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
                     }
                 }
+                let _ = tx.send(crate::tui::AgentEvent::Thinking(false)).await;
 
                 if !full_content.trim().is_empty() {
                     self.history.push(ChatMessage::new(MessageRole::Assistant, full_content.clone()));
