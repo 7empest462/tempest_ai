@@ -1082,14 +1082,13 @@ impl Agent {
                                                        Proceed to summarize the findings for the user immediately.", tool_name);
                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(diag.clone())).await;
                                     self.history.push(ChatMessage::new(MessageRole::System, diag));
-                                    executed_tools = true;
                                     continue; 
                                 }
                                 self.recent_tool_calls.push_back(current_call_hash);
                                 if self.recent_tool_calls.len() > 5 { self.recent_tool_calls.pop_front(); }
 
-                                let mut tool_result_str = String::new();
-                                let mut executed_this_tool = false;
+                                let tool_result_str;
+                                let mut skip_push = false;
 
                                 let tool_opt = self.tools.iter().find(|t| t.name() == tool_name).cloned();
                                 
@@ -1129,8 +1128,7 @@ impl Agent {
                                                     tool_name, tool_result_str, auto_errors, tool_name
                                                 );
                                                 all_results.push((idx, verify_msg));
-                                                executed_this_tool = true;
-                                                continue;
+                                                skip_push = true;
                                             }
                                         } else {
                                             tool_result_str = "Error: User denied permission via TUI Modal.".to_string();
@@ -1138,7 +1136,7 @@ impl Agent {
                                     }
                                 }
 
-                                if !executed_this_tool {
+                                if !skip_push {
                                     all_results.push((idx, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
                                 }
                                 
