@@ -802,7 +802,8 @@ impl Agent {
                     .temperature(0.7);
                 let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
 
-                // Remove the telemetry message before we continue so history stays clean
+                // Remove the telemetry message IMMEDIATELY after building the request,
+                // BEFORE any fallible operations, so it can never leak into persistent history.
                 self.history.pop();
 
                 let mut stream = match self.ollama.send_chat_messages_stream(request).await {
@@ -955,6 +956,8 @@ impl Agent {
                                                 match self.ollama.generate_embeddings(req).await {
                                                     Ok(res) => {
                                                         let mut brain = self.vector_brain.lock().unwrap();
+                                                        // Deduplicate: remove existing chunks from this source before re-indexing
+                                                        brain.entries.retain(|e| e.source != path);
                                                         for (i, emb) in res.embeddings.iter().enumerate() {
                                                             brain.add_entry(chunks[i].clone(), emb.clone(), path.clone(), std::collections::HashMap::new());
                                                         }
