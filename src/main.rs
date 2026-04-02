@@ -279,7 +279,7 @@ FORMAT: Output a JSON block to call a tool:
             let gpu_load = {
                 #[cfg(target_os = "macos")]
                 {
-                    let mut load = 0;
+                    let mut current_load = 0;
                     let output = std::process::Command::new("ioreg")
                         .args(["-r", "-c", "AGXAccelerator"])
                         .output()
@@ -288,11 +288,11 @@ FORMAT: Output a JSON block to call a tool:
                         let s = String::from_utf8_lossy(&out.stdout);
                         if let Some(caps) = gpu_re.captures(&s) {
                             if let Some(m) = caps.get(1) {
-                                load = m.as_str().parse::<i32>().unwrap_or(0);
+                                current_load = m.as_str().parse::<i32>().unwrap_or(0);
                             }
                         }
                     }
-                    load
+                    current_load
                 }
                 #[cfg(target_os = "linux")]
                 {
