@@ -275,8 +275,8 @@ FORMAT: Output a JSON block to call a tool:
             }
             let ollama_mb = ollama_mem_bytes / 1024 / 1024;
 
-            // 🎨 GPU LOAD (Apple Silicon / macOS)
-            #[allow(unused_mut)]
+            // 🎨 GPU LOAD (Apple Silicon / macOS / Linux)
+            #[allow(unused_assignments)]
             let mut gpu_load = 0;
             #[cfg(target_os = "macos")]
             {
