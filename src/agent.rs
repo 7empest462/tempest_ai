@@ -1235,3 +1235,126 @@ impl Agent {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_agent() -> Agent {
+        let memory_store = Arc::new(Mutex::new(MemoryStore::new("test-passphrase".to_string()).unwrap()));
+        Agent::new(
+            "test-model".to_string(),
+            "test-system-prompt".to_string(),
+            "/tmp/test-history.json".to_string(),
+            memory_store,
+            "test-sub-model".to_string()
+        )
+    }
+
+    #[test]
+    fn test_extract_standard_json() {
+        let agent = setup_agent();
+        let content = r#"Here is the file:
+```json
+{
+  "tool": "ls",
+  "arguments": { "path": "." }
+}
+```"#;
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool"], "ls");
+        assert_eq!(calls[0]["arguments"]["path"], ".");
+    }
+
+    #[test]
+    fn test_extract_case_insensitive() {
+        let agent = setup_agent();
+        let content = r#"```JSON
+{ "tool": "whoami" }
+```"#;
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool"], "whoami");
+    }
+
+    #[test]
+    fn test_extract_missing_arguments_key() {
+        let agent = setup_agent();
+        let content = r#"```json
+{
+  "tool": "read_file",
+  "path": "src/main.rs"
+}
+```"#;
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool"], "read_file");
+        assert_eq!(calls[0]["arguments"]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_extract_shell_injection_rescue() {
+        let agent = setup_agent();
+        // Test rescue during normal parse
+        let content = r#"```json
+{
+  "tool": "write_file",
+  "arguments": {
+    "path": "exploit.sh",
+    "content": "cat > exploit.sh <<EOF\nrm -rf /\nEOF"
+  }
+}
+```"#;
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool"], "extract_and_write");
+        assert_eq!(calls[0]["arguments"]["path"], "exploit.sh");
+    }
+
+    #[test]
+    fn test_extract_malformed_json_recovery() {
+        let agent = setup_agent();
+        // Missing the closing brace for the whole object
+        let content = r#"```json
+{
+  "tool": "read_file",
+  "path": "src/main.rs"
+```"#; 
+        // This should hit the emergency recovery regex
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool"], "read_file");
+        assert_eq!(calls[0]["arguments"]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_extract_heuristic_fallback() {
+        let agent = setup_agent();
+        let content = "I will now save the changes to src/main.rs.
+```rust
+fn main() {}
+```";
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["tool"], "extract_and_write");
+        assert_eq!(calls[0]["arguments"]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_extract_multiple_tools() {
+        let agent = setup_agent();
+        let content = r#"First:
+```json
+{ "tool": "ls" }
+```
+Then:
+```json
+{ "tool": "whoami" }
+```"#;
+        let calls = agent.extract_tool_calls(content).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["tool"], "ls");
+        assert_eq!(calls[1]["tool"], "whoami");
+    }
+}
