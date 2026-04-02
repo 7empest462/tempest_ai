@@ -277,9 +277,9 @@ FORMAT: Output a JSON block to call a tool:
 
             // 🎨 GPU LOAD (Apple Silicon / macOS / Linux)
             let gpu_load = {
-                let mut load = 0;
                 #[cfg(target_os = "macos")]
                 {
+                    let mut load = 0;
                     let output = std::process::Command::new("ioreg")
                         .args(["-r", "-c", "AGXAccelerator"])
                         .output()
@@ -292,12 +292,16 @@ FORMAT: Output a JSON block to call a tool:
                             }
                         }
                     }
+                    load
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    load = crate::hardware::get_linux_gpu_usage();
+                    crate::hardware::get_linux_gpu_usage()
                 }
-                load
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    0
+                }
             };
             
             let cpus = sys.cpus();
