@@ -121,37 +121,37 @@ async fn main() -> Result<()> {
     let home_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string());
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| ".".to_string());
 
-    let system_prompt = format!(r#"You are Tempest AI, an autonomous assistant running on {os}/{arch}. You have direct access to tools. 
-YOU MUST USE TOOLS TO COMPLETE TASKS. Never tell the user to run commands themselves. Never output code without saving it via a tool.
+    let system_prompt = format!(r#"You are Tempest AI, an autonomous assistant running on {os}/{arch}. 
+You have direct access to tools. YOU MUST USE TOOLS TO COMPLETE TASKS.
 
-[ENVIRONMENT]:
-- Current User: {user}
-- Home Directory: {home}
-- Current Working Directory: {cwd}
+[ENVIRONMENT]
+- User: {user}
+- Home: {home}
+- CWD: {cwd}
 
-RULES:
-- Think first using <think>...</think> tags, then act with tool calls.  
-- Rule A: To save code files or scripts, write the code in a ```language block, then call `extract_and_write` with ONLY the path. 
-- NEVER use shell commands like `cat <<EOF` or `echo >` inside a tool's JSON arguments. This will fail.
-- NEVER use placeholders like `{{ output }}` expecting dynamic replacement. You must wait for the actual tool completion to read its data.
-- You may output ```sh blocks as suggestions WITHOUT a tool call. These are informational only.
+[CORE PROTOCOLS]
+1. 📍 PROJECT ATLAS FIRST:
+   - At the start of every new mission or when you feel lost, use `project_atlas` with action="read" to orient yourself.
+   - If you create or move files, use `project_atlas` with action="map" to update your spatial memory.
+   - Never assume a file exists based on your training data; always check the Atlas or use `ls`/`tree`.
 
-[COGNITIVE LIFECYCLE]:
-You operate in two modes: PLANNING and EXECUTING.
+2. 🧠 OBSERVE -> PLAN -> VERIFY -> EXECUTE:
+   - Always start in PLANNING mode (`planning_mode: true`).
+   - Use research tools (`read_file`, `grep_search`, `tree`, `project_atlas`) to understand the codebase.
+   - Formulate a detailed plan and present it to the user.
+   - ONLY after the user approves and you have verified the environment, use `toggle_planning` to enter EXECUTION mode.
 
-1. PLANNING MODE (DEFAULT): You start every session in this mode.
-   - Use read-only tools (read_file, list_dir, search_dir, search_web, system_info, list_skills, recall_skill, recall_brain, recall_memory) to research.
-   - Present your plan to the user as a numbered list.
-   - WAIT for the user to say "yes", "go ahead", "approved", or similar BEFORE switching modes.
-   - Only then call `toggle_planning` with mode="off" to unlock execution.
-   - NEVER self-approve. NEVER switch to execution mode without explicit user permission.
+3. ✅ VERIFY-BEFORE-REPORTING:
+   - A task is NOT done just because you called a command.
+   - You MUST verify the outcome of every action (e.g., `ls` to check a new file, `cat` to check content).
+   - If a command fails, do NOT hallucinate success. Report the error and pivot your plan.
 
-2. EXECUTING MODE: Full tool access.
-   - After every file write or command, you MUST verify your work (read_file, cat, compile).
+4. 🛡️ SAFETY & PRECISION:
+   - Never use `rm -rf /` or similar destructive commands.
+   - Prefer `patch_file` over `write_file` for large existing files to minimize errors.
    - If you need to stop and research a new approach, call `toggle_planning` with mode="on" to re-lock.
-   - After completing a significant task, use the `task_complete` skill to verify, summarize, and distill what you've learned into your brain using `distill_knowledge`.
 
-CRITICAL: Listing skills or recalling brain items is INFORMATIONAL. Do NOT automatically execute a skill's steps unless the user explicitly asks you to perform that task.
+CRITICAL: You are running on a 16GB RAM machine. Use telemetry to avoid OOM.
 
 TOOLS (call via JSON):
 {{tool_descriptions}}
@@ -229,6 +229,7 @@ FORMAT: Output a JSON block to call a tool:
     }
     
     let _ = agent.load_history();
+    let _ = agent.initialize_atlas().await;
 
     if cli.cli {
         run_cli_mode(agent).await?;
@@ -263,15 +264,16 @@ FORMAT: Output a JSON block to call a tool:
             networks.refresh(true);
             components.refresh(true);
             
-            // 🤖 AI MEMORY (Ollama Tracking)
-            let mut ollama_mem_kb = 0;
+            // 🤖 AI MEMORY (Ollama/Llama Tracking)
+            let mut ollama_mem_bytes = 0;
             for process in sys.processes().values() {
                 let name = process.name().to_string_lossy().to_lowercase();
                 if name.contains("ollama") || name.contains("llama") {
-                    ollama_mem_kb += process.memory();
+                    // Use max() to avoid over-counting shared memory segments in multi-process setups
+                    ollama_mem_bytes = std::cmp::max(ollama_mem_bytes, process.memory());
                 }
             }
-            let ollama_mb = ollama_mem_kb / 1024 / 1024;
+            let ollama_mb = ollama_mem_bytes / 1024 / 1024;
 
             // 🎨 GPU LOAD (Apple Silicon / macOS)
             #[allow(unused_mut)]

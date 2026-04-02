@@ -1488,6 +1488,98 @@ impl AgentTool for TreeTool {
     }
 }
 
+pub struct ProjectAtlasTool;
+
+#[async_trait::async_trait]
+impl AgentTool for ProjectAtlasTool {
+    fn name(&self) -> &'static str { "project_atlas" }
+    fn description(&self) -> &'static str { "Generates or updates a '.tempest_atlas.md' file in the project root. This file acts as your 'Spatial Memory'—a master map of the project structure. Use this to ground yourself when starting a new task or after creating multiple files." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "description": "'map' to generate the tree, or 'read' to view existing atlas" }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("map");
+        let atlas_path = ".tempest_atlas.md";
+
+        match action {
+            "read" => {
+                if let Ok(content) = fs::read_to_string(atlas_path) {
+                    Ok(format!("📍 CURRENT PROJECT ATLAS:\n\n{}", content))
+                } else {
+                    Ok("❌ Atlas not found. Use 'map' to generate it first.".to_string())
+                }
+            },
+            "map" => {
+                // Reuse logic from TreeTool but specialized for the atlas
+                let skip_dirs = ["node_modules", "target", ".git", "__pycache__", ".next", "dist", "build", ".DS_Store"];
+                let mut output = String::new();
+                let mut file_count = 0usize;
+                let mut dir_count = 0usize;
+
+                output.push_str("# 📍 Project Atlas\n\n");
+                output.push_str("> This file is an auto-generated map for the AI agent to maintain spatial awareness.\n\n");
+                output.push_str("## 📂 Directory Structure\n\n```text\n");
+
+                fn walk_atlas(
+                    dir: &std::path::Path,
+                    prefix: &str,
+                    depth: usize,
+                    max_depth: usize,
+                    skip: &[&str],
+                    output: &mut String,
+                    file_count: &mut usize,
+                    dir_count: &mut usize,
+                ) {
+                    if depth > max_depth { return; }
+                    let mut entries: Vec<_> = match fs::read_dir(dir) {
+                        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+                        Err(_) => return,
+                    };
+                    entries.sort_by_key(|e| e.file_name());
+
+                    let total = entries.len();
+                    for (i, entry) in entries.iter().enumerate() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if skip.contains(&name.as_str()) || name.starts_with('.') {
+                            continue;
+                        }
+
+                        let is_last = i == total - 1;
+                        let connector = if is_last { "└── " } else { "├── " };
+                        let child_prefix = if is_last { "    " } else { "│   " };
+
+                        let path = entry.path();
+                        if path.is_dir() {
+                            *dir_count += 1;
+                            output.push_str(&format!("{}{}{}/\n", prefix, connector, name));
+                            walk_atlas(&path, &format!("{}{}", prefix, child_prefix), depth + 1, max_depth, skip, output, file_count, dir_count);
+                        } else {
+                            *file_count += 1;
+                            output.push_str(&format!("{}{}{}\n", prefix, connector, name));
+                        }
+                    }
+                }
+
+                walk_atlas(std::path::Path::new("."), "", 0, 4, &skip_dirs, &mut output, &mut file_count, &mut dir_count);
+                output.push_str("```\n\n");
+                output.push_str(&format!("---\nGenerated at: {}\n{} directories, {} files\n", 
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), dir_count, file_count));
+
+                fs::write(atlas_path, &output)?;
+                Ok(format!("✅ Project Atlas generated and saved to '{}'. Use 'project_atlas' with 'read' to access it anytime.", atlas_path))
+            },
+            _ => anyhow::bail!("Unknown project_atlas action '{}'.", action),
+        }
+    }
+}
+
 pub struct NetworkCheckTool;
 
 #[async_trait::async_trait]
@@ -1928,21 +2020,30 @@ pub struct TogglePlanningTool;
 #[async_trait::async_trait]
 impl AgentTool for TogglePlanningTool {
     fn name(&self) -> &'static str { "toggle_planning" }
-    fn description(&self) -> &'static str { "Toggle between PLANNING mode (research only, no file writes) and EXECUTING mode (full tool access). Use 'on' to enter planning mode, 'off' to enter execution mode after the user approves your plan." }
+    fn description(&self) -> &'static str { "Toggle between PLANNING mode (research only) and EXECUTING mode (full tool access). You MUST provide a rationale and confirm you have performed an environmental check (using tree, ls, or project_atlas) before switching to execution mode." }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "mode": { "type": "string", "enum": ["on", "off"], "description": "'on' = enter planning mode (block writes), 'off' = enter execution mode (allow writes)" }
+                "mode": { "type": "string", "enum": ["on", "off"], "description": "'on' = enter planning mode, 'off' = enter execution mode (unlocked)" },
+                "rationale": { "type": "string", "description": "Why are you switching modes? What is your immediate goal?" },
+                "environmental_check_performed": { "type": "boolean", "description": "Must be true if switching to 'off'. Confirms you have verified the current project structure via tools." }
             },
-            "required": ["mode"]
+            "required": ["mode", "rationale", "environmental_check_performed"]
         })
     }
     async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
         let mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("on");
+        let rationale = args.get("rationale").and_then(|r| r.as_str()).unwrap_or("(No rationale provided)");
+        let env_check = args.get("environmental_check_performed").and_then(|e| e.as_bool()).unwrap_or(false);
+
+        if mode == "off" && !env_check {
+            return Ok("❌ ERROR: You must perform an environmental check (ls, tree, or project_atlas) and set 'environmental_check_performed' to true before entering EXECUTION mode.".to_string());
+        }
+
         match mode {
-            "on" => Ok("[PLANNING_MODE_ON] You are now in PLANNING mode. You may use read-only tools (read_file, list_dir, search_dir, search_web, system_info) to research. All file writes and commands are BLOCKED until you present a plan and switch to execution mode.".to_string()),
-            "off" => Ok("[PLANNING_MODE_OFF] You are now in EXECUTION mode. All tools are available. Remember to VERIFY your work after every modification.".to_string()),
+            "on" => Ok(format!("[PLANNING_MODE_ON] Mode: PLANNING. Rationale: {}. You are now in research mode. File writes and commands are BLOCKED.", rationale)),
+            "off" => Ok(format!("[PLANNING_MODE_OFF] Mode: EXECUTION. Rationale: {}. Environmental check confirmed. All tools are now available. VERIFY every action.", rationale)),
             _ => Ok("Error: mode must be 'on' or 'off'".to_string()),
         }
     }

@@ -91,6 +91,7 @@ impl Agent {
                 Arc::new(crate::tools::UpdateTaskContextTool),
                 Arc::new(crate::tools::IndexFileSemanticallyTool),
                 Arc::new(crate::tools::SemanticSearchTool),
+                Arc::new(crate::tools::ProjectAtlasTool),
             ],
             system_prompt: String::new(),
             recent_tool_calls: std::collections::VecDeque::new(),
@@ -140,6 +141,15 @@ impl Agent {
         agent.history.push(ChatMessage::new(MessageRole::System, agent.system_prompt.clone()));
         
         agent
+    }
+
+    pub async fn initialize_atlas(&self) -> Result<()> {
+        // 📍 PROJECT ATLAS INITIALIZATION
+        // Ensure the atlas exists on startup so the agent always has a map
+        if let Some(t) = self.tools.iter().find(|t| t.name() == "project_atlas") {
+            let _ = t.execute(&serde_json::json!({"action": "map"}), "").await;
+        }
+        Ok(())
     }
     
     fn calculate_optimal_ctx(&self) -> u64 {
