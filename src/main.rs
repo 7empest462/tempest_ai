@@ -74,6 +74,25 @@ fn load_config(cli_config_path: Option<&str>) -> AppConfig {
         paths_to_try.push(std::path::PathBuf::from(p));
     }
     
+    // 🛡️ SUDO SUPPORT: If running as root via sudo, try to find the original user's config
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() && sudo_user != "root" {
+            #[cfg(unix)]
+            {
+                // Common paths for Linux (/home) and macOS (/Users)
+                let prefixes = ["/home", "/Users"];
+                for prefix in prefixes {
+                    let p = std::path::PathBuf::from(prefix)
+                        .join(&sudo_user)
+                        .join(".config")
+                        .join("tempest_ai")
+                        .join("config.toml");
+                    paths_to_try.push(p);
+                }
+            }
+        }
+    }
+
     // Check platform-standard config dir (~/Library/Application Support on macOS)
     if let Some(config_dir) = dirs::config_dir() {
         paths_to_try.push(config_dir.join("tempest_ai").join("config.toml"));
@@ -85,15 +104,26 @@ fn load_config(cli_config_path: Option<&str>) -> AppConfig {
 
     for path in &paths_to_try {
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(config) = toml::from_str::<AppConfig>(&content) {
-                    println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
-                    return config;
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    match toml::from_str::<AppConfig>(&content) {
+                        Ok(config) => {
+                            println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
+                            return config;
+                        }
+                        Err(e) => {
+                            println!("{} {} {}: {}", "⚠️".yellow(), "Failed to parse config at".bold(), path.display(), e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("{} {} {}: {}", "⚠️".yellow(), "Found config but could not read".bold(), path.display(), e);
                 }
             }
         }
     }
 
+    println!("{} No valid config found. Using default settings.", "ℹ️".dimmed());
     AppConfig::default()
 }
 
