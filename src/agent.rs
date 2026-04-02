@@ -141,6 +141,23 @@ impl Agent {
         
         agent
     }
+    
+    fn calculate_optimal_ctx(&self) -> u64 {
+        let model = self.model.to_lowercase();
+        // 16GB RAM constraints (approx 17.1B bytes)
+        // 14B+ models: 2048-4096 ctx
+        // 7B-9B models: 8192 ctx
+        // <4B models: 16384 ctx
+        if model.contains("20b") || model.contains("27b") || model.contains("30b") || model.contains("deepseek-r1:32b") {
+            2048
+        } else if model.contains("14b") || model.contains("13b") || model.contains("16b") || model.contains("12b") {
+            4096
+        } else if model.contains("7b") || model.contains("8b") || model.contains("9b") {
+            8192
+        } else {
+             16384 // Small models (phi, gemma 2b, qwen 3b)
+        }
+    }
 
     pub fn get_tool_descriptions(&self) -> String {
         let mut desc = String::new();
@@ -938,30 +955,38 @@ impl Agent {
                     let lock = self.telemetry.lock().unwrap();
                     lock.clone()
                 };
-                let telemetry_msg = format!("[SYSTEM_TELEMETRY] Current Host State:\n{}\n\nUse this information to pace your actions. If the GPU is under heavy load or thermals are high, favor lighter tools or wait.", telemetry);
+                let telemetry_msg = format!("[SYSTEM_TELEMETRY] Current Host State:\n{}\n\nUse this information to pace your actions.", telemetry);
                 self.history.push(ChatMessage::new(MessageRole::System, telemetry_msg));
 
+                let ctx_size = self.calculate_optimal_ctx();
                 let options = GenerationOptions::default()
-                    .num_ctx(8192)
+                    .num_ctx(ctx_size)
                     .num_predict(4096)
                     .repeat_penalty(1.1)
                     .temperature(0.7);
                 let request = ChatMessageRequest::new(self.model.clone(), self.history.clone()).options(options);
 
-                // Remove the telemetry message IMMEDIATELY after building the request,
+                // Remove the telemetry message IMMEDIATELY after building the request to avoid history bloat
                 self.history.pop();
                 
-                let _ = tx.send(crate::tui::AgentEvent::Thinking(true)).await;
+                let thinking_status = if self.calculate_optimal_ctx() <= 4096 {
+                    format!("Loading Large Model ({})", self.model)
+                } else {
+                    "Thinking".to_string()
+                };
+                
+                let _ = tx.send(crate::tui::AgentEvent::Thinking(Some(thinking_status))).await;
 
-                let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(120), self.ollama.send_chat_messages_stream(request)).await {
+                let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(300), self.ollama.send_chat_messages_stream(request)).await {
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
+                        let _ = tx.send(crate::tui::AgentEvent::Thinking(None)).await;
                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Ollama Error: {}", e))).await;
                         break;
                     }
                     Err(_) => {
-                        let _ = tx.send(crate::tui::AgentEvent::Thinking(false)).await;
-                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("Ollama Error: Connection Timed Out (120s)".to_string())).await;
+                        let _ = tx.send(crate::tui::AgentEvent::Thinking(None)).await;
+                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("Ollama Error: Connection Timed Out (300s). Model may be too large for current RAM.".to_string())).await;
                         break;
                     }
                 };
@@ -975,13 +1000,13 @@ impl Agent {
                         break;
                     }
                     if let Ok(chunk) = res {
-                        let _ = tx.send(crate::tui::AgentEvent::Thinking(false)).await;
+                        let _ = tx.send(crate::tui::AgentEvent::Thinking(Some("Generating".to_string()))).await;
                         let text = chunk.message.content;
                         full_content.push_str(&text);
                         let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
                     }
                 }
-                let _ = tx.send(crate::tui::AgentEvent::Thinking(false)).await;
+                let _ = tx.send(crate::tui::AgentEvent::Thinking(None)).await;
 
                 if !full_content.trim().is_empty() {
                     self.history.push(ChatMessage::new(MessageRole::Assistant, full_content.clone()));
