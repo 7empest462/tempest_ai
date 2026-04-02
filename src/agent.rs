@@ -724,12 +724,18 @@ impl Agent {
 
     fn extract_tool_calls(&self, content: &str) -> Result<Vec<Value>, String> {
         let mut calls = Vec::new();
-        let mut search_from = 0;
         
-        while let Some(start) = content[search_from..].find("```json") {
-            let abs_start = search_from + start + 7;
-            if let Some(end_offset) = content[abs_start..].find("```") {
-                let block = content[abs_start..abs_start + end_offset].trim();
+        // 🚀 ROBUST TOOL EXTRACTION: Use a case-insensitive regex for finding ```json blocks.
+        // This handles missing newlines, different casing (, e.g., ```JSON), and extra spaces.
+        // The regex captures any text between triple backticks starting with 'json'.
+        let block_regex = regex::RegexBuilder::new(r"```\s*json\s*([\s\S]*?)\s*```")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+
+        for caps in block_regex.captures_iter(content) {
+            if let Some(m) = caps.get(1) {
+                let block = m.as_str().trim();
                 
                 // 🚑 PRE-PARSE RESCUE: If the block contains shell redirection, it's almost certainly a mangled write_file.
                 if block.contains("<<EOF") || block.contains("cat >") || block.contains("$(") {
@@ -741,8 +747,7 @@ impl Agent {
                             "tool": "extract_and_write",
                             "arguments": { "path": path }
                         }));
-                        search_from = abs_start + end_offset + 3;
-                        continue;
+                         continue;
                     }
                 }
 
@@ -777,8 +782,7 @@ impl Agent {
                                             "tool": "extract_and_write",
                                             "arguments": { "path": path }
                                         }));
-                                        search_from = abs_start + end_offset + 3;
-                                        continue;
+                                         continue;
                                     }
                                 }
                             }
@@ -802,7 +806,6 @@ impl Agent {
                                     "tool": target_tool,
                                     "arguments": { "path": path }
                                 }));
-                                search_from = abs_start + end_offset + 3;
                                 continue;
                             }
                         }
@@ -812,9 +815,6 @@ impl Agent {
                         return Err(format!("[System Guardrail] CRITICAL: Invalid JSON in code block. I saw a ```json block but was unable to parse it correctly. If you are trying to save code, use: ```json\n{{ \"tool\": \"extract_and_write\", \"arguments\": {{ \"path\": \"filename\" }} }}\n```"));
                     }
                 }
-                search_from = abs_start + end_offset + 3;
-            } else {
-                break;
             }
         }
         

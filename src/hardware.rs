@@ -231,30 +231,34 @@ pub fn get_linux_gpu_usage() -> i32 {
 
     // 2. Iterate through potential DRM cards (Intel, AMD)
     for card in 0..3 {
-        let base = format!("/sys/class/drm/card{}/device", card);
-        
-        // A. Try direct usage counters (AMD, some newer Intel)
-        if let Ok(content) = std::fs::read_to_string(format!("{}/gpu_busy_percent", base)) {
-            if let Ok(val) = content.trim().parse::<i32>() {
-                return val;
+        let card_paths = [
+            format!("/sys/class/drm/card{}/device", card),
+            format!("/sys/class/drm/card{}", card),
+        ];
+
+        for base in card_paths {
+            // A. Try direct usage counters (AMD, some newer Intel)
+            if let Ok(content) = std::fs::read_to_string(format!("{}/gpu_busy_percent", base)) {
+                if let Ok(val) = content.trim().parse::<i32>() {
+                    return val;
+                }
             }
-        }
 
-        // B. Intel Frequency-based Proxy
-        // If we can't get usage%, the ratio of current frequency vs max frequency is an excellent proxy for load.
-        let cur_f = std::fs::read_to_string(format!("{}/gt_cur_freq_mhz", base));
-        let max_f = std::fs::read_to_string(format!("{}/gt_max_freq_mhz", base));
-        let min_f = std::fs::read_to_string(format!("{}/gt_min_freq_mhz", base));
+            // B. Intel Frequency-based Proxy
+            // If we can't get usage%, the ratio of current frequency vs max frequency is an excellent proxy for load.
+            let cur_f = std::fs::read_to_string(format!("{}/gt_cur_freq_mhz", base));
+            let max_f = std::fs::read_to_string(format!("{}/gt_max_freq_mhz", base));
+            let min_f = std::fs::read_to_string(format!("{}/gt_min_freq_mhz", base));
 
-        if let (Ok(cur), Ok(max), Ok(min)) = (cur_f, max_f, min_f) {
-            let c_v = cur.trim().parse::<f32>().unwrap_or(0.0);
-            let m_v = max.trim().parse::<f32>().unwrap_or(1.0);
-            let n_v = min.trim().parse::<f32>().unwrap_or(0.0);
+            if let (Ok(cur), Ok(max), Ok(min)) = (cur_f, max_f, min_f) {
+                let c_v = cur.trim().parse::<f32>().unwrap_or(0.0);
+                let m_v = max.trim().parse::<f32>().unwrap_or(1.0);
+                let n_v = min.trim().parse::<f32>().unwrap_or(0.0);
 
-            if m_v > n_v {
-                // Return percentage of potential frequency scaling currently in use
-                let usage = ((c_v - n_v) / (m_v - n_v)) * 100.0;
-                return usage.clamp(0.0, 100.0) as i32;
+                if m_v > n_v {
+                    let usage = ((c_v - n_v) / (m_v - n_v)) * 100.0;
+                    return usage.clamp(0.0, 100.0) as i32;
+                }
             }
         }
     }
