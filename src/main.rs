@@ -293,6 +293,10 @@ FORMAT: Output a JSON block to call a tool:
                     }
                 }
             }
+            #[cfg(target_os = "linux")]
+            {
+                gpu_load = crate::hardware::get_linux_gpu_usage();
+            }
             
             let cpus = sys.cpus();
             let mut total_cpu = 0.0;

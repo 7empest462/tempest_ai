@@ -215,3 +215,47 @@ impl AgentTool for TelemetryChartTool {
         Ok(format!("Successfully generated analytical chart! Saved natively to: {}", path))
     }
 }
+
+/// 📊 Linux GPU Usage Probe
+/// Tries to find GPU usage % across different vendors (Intel, AMD, Nvidia)
+#[cfg(target_os = "linux")]
+pub fn get_linux_gpu_usage() -> i32 {
+    // 1. Try NVIDIA via NVML if available
+    if let Ok(nvml) = nvml_wrapper::Nvml::init() {
+        if let Ok(device) = nvml.device_by_index(0) {
+            if let Ok(util) = device.utilization_rates() {
+                return util.gpu as i32;
+            }
+        }
+    }
+
+    // 2. Try Intel / AMD via sysfs
+    // Common paths for GPU busy percentage
+    let paths = [
+        "/sys/class/drm/card0/device/gpu_busy_percent", // AMD / Some Intel
+        "/sys/class/drm/card1/device/gpu_busy_percent", // Discrete AMD if primary is Intel
+        "/sys/class/drm/card0/device/intel_gpu_usage",  // Older Intel patches
+    ];
+
+    for path in paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(val) = content.trim().parse::<i32>() {
+                return val;
+            }
+        }
+    }
+
+    // 3. Last resort: simple heuristic (is the GPU at least 'powered on'?)
+    // This is very coarse but better than 0% if we know it's active.
+    if let Ok(status) = std::fs::read_to_string("/sys/class/drm/card0/device/power/runtime_status") {
+        if status.trim() == "active" {
+            return 5; // Low placeholder for "active"
+        }
+    }
+
+    0
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+pub fn get_linux_gpu_usage() -> i32 { 0 }
