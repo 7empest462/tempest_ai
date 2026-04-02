@@ -276,27 +276,29 @@ FORMAT: Output a JSON block to call a tool:
             let ollama_mb = ollama_mem_bytes / 1024 / 1024;
 
             // 🎨 GPU LOAD (Apple Silicon / macOS / Linux)
-            #[allow(unused_assignments)]
-            let mut gpu_load = 0;
-            #[cfg(target_os = "macos")]
-            {
-                let output = std::process::Command::new("ioreg")
-                    .args(["-r", "-c", "AGXAccelerator"])
-                    .output()
-                    .ok();
-                if let Some(out) = output {
-                    let s = String::from_utf8_lossy(&out.stdout);
-                    if let Some(caps) = gpu_re.captures(&s) {
-                        if let Some(m) = caps.get(1) {
-                            gpu_load = m.as_str().parse::<i32>().unwrap_or(0);
+            let gpu_load = {
+                let mut load = 0;
+                #[cfg(target_os = "macos")]
+                {
+                    let output = std::process::Command::new("ioreg")
+                        .args(["-r", "-c", "AGXAccelerator"])
+                        .output()
+                        .ok();
+                    if let Some(out) = output {
+                        let s = String::from_utf8_lossy(&out.stdout);
+                        if let Some(caps) = gpu_re.captures(&s) {
+                            if let Some(m) = caps.get(1) {
+                                load = m.as_str().parse::<i32>().unwrap_or(0);
+                            }
                         }
                     }
                 }
-            }
-            #[cfg(target_os = "linux")]
-            {
-                gpu_load = crate::hardware::get_linux_gpu_usage();
-            }
+                #[cfg(target_os = "linux")]
+                {
+                    load = crate::hardware::get_linux_gpu_usage();
+                }
+                load
+            };
             
             let cpus = sys.cpus();
             let mut total_cpu = 0.0;
