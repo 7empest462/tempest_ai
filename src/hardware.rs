@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
-use crate::tools::AgentTool;
+use crate::tools::{AgentTool, ToolContext};
 
 pub struct LinuxProcessAnalyzerTool;
 
@@ -17,7 +17,7 @@ impl AgentTool for LinuxProcessAnalyzerTool {
             "required": ["pid"]
         })
     }
-    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         #[cfg(target_os = "linux")]
         {
             use procfs::WithCurrentSystemInfo;
@@ -58,7 +58,7 @@ impl AgentTool for GpuDiagnosticsTool {
             }
         })
     }
-    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         #[cfg(target_os = "linux")]
         {
             let gpu_id = args.get("gpu_id").and_then(|g| g.as_i64()).unwrap_or(0) as u32;
@@ -126,7 +126,7 @@ impl AgentTool for TelemetryChartTool {
             "required": ["title", "x_label", "y_label", "series_name", "data_points"]
         })
     }
-    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let title = args.get("title").and_then(|t| t.as_str()).unwrap_or("Telemetry Chart");
         let x_label = args.get("x_label").and_then(|x| x.as_str()).unwrap_or("X");
         let y_label = args.get("y_label").and_then(|y| y.as_str()).unwrap_or("Y");

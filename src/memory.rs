@@ -73,13 +73,4 @@ impl MemoryStore {
         Ok(results)
     }
 
-    pub fn list_topics(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT topic FROM memories ORDER BY updated_at DESC LIMIT 50")?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        let mut topics = Vec::new();
-        for r in rows {
-            topics.push(r?);
-        }
-        Ok(topics)
-    }
 }

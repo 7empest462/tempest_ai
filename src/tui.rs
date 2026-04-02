@@ -22,7 +22,7 @@ pub enum AgentEvent {
     ToolFinish,
     SystemUpdate(String), // Telemetry
     Done,
-    Thinking(Option<String>),
+    #[allow(dead_code)] Thinking(Option<String>),
     RequestConfirmation(String, String),
     RequestInput(String, String), // (tool_name, question)
 }

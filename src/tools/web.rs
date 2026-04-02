@@ -1,0 +1,256 @@
+use anyhow::Result;
+use async_trait::async_trait;
+use serde_json::Value;
+use super::{AgentTool, ToolContext};
+
+pub struct SearchWebTool;
+
+#[async_trait]
+impl AgentTool for SearchWebTool {
+    fn name(&self) -> &'static str {
+        "search_web"
+    }
+
+    fn description(&self) -> &'static str {
+        "Searches the web using DuckDuckGo. Returns top organic results, including titles, snippets, and URLs."
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query."
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+        
+        let url = "https://lite.duckduckgo.com/lite/";
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            .build()?;
+            
+        let res = client.post(url)
+            .form(&[("q", &query)])
+            .send().await?
+            .text().await?;
+            
+        let document = scraper::Html::parse_document(&res);
+        let tr_selector = scraper::Selector::parse("tr").unwrap();
+        let a_selector = scraper::Selector::parse("a.result-link").unwrap();
+        let snippet_selector = scraper::Selector::parse("td.result-snippet").unwrap();
+        
+        let mut results = String::new();
+        let mut current_title = String::new();
+        let mut current_url = String::new();
+        
+        for tr in document.select(&tr_selector) {
+            if let Some(a) = tr.select(&a_selector).next() {
+                current_title = a.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                current_url = a.value().attr("href").unwrap_or("").to_string();
+                
+                if current_url.contains("uddg?u=") {
+                    if let Some(idx) = current_url.find("uddg?u=") {
+                        let extracted = &current_url[idx + 7..];
+                        let clean = if let Some(end_idx) = extracted.find('&') {
+                            &extracted[..end_idx]
+                        } else {
+                            extracted
+                        };
+                        if let Ok(decoded) = urlencoding::decode(clean) {
+                            current_url = decoded.to_string();
+                        }
+                    }
+                } else if current_url.starts_with("//") {
+                    current_url = format!("https:{}", current_url);
+                } else if current_url.starts_with('/') {
+                    current_url = format!("https://lite.duckduckgo.com{}", current_url);
+                }
+            } else if let Some(snippet) = tr.select(&snippet_selector).next() {
+                let snip = snippet.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                if !current_title.is_empty() && !current_url.is_empty() {
+                    results.push_str(&format!("Title: {}\nURL: {}\nSnippet: {}\n\n", current_title, current_url, snip));
+                    current_title.clear();
+                    current_url.clear();
+                }
+            }
+        }
+        
+        if results.is_empty() {
+            Ok(format!("No results found for query: {}", query))
+        } else {
+            Ok(results)
+        }
+    }
+}
+
+pub struct ReadUrlTool;
+
+#[async_trait]
+impl AgentTool for ReadUrlTool {
+    fn name(&self) -> &'static str {
+        "read_url"
+    }
+
+    fn description(&self) -> &'static str {
+        "Fetches a URL and converts the page HTML to readable markdown text. Use this to read documentation or articles from search results."
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch."
+                }
+            },
+            "required": ["url"]
+        })
+    }
+    
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+        
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()?;
+            
+        let res = client.get(&url).send().await?;
+        let html_bytes = res.bytes().await?;
+        
+        // Use html2text to strip HTML tags and present clean text
+        let text = html2text::from_read(html_bytes.as_ref(), 100);
+        
+        let max_len = 15000;
+        let mut truncated = text;
+        if truncated.len() > max_len {
+            let safe_len = truncated.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated.len());
+            truncated.truncate(safe_len);
+            truncated.push_str("\n...[Content truncated due to length]...");
+        }
+        
+        Ok(truncated)
+    }
+}
+
+pub struct HttpRequestTool;
+
+#[async_trait]
+impl AgentTool for HttpRequestTool {
+    fn name(&self) -> &'static str { "http_request" }
+    fn description(&self) -> &'static str { "Makes an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) with optional headers and body. Use this to interact with REST APIs, webhooks, or any HTTP endpoint. Returns status code, headers, and response body." }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "method": { "type": "string", "description": "HTTP method: GET, POST, PUT, DELETE, PATCH" },
+                "url": { "type": "string", "description": "The full URL to send the request to" },
+                "headers": { "type": "object", "description": "Optional key-value pairs for HTTP headers (e.g., {\"Authorization\": \"Bearer TOKEN\"})" },
+                "body": { "type": "string", "description": "Optional request body (typically JSON string for POST/PUT)" }
+            },
+            "required": ["method", "url"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let method = args.get("method").and_then(|m| m.as_str()).unwrap_or("GET").to_uppercase();
+        let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url' argument"))?;
+
+        let client = reqwest::Client::builder()
+            .user_agent("TempestAI/0.1")
+            .build()?;
+
+        let mut request = match method.as_str() {
+            "POST" => client.post(url),
+            "PUT" => client.put(url),
+            "DELETE" => client.delete(url),
+            "PATCH" => client.patch(url),
+            _ => client.get(url),
+        };
+
+        // Add custom headers
+        if let Some(headers) = args.get("headers").and_then(|h| h.as_object()) {
+            for (key, val) in headers {
+                if let Some(v) = val.as_str() {
+                    request = request.header(key.as_str(), v);
+                }
+            }
+        }
+
+        // Add body if provided
+        if let Some(body) = args.get("body").and_then(|b| b.as_str()) {
+            request = request.header("Content-Type", "application/json").body(body.to_string());
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        let resp_headers: Vec<String> = response.headers().iter()
+            .take(10)
+            .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or("?")))
+            .collect();
+
+        let body = response.text().await?;
+        let max_len = 15000;
+        let mut truncated_body = body;
+        if truncated_body.len() > max_len {
+            let safe_len = truncated_body.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated_body.len());
+            truncated_body.truncate(safe_len);
+            truncated_body.push_str("\n...[Response truncated]...");
+        }
+
+        Ok(format!("Status: {}\nHeaders:\n{}\n\nBody:\n{}", status, resp_headers.join("\n"), truncated_body))
+    }
+}
+
+pub struct DownloadFileTool;
+
+#[async_trait]
+impl AgentTool for DownloadFileTool {
+    fn name(&self) -> &'static str { "download_file" }
+    fn description(&self) -> &'static str { "Download a file from a URL and save it to a local path. Useful for fetching remote resources, images, scripts, or data files." }
+    fn requires_confirmation(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { true }
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "URL to download from" },
+                "path": { "type": "string", "description": "Local path to save the downloaded file" }
+            },
+            "required": ["url", "path"]
+        })
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url'"))?;
+        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let path = shellexpand::tilde(path_str).to_string();
+
+        let client = reqwest::Client::builder()
+            .user_agent("TempestAI/0.1")
+            .build()?;
+        let response = client.get(url).send().await?;
+        let status = response.status();
+        
+        if !status.is_success() {
+            anyhow::bail!("Download failed with status {}", status);
+        }
+
+        let bytes = response.bytes().await?;
+        
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(&path, &bytes)?;
+        Ok(format!("✅ Downloaded {} bytes from {} → {}", bytes.len(), url, path))
+    }
+}

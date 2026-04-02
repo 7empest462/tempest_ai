@@ -2,13 +2,13 @@ mod agent;
 mod crypto;
 mod error;
 mod memory;
-mod skills;
 mod tools;
 mod hardware;
 mod telemetry;
 mod daemon;
 mod tui;
 mod vector_brain;
+mod skills;
 
 use agent::Agent;
 use anyhow::Result;
@@ -251,7 +251,7 @@ FORMAT: Output a JSON block to call a tool:
     
     let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "phi3:latest".to_string());
     
-    let mut agent = Agent::new(model, system_prompt, history_path, memory_store, sub_agent_model);
+    let agent = Agent::new(model, system_prompt, history_path, memory_store, sub_agent_model);
     
     if let Err(e) = agent.check_connection().await {
         println!("{}", format!("Agent Error: {}", e).red());
@@ -406,7 +406,7 @@ FORMAT: Output a JSON block to call a tool:
     Ok(())
 }
 
-async fn run_cli_mode(mut agent: Agent) -> Result<()> {
+async fn run_cli_mode(agent: Agent) -> Result<()> {
     use rustyline::DefaultEditor;
     let mut rl = DefaultEditor::new()?;
     

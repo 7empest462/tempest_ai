@@ -1,0 +1,121 @@
+   Compiling tempest_ai v0.1.0 (/Volumes/Corsair_Lab/Home/Projects/tempest_ai)
+warning: unused imports: `Components`, `Disks`, and `Networks`
+ --> src/tools/system.rs:5:23
+  |
+5 | use sysinfo::{System, Disks, Networks, Components};
+  |                       ^^^^^  ^^^^^^^^  ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+   --> src/agent.rs:813:30
+    |
+813 |                     .num_ctx(self.calculate_optimal_ctx() as u32)
+    |                      ------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u64`, found `u32`
+    |                      |
+    |                      arguments to this method are incorrect
+    |
+note: method defined here
+   --> /Users/7empest_mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ollama-rs-0.2.6/src/generation/options.rs:44:12
+    |
+ 44 |     pub fn num_ctx(mut self, num_ctx: u64) -> Self {
+    |            ^^^^^^^
+help: you can convert a `u32` to a `u64`
+    |
+813 |                     .num_ctx((self.calculate_optimal_ctx() as u32).into())
+    |                              +                                   ++++++++
+
+warning: variable does not need to be mutable
+   --> src/main.rs:408:23
+    |
+408 | async fn run_cli_mode(mut agent: Agent) -> Result<()> {
+    |                       ----^^^^^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+   --> src/tools/editing.rs:35:55
+    |
+ 35 |         let diff = TextDiff::from_lines(&old_content, new_content);
+    |                    --------------------               ^^^^^^^^^^^ expected `&String`, found `&str`
+    |                    |
+    |                    arguments to this function are incorrect
+    |
+    = note: expected reference `&std::string::String`
+               found reference `&str`
+note: associated function defined here
+   --> /Users/7empest_mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/similar-2.7.0/src/text/mod.rs:378:12
+    |
+378 |     pub fn from_lines<T: DiffableStrRef + ?Sized>(
+    |            ^^^^^^^^^^
+
+error[E0599]: no method named `global_cpu_info` found for struct `sysinfo::System` in the current scope
+  --> src/tools/system.rs:23:17
+   |
+23 |             sys.global_cpu_info().cpu_usage(),
+   |                 ^^^^^^^^^^^^^^^
+   |
+help: there is a method `global_cpu_usage` with a similar name
+   |
+23 -             sys.global_cpu_info().cpu_usage(),
+23 +             sys.global_cpu_usage().cpu_usage(),
+   |
+
+error[E0599]: no method named `add_memory` found for struct `std::sync::MutexGuard<'_, MemoryStore>` in the current scope
+  --> src/tools/memory.rs:37:66
+   |
+37 | ...ory Store Poisoned").add_memory(fact.to_string(), tags)?;
+   |                         ^^^^^^^^^^ method not found in `std::sync::MutexGuard<'_, MemoryStore>`
+
+error[E0599]: no method named `search_memories` found for struct `std::sync::MutexGuard<'_, MemoryStore>` in the current scope
+  --> src/tools/memory.rs:66:81
+   |
+66 | ...y Store Poisoned").search_memories(query)?;
+   |                       ^^^^^^^^^^^^^^^ method not found in `std::sync::MutexGuard<'_, MemoryStore>`
+
+warning: unused variable: `t`
+  --> src/agent.rs:99:21
+   |
+99 |         if let Some(t) = self.tools.iter().find(|t| t.name() == "p...
+   |                     ^ help: if this is intentional, prefix it with an underscore: `_t`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tx_clone`
+   --> src/agent.rs:100:17
+    |
+100 |             let tx_clone = self.create_event_sender_noop(); // Ne...
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tx_clone`
+
+error[E0382]: borrow of moved value: `child`
+    --> src/tools/execution.rs:66:25
+     |
+  34 | ...et mut child = Command::new("sh")
+     |       --------- move occurs because `child` has type `tokio::process::Child`, which does not implement the `Copy` trait
+...
+  42 | ...et res = timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).a...
+     |                                                              ------------------ `child` moved due to this method call
+...
+  66 | ...       let _ = child.kill().await;
+     |                   ^^^^^ value borrowed here after move
+     |
+note: `tokio::process::Child::wait_with_output` takes ownership of the receiver `self`, which moves `child`
+    --> /Users/7empest_mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.50.0/src/process/mod.rs:1446:39
+     |
+1446 |     pub async fn wait_with_output(mut self) -> io::Result<Output> {
+     |                                       ^^^^
+
+warning: variable does not need to be mutable
+   --> src/main.rs:253:9
+    |
+253 |     let mut agent = Agent::new(model, system_prompt, history_path...
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+Some errors have detailed explanations: E0308, E0382, E0599.
+For more information about an error, try `rustc --explain E0308`.
+warning: `tempest_ai` (bin "tempest_ai") generated 5 warnings
+error: could not compile `tempest_ai` (bin "tempest_ai") due to 6 previous errors; 5 warnings emitted

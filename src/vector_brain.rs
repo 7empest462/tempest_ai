@@ -23,6 +23,7 @@ impl VectorBrain {
         Self { entries: Vec::new() }
     }
 
+    #[allow(dead_code)]
     pub fn add_entry(&mut self, text: String, embedding: Vec<f32>, source: String, metadata: HashMap<String, String>) {
         let entry = VectorEntry {
             text,
@@ -63,6 +64,7 @@ impl VectorBrain {
         results
     }
 
+    #[allow(dead_code)]
     pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?;

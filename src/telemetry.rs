@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
-use crate::tools::AgentTool;
+use crate::tools::{AgentTool, ToolContext};
 
 pub struct AdvancedSystemOracleTool;
 
@@ -15,7 +15,7 @@ impl AgentTool for AdvancedSystemOracleTool {
             "required": []
         })
     }
-    async fn execute(&self, _args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, _args: &Value, _context: ToolContext) -> Result<String> {
         use sysinfo::{System, Disks, Networks, Components};
         
         let mut sys = System::new_all();
@@ -107,7 +107,7 @@ impl AgentTool for KernelDiagnosticTool {
             "required": ["key"]
         })
     }
-    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
         
         #[cfg(unix)]
@@ -150,7 +150,7 @@ impl AgentTool for NetworkSnifferTool {
             "required": ["action"]
         })
     }
-    async fn execute(&self, args: &Value, _agent_content: &str) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         use pnet::datalink::{self, NetworkInterface};
 
         let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list_interfaces");
