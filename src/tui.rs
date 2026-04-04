@@ -363,7 +363,15 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(chat_list, top_chunks[0], &mut app.list_state);
 
-    // 2. Telemetry (Premium Visuals)
+    // 2. Telemetry & Logo Sidebar
+    let sidebar_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ].as_ref())
+        .split(top_chunks[1]);
+
     let telemetry_lines: Vec<Line> = app.telemetry_text.lines()
         .map(|l| {
             if l.contains("---") {
@@ -381,7 +389,19 @@ fn ui(f: &mut Frame, app: &mut App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(" HARDWARE VECTORS ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-    f.render_widget(telemetry_para, top_chunks[1]);
+    f.render_widget(telemetry_para, sidebar_layout[0]);
+
+    // ⚡ Futuristic Logo Widget
+    let logo_lines = vec![
+        Line::from(Span::styled("   ◸───────────────────────────────◹", Style::default().fg(Color::DarkGray))),
+        Line::from(vec![
+            Span::styled("      ⚡  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("₮ Ξ M P Ξ S T   A I", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled("   ◺───────────────────────────────◿", Style::default().fg(Color::DarkGray))),
+    ];
+    let logo_para = Paragraph::new(logo_lines);
+    f.render_widget(logo_para, sidebar_layout[1]);
 
     // 3. Input Buffer (Interactive Look)
     let input_para = Paragraph::new(vec![

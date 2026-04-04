@@ -1,9 +1,26 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use anyhow::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use std::sync::{Arc, Mutex};
 use crate::memory::MemoryStore;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct StoreMemoryArgs {
+    /// The information to remember.
+    pub fact: String,
+    /// Optional search tags.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RecallMemoryArgs {
+    /// Search keywords or query.
+    pub query: String,
+}
 
 pub struct StoreMemoryTool {
     memory_store: Arc<Mutex<MemoryStore>>,
@@ -17,21 +34,26 @@ impl StoreMemoryTool {
 impl AgentTool for StoreMemoryTool {
     fn name(&self) -> &'static str { "store_memory" }
     fn description(&self) -> &'static str { "Stores an important fact in long-term memory for later recall across sessions." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "fact": { "type": "string", "description": "The information to remember." },
-                "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional search tags." }
-            },
-            "required": ["fact"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<StoreMemoryArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let fact = args.get("fact").and_then(|f| f.as_str()).unwrap();
+        let typed_args: StoreMemoryArgs = serde_json::from_value(args.clone())?;
         
-        self.memory_store.lock().expect("Memory Store Poisoned").store(fact, fact)?;
+        self.memory_store.lock().expect("Memory Store Poisoned").store(&typed_args.fact, &typed_args.fact, typed_args.tags)?;
         Ok("Fact stored successfully in long-term memory.".to_string())
     }
 }
@@ -48,19 +70,25 @@ impl RecallMemoryTool {
 impl AgentTool for RecallMemoryTool {
     fn name(&self) -> &'static str { "recall_memory" }
     fn description(&self) -> &'static str { "Searches long-term memory for relevant facts based on keywords." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "Search keywords or query." }
-            },
-            "required": ["query"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<RecallMemoryArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap();
-        let memories = self.memory_store.lock().expect("Memory Store Poisoned").recall(query)?;
+        let typed_args: RecallMemoryArgs = serde_json::from_value(args.clone())?;
+        let memories = self.memory_store.lock().expect("Memory Store Poisoned").recall(&typed_args.query)?;
         
         if memories.is_empty() {
             Ok("No matching memories found.".to_string())

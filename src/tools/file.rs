@@ -1,9 +1,40 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReadFileArgs {
+    /// Path to the file to read.
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WriteFileArgs {
+    /// Path to the file.
+    pub path: String,
+    /// Full content to write.
+    pub content: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListDirArgs {
+    /// Directory to list (defaults to '.')
+    pub path: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchFilesArgs {
+    /// Search pattern for filenames
+    pub pattern: String,
+    /// Root directory (defaults to '.')
+    pub path: Option<String>,
+}
 
 pub struct ReadFileTool;
 
@@ -11,19 +42,25 @@ pub struct ReadFileTool;
 impl AgentTool for ReadFileTool {
     fn name(&self) -> &'static str { "read_file" }
     fn description(&self) -> &'static str { "Reads the contents of a file. Use this to examine code or configuration." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to the file to read." }
-            },
-            "required": ["path"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ReadFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path_owned = shellexpand::tilde(path_str).to_string();
+        let typed_args: ReadFileArgs = serde_json::from_value(args.clone())?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
         
         let metadata = fs::metadata(&path_owned)?;
         if metadata.len() > 1_000_000 {
@@ -42,22 +79,26 @@ impl AgentTool for WriteFileTool {
     fn description(&self) -> &'static str { "Writes content to a file, creating directories if needed. Overwrites existing content." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to the file." },
-                "content": { "type": "string", "description": "Full content to write." }
-            },
-            "required": ["path", "content"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<WriteFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
-        
-        let path_owned = shellexpand::tilde(path_str).to_string();
+        let typed_args: WriteFileArgs = serde_json::from_value(args.clone())?;
+        let content = typed_args.content;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
         let path = PathBuf::from(&path_owned);
 
         if content.contains("...existing code...") || content.contains("// rest of file") {
@@ -68,7 +109,7 @@ impl AgentTool for WriteFileTool {
             fs::create_dir_all(parent)?;
         }
         
-        fs::write(&path, content)?;
+        fs::write(&path, &content)?;
         Ok(format!("Successfully wrote {} bytes to {}", content.len(), path.display()))
     }
 }
@@ -79,18 +120,26 @@ pub struct ListDirTool;
 impl AgentTool for ListDirTool {
     fn name(&self) -> &'static str { "list_dir" }
     fn description(&self) -> &'static str { "Lists directory contents." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Directory to list (defaults to '.')" }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ListDirArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
             }
-        })
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-        let path_owned = shellexpand::tilde(path_str).to_string();
+        let typed_args: ListDirArgs = serde_json::from_value(args.clone())?;
+        let path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
+        let path_owned = shellexpand::tilde(&path_val).to_string();
         
         let mut out = Vec::new();
         for entry in fs::read_dir(&path_owned)? {
@@ -109,28 +158,34 @@ pub struct SearchFilesTool;
 impl AgentTool for SearchFilesTool {
     fn name(&self) -> &'static str { "search_files" }
     fn description(&self) -> &'static str { "Search for files by name/pattern in the current project." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string", "description": "Search pattern for filenames" },
-                "path": { "type": "string", "description": "Root directory (default '.')" }
-            },
-            "required": ["pattern"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<SearchFilesArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let pattern = args.get("pattern").and_then(|p| p.as_str()).unwrap();
-        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-        let path_owned = shellexpand::tilde(path_str).to_string();
+        let typed_args: SearchFilesArgs = serde_json::from_value(args.clone())?;
+        let pattern = typed_args.pattern;
+        let path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
+        let path_owned = shellexpand::tilde(&path_val).to_string();
         
         use walkdir::WalkDir;
         
         let mut matches = Vec::new();
         for entry in WalkDir::new(&path_owned).into_iter().filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy();
-            if name.contains(pattern) {
+            if name.contains(&pattern) {
                 matches.push(entry.path().display().to_string());
             }
             if matches.len() > 100 { break; }
@@ -144,6 +199,14 @@ impl AgentTool for SearchFilesTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct AppendFileArgs {
+    /// Path to the file to append to
+    pub path: String,
+    /// Content to append
+    pub content: String,
+}
+
 pub struct AppendFileTool;
 
 #[async_trait]
@@ -152,21 +215,26 @@ impl AgentTool for AppendFileTool {
     fn description(&self) -> &'static str { "Append content to the end of an existing file. Creates the file if it doesn't exist." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to the file to append to" },
-                "content": { "type": "string", "description": "Content to append" }
-            },
-            "required": ["path", "content"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<AppendFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path = shellexpand::tilde(path_str).to_string();
-        let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
+        let typed_args: AppendFileArgs = serde_json::from_value(args.clone())?;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
+        let content = typed_args.content;
 
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -178,6 +246,18 @@ impl AgentTool for AppendFileTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct PatchFileArgs {
+    /// The path to the file.
+    pub file_path: String,
+    /// 1-indexed starting line number.
+    pub start_line: usize,
+    /// 1-indexed ending line number (inclusive).
+    pub end_line: usize,
+    /// New content to insert.
+    pub content: String,
+}
+
 pub struct PatchFileTool;
 
 #[async_trait]
@@ -186,25 +266,28 @@ impl AgentTool for PatchFileTool {
     fn description(&self) -> &'static str { "Surgically replaces a specific range of lines in a file. Lines are 1-indexed." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "file_path": { "type": "string", "description": "The path to the file." },
-                "start_line": { "type": "integer", "description": "1-indexed starting line number." },
-                "end_line": { "type": "integer", "description": "1-indexed ending line number (inclusive)." },
-                "content": { "type": "string", "description": "New content to insert." }
-            },
-            "required": ["file_path", "start_line", "end_line", "content"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<PatchFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("file_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file_path'"))?;
-        let path_owned = shellexpand::tilde(path_str).to_string();
-        let start_line = args.get("start_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'start_line'"))? as usize;
-        let end_line = args.get("end_line").and_then(|v| v.as_u64()).ok_or_else(|| anyhow::anyhow!("Missing 'end_line'"))? as usize;
-        let content = args.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
+        let typed_args: PatchFileArgs = serde_json::from_value(args.clone())?;
+        let path_owned = shellexpand::tilde(&typed_args.file_path).to_string();
+        let start_line = typed_args.start_line;
+        let end_line = typed_args.end_line;
+        let content = typed_args.content;
 
         if content.contains("...existing code...") || content.contains("// unchanged") {
              anyhow::bail!("Guardrail: Placeholder detected. Full content required.");
@@ -238,6 +321,20 @@ impl AgentTool for PatchFileTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct FindReplaceArgs {
+    /// File or directory path
+    pub path: String,
+    /// The pattern to find
+    pub find: String,
+    /// The replacement string
+    pub replace: String,
+    /// Regex mode. Default: false
+    pub is_regex: Option<bool>,
+    /// Optional glob filter
+    pub file_pattern: Option<String>,
+}
+
 pub struct FindReplaceTool;
 
 #[async_trait]
@@ -246,27 +343,29 @@ impl AgentTool for FindReplaceTool {
     fn description(&self) -> &'static str { "Regex or literal find-and-replace across files." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "File or directory path" },
-                "find": { "type": "string", "description": "The pattern to find" },
-                "replace": { "type": "string", "description": "The replacement string" },
-                "is_regex": { "type": "boolean", "description": "Regex mode. Default: false" },
-                "file_pattern": { "type": "string", "description": "Optional glob filter" }
-            },
-            "required": ["path", "find", "replace"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<FindReplaceArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path_owned = shellexpand::tilde(path_str).to_string();
-        let find = args.get("find").and_then(|f| f.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'find'"))?;
-        let replace = args.get("replace").and_then(|r| r.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'replace'"))?;
-        let is_regex = args.get("is_regex").and_then(|r| r.as_bool()).unwrap_or(false);
-        let file_pattern = args.get("file_pattern").and_then(|f| f.as_str());
+        let typed_args: FindReplaceArgs = serde_json::from_value(args.clone())?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
+        let find = &typed_args.find;
+        let replace = &typed_args.replace;
+        let is_regex = typed_args.is_regex.unwrap_or(false);
+        let file_pattern = typed_args.file_pattern.as_deref();
 
         let path = std::path::Path::new(&path_owned);
         let mut files_to_process = Vec::new();
@@ -335,29 +434,40 @@ impl AgentTool for FindReplaceTool {
         }
     }
 }
+#[derive(Deserialize, JsonSchema)]
+pub struct DiffFilesArgs {
+    /// The first (original) file path.
+    pub file1: String,
+    /// The second (modified) file path.
+    pub file2: String,
+}
+
 pub struct DiffFilesTool;
 
 #[async_trait]
 impl AgentTool for DiffFilesTool {
     fn name(&self) -> &'static str { "diff_files" }
     fn description(&self) -> &'static str { "Generates a unified diff between two local files. Useful for comparing versions or verifying changes." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "file1": { "type": "string", "description": "The first (original) file path." },
-                "file2": { "type": "string", "description": "The second (modified) file path." }
-            },
-            "required": ["file1", "file2"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<DiffFilesArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let f1_str = args.get("file1").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file1'"))?;
-        let f2_str = args.get("file2").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'file2'"))?;
-
-        let f1_path = shellexpand::tilde(f1_str).to_string();
-        let f2_path = shellexpand::tilde(f2_str).to_string();
+        let typed_args: DiffFilesArgs = serde_json::from_value(args.clone())?;
+        let f1_path = shellexpand::tilde(&typed_args.file1).to_string();
+        let f2_path = shellexpand::tilde(&typed_args.file2).to_string();
 
         let c1 = fs::read_to_string(&f1_path)?;
         let c2 = fs::read_to_string(&f2_path)?;

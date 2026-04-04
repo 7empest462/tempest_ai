@@ -3,8 +3,8 @@ use colored::*;
 use ollama_rs::{
     generation::{
         chat::{request::ChatMessageRequest, ChatMessage, MessageRole},
-        options::GenerationOptions,
     },
+    models::ModelOptions,
     Ollama,
 };
 use serde_json::Value;
@@ -12,6 +12,9 @@ use futures::StreamExt;
 use std::io::Write;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
+use std::sync::{Arc, Mutex};       // Keep this one only
+use std::path::Path;               // Keep this one only
+
 use crate::tools::ToolContext;
 
 pub struct Agent {
@@ -35,10 +38,8 @@ pub struct Agent {
     pub telemetry: Arc<Mutex<String>>,
 }
 
-use std::sync::{Arc, Mutex};
-use std::path::Path;
-use crate::memory::MemoryStore;
 
+use crate::memory::MemoryStore;
 impl Agent {
     pub fn new(model: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>, sub_agent_model: String) -> Self {
         let tools: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
@@ -73,6 +74,7 @@ impl Agent {
             Arc::new(crate::tools::system::KernelDiagnosticTool),
             Arc::new(crate::tools::system::NetworkSnifferTool),
             Arc::new(crate::tools::system::SystemdManagerTool),
+            Arc::new(crate::tools::telemetry::SystemTelemetryTool),
             // RESTORED WEB TOOLS
             Arc::new(crate::tools::web::SearchWebTool),
             Arc::new(crate::tools::web::ReadUrlTool),
@@ -305,7 +307,7 @@ impl Agent {
             let _ = self.auto_summarize_memory(false).await;
 
             // Build the request with moderate options (8k context)
-            let options = GenerationOptions::default()
+            let options = ModelOptions::default()
                 .num_ctx(8192)
                 .num_predict(4096);
 
@@ -314,10 +316,15 @@ impl Agent {
                 h_lock.clone()
             };
 
+            // Construct native tool definitions
+            let tool_infos: Vec<ollama_rs::generation::tools::ToolInfo> = self.tools.iter().map(|t| t.tool_info()).collect();
+
             let request = ChatMessageRequest::new(
                 self.model.clone(),
                 history_snapshot,
-            ).options(options);
+            )
+            .options(options)
+            .tools(tool_infos);
 
             let spinner = indicatif::ProgressBar::new_spinner();
             spinner.enable_steady_tick(std::time::Duration::from_millis(80));
@@ -331,6 +338,7 @@ impl Agent {
 
             let mut stream = self.ollama.send_chat_messages_stream(request).await?;
             let mut full_content = String::new();
+            let mut native_tool_calls = Vec::new();
             let mut in_thinking = false;
             let mut first_token = true;
 
@@ -340,15 +348,19 @@ impl Agent {
             let mut in_code_block = false;
 
             while let Some(res) = stream.next().await {
-                if first_token {
-                    spinner.finish_and_clear();
-                    first_token = false;
-                    print!("\n");
+                if let Ok(chunk) = res {
+                    let text = chunk.message.content.clone();
+                    if !chunk.message.tool_calls.is_empty() {
+                        native_tool_calls.extend(chunk.message.tool_calls.clone());
+                    }
+                    if first_token && !text.trim().is_empty() {
+                        spinner.finish_and_clear();
+                        first_token = false;
+                        print!("\n");
+                    }
+                    full_content.push_str(&text);
+                    line_buffer.push_str(&text);
                 }
-                let chunk = res.map_err(|e| anyhow::anyhow!("Ollama stream error: {:?}", e))?;
-                let text = chunk.message.content;
-                full_content.push_str(&text);
-                line_buffer.push_str(&text);
 
                 // Process all full lines in the buffer
                 while let Some(idx) = line_buffer.find('\n') {
@@ -416,12 +428,31 @@ impl Agent {
             }
             let content = full_content;
 
+            // Prioritize native tool calls, fallback to markdown extraction if empty
+            let mut all_tool_calls = Vec::new();
+            for native_call in native_tool_calls {
+                all_tool_calls.push(serde_json::json!({
+                    "tool": native_call.function.name,
+                    "arguments": native_call.function.arguments,
+                }));
+            }
+
+            if all_tool_calls.is_empty() {
+                if let Ok(legacy_calls) = self.extract_tool_calls(&content) {
+                    all_tool_calls.extend(legacy_calls);
+                } else if let Err(legacy_err) = self.extract_tool_calls(&content) {
+                    println!("\n{} {}", "⚠️  Agent syntax error:".yellow(), legacy_err);
+                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("[System Guardrail] {}", legacy_err)));
+                    let _ = self.save_history();
+                    continue;
+                }
+            }
+
             // Look for JSON blocks to execute tools (supports multiple per response)
             let mut executed_tools = false;
 
-            match self.extract_tool_calls(&content) {
-                Ok(tool_calls) if !tool_calls.is_empty() => {
-                    for tool_req in &tool_calls {
+            if !all_tool_calls.is_empty() {
+                for tool_req in &all_tool_calls {
                         if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
                             let args = tool_req.get("arguments").unwrap_or(&Value::Null);
 
@@ -430,10 +461,16 @@ impl Agent {
                                 let mut calls_lock = self.recent_tool_calls.lock().unwrap();
                                 if calls_lock.contains(&current_call_hash) {
                                     println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool sequence...".red());
-                                    let guard_msg = "[System Guardrail] LOOP DETECTED. You just executed the exact same tool and arguments as a recent failed tool call. Pivot to a new strategy.".to_string();
-                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, guard_msg)));
+                                    let guard_msg = format!(
+                                        "[System Guardrail] STOP: You just attempted to execute the exact same tool and arguments as a previous failed turn. \
+                                        \nCURRENT ACTION: '{}' with arguments '{}' is BLOCKED. \
+                                        \nINSTRUCTION: Do NOT repeat this action. Look at your history again, determine what is missing, and PIVOT to a new strategy or tool.", 
+                                        tool_name, serde_json::to_string(args).unwrap_or_default()
+                                    );
+                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::System, guard_msg));
                                     let _ = self.save_history();
                                     calls_lock.clear();
+                                    executed_tools = true; // 🚀 Keep autonomous loop alive to allow AI to self-correct
                                     continue;
                                 }
                                 calls_lock.push_back(current_call_hash);
@@ -448,7 +485,7 @@ impl Agent {
                                     tool_result_str = format!("[System Guardrail] PLANNING MODE ACTIVE: Tool '{}' modifies system state and is BLOCKED.\
                                         \n[INSTRUCTION]: You MUST present a clear implementation plan to the user for approval first.\
                                         \nDo NOT attempt to use this tool again until the user has approved your plan and you have used `toggle_planning` to enter EXECUTION mode.", tool_name);
-                                    println!("\n{} {}", "🧠 Guardrail:".yellow().bold(), format!("Blocked '{}' (Planning Mode)", tool_name).yellow());
+                                    println!("\n{} {}", "🧠 Guardrail:".yellow().bold(), format!("Blocked '{}' (PLANNING MODE active). Use 'toggle_planning' to unlock.", tool_name).yellow());
                                 } else {
                                     let mut allowed = true;
                                     let mut feedback = String::new();
@@ -509,17 +546,9 @@ impl Agent {
                                 let err_msg = format!("Error: Tool '{}' not found.", tool_name);
                                 self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, err_msg));
                                 executed_tools = true;
-                            }
                         }
                     }
                 }
-                Err(guardrail_msg) => {
-                    println!("\n{} {}", "⚠️  Agent syntax error:".yellow(), guardrail_msg);
-                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("[System Guardrail] {}", guardrail_msg)));
-                    let _ = self.save_history();
-                    continue;
-                }
-                Ok(_) => {}
             }
 
             if !executed_tools {
@@ -593,9 +622,7 @@ impl Agent {
     fn extract_tool_calls(&self, content: &str) -> Result<Vec<Value>, String> {
         let mut calls = Vec::new();
         
-        // 🚀 ROBUST TOOL EXTRACTION: Use a case-insensitive regex for finding ```json blocks.
-        // This handles missing newlines, different casing (, e.g., ```JSON), and extra spaces.
-        // The regex captures any text between triple backticks starting with 'json'.
+        // 🚀 ROBUST TOOL EXTRACTION: Try finding ```json blocks first
         let block_regex = regex::RegexBuilder::new(r"```\s*json\s*([\s\S]*?)\s*```")
             .case_insensitive(true)
             .build()
@@ -604,113 +631,27 @@ impl Agent {
         for caps in block_regex.captures_iter(content) {
             if let Some(m) = caps.get(1) {
                 let block = m.as_str().trim();
-                
-                // 🚑 PRE-PARSE RESCUE: If the block contains shell redirection, it's almost certainly a mangled write_file.
-                if block.contains("<<EOF") || block.contains("cat >") || block.contains("$(") {
-                    let re_path = regex::Regex::new(r#""path"\s*:\s*"(./)?([^"]+)""#).unwrap();
-                    if let Some(p_cap) = re_path.captures(block) {
-                        let path = p_cap.get(2).unwrap().as_str();
-                         // println!("{}", format!("🚑 Pre-Parse Rescue: Detected shell-injection intent for '{}'. Forcing extract_and_write.", path).yellow());
-                         calls.push(serde_json::json!({
-                            "tool": "extract_and_write",
-                            "arguments": { "path": path }
-                        }));
-                         continue;
-                    }
-                }
-
-                match serde_json::from_str::<Value>(block) {
-                    Ok(mut val) => {
-                        if val.get("tool").is_some() {
-                            if val.get("arguments").is_none() {
-                                if let Some(obj) = val.as_object_mut() {
-                                    let mut args_map = serde_json::Map::new();
-                                    let keys: Vec<String> = obj.keys().cloned().collect();
-                                    for k in keys {
-                                        if k != "tool" {
-                                            if let Some(v) = obj.remove(&k) {
-                                                args_map.insert(k, v);
-                                            }
-                                        }
-                                    }
-                                    obj.insert("arguments".to_string(), serde_json::Value::Object(args_map));
-                                }
-                            }
-                            
-                            let tool_name = val.get("tool").and_then(|t| t.as_str()).unwrap_or("");
-                            let args = val.get("arguments").and_then(|a| a.as_object());
-
-                            // 🚨 SHELL INJECTION GUARDRAIL: Catch if AI puts shell scripts inside write_file
-                            if tool_name == "write_file" {
-                                if let Some(content_val) = args.and_then(|a| a.get("content")).and_then(|c| c.as_str()) {
-                                    if content_val.contains("<<EOF") || content_val.contains("cat >") || content_val.contains("$(") {
-                                        let path = args.and_then(|a| a.get("path")).and_then(|p| p.as_str()).unwrap_or("file");
-                                        // println!("{}", "🚑 Auto-Rescue: Redirecting shell-injection 'write_file' → 'extract_and_write'".yellow());
-                                        calls.push(serde_json::json!({
-                                            "tool": "extract_and_write",
-                                            "arguments": { "path": path }
-                                        }));
-                                         continue;
-                                    }
-                                }
-                            }
-                            calls.push(val);
-                        }
-                    }
-                    Err(_) => {
-                        // 🚑 EMERGENCY RECOVERY: Rescue from malformed JSON
-                        // This regex is robust to missing braces or line breaks
-                        let re_tool = regex::Regex::new(r#""tool"\s*:\s*"([^"]+)""#).unwrap();
-                        let re_path = regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap();
-                        
-                        if let (Some(t_cap), Some(p_cap)) = (re_tool.captures(block), re_path.captures(block)) {
-                            let tool_name = t_cap.get(1).unwrap().as_str();
-                            let path = p_cap.get(1).unwrap().as_str();
-                            
-                            if !tool_name.is_empty() && !path.is_empty() {
-                                // println!("{}", format!("🚑 Emergency Recovery: Rescued '{}' for '{}' from malformed JSON.", tool_name, path).yellow());
-                                let target_tool = if tool_name == "write_file" { "extract_and_write" } else { tool_name };
-                                calls.push(serde_json::json!({
-                                    "tool": target_tool,
-                                    "arguments": { "path": path }
-                                }));
-                                continue;
-                            }
-                        }
-                        
-                        // 🚨 HARD BREAK: If we actually SAW a JSON block but couldn't parse or rescue it, we MUST error. 
-                        // Returning an empty call list at this point would let the model continue thinking it succeeded.
-                        return Err(format!("[System Guardrail] CRITICAL: Invalid JSON in code block. I saw a ```json block but was unable to parse it correctly. If you are trying to save code, use: ```json\n{{ \"tool\": \"extract_and_write\", \"arguments\": {{ \"path\": \"filename\" }} }}\n```"));
+                match self.parse_single_tool_block(block) {
+                    Ok(val) => calls.push(val),
+                    Err(e) => {
+                        // If we saw a ```json block but it's invalid, we should return the error 
+                        // so the agent knows it messed up the formatting.
+                        return Err(e);
                     }
                 }
             }
         }
-        
-        // Final fallback: If no JSON tools found but model wrote a code block AND mentioned "save"/"extract"/"write"
+
+        // 🚑 FALLBACK: If no backtick blocks found, try to find a raw JSON object in the text
         if calls.is_empty() {
-            let has_code = content.contains("```");
-            let is_json_intent = content.contains("```json"); // Special check for malformed intents
-            let wants_to_save = content.to_lowercase().contains("save") || content.to_lowercase().contains("extract") || content.to_lowercase().contains("write");
-            
-            if (has_code || is_json_intent) && wants_to_save {
-                let re_path = regex::Regex::new(r#"(?:path|to|file|as)\s*['":\s]+([^"'\s,]+)"#).unwrap();
-                if let Some(cap) = re_path.captures(content) {
-                    let path = cap.get(1).unwrap().as_str().trim_matches('.');
-                    if !path.is_empty() && path.contains('.') {
-                         // println!("{}", format!("🚑 Heuristic Recovery: Detected intent to save '{}'. Triggering extract_and_write.", path).yellow());
-                         calls.push(serde_json::json!({
-                            "tool": "extract_and_write",
-                            "arguments": { "path": path }
-                        }));
-                        return Ok(calls);
-                    }
-                }
-                
-                // If it looks like a save intent but we can't find a path, don't just finish silently.
-                if is_json_intent {
-                    return Err("[System Guardrail] I detected a ```json block but could not parse any valid tool arguments. Please specify the tool and arguments clearly.".to_string());
-                }
-            }
+             // Look for the first occurrence of { "tool": or {"tool":
+             let re_raw = regex::Regex::new(r#"(?s)\{\s*"tool"\s*:.*?\}"#).unwrap();
+             for caps in re_raw.captures_iter(content) {
+                 let block = caps.get(0).unwrap().as_str().trim();
+                 if let Ok(val) = self.parse_single_tool_block(block) {
+                     calls.push(val);
+                 }
+             }
         }
 
         // Only flag blocks as needing a tool if they look like actual code scripts (multi-line)
@@ -729,14 +670,84 @@ impl Agent {
                 if lines > 3 && !ignore_tags.contains(&lang_tag.as_str()) {
                      return Err("You provided a code block but did not call a tool. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"filename\" } }\n```".to_string());
                 }
-                
-                if lines > 5 && ["sh", "bash", "zsh"].contains(&lang_tag.as_str()) {
-                     return Err("You provided a script but did not call a tool to save it. To save it, add: ```json\n{ \"tool\": \"extract_and_write\", \"arguments\": { \"path\": \"script.sh\" } }\n```".to_string());
-                }
             }
         }
-        
+
         Ok(calls)
+    }
+
+    fn parse_single_tool_block(&self, block: &str) -> Result<Value, String> {
+        // 🚑 PRE-PARSE RESCUE
+        if block.contains("<<EOF") || block.contains("cat >") || block.contains("$(") {
+            let re_path = regex::Regex::new(r#""path"\s*:\s*"(./)?([^"]+)""#).unwrap();
+            if let Some(p_cap) = re_path.captures(block) {
+                let path = p_cap.get(2).unwrap().as_str();
+                return Ok(serde_json::json!({
+                    "tool": "extract_and_write",
+                    "arguments": { "path": path }
+                }));
+            }
+        }
+
+        match serde_json::from_str::<Value>(block) {
+            Ok(mut val) => {
+                let tool_name = val.get("tool").and_then(|v| v.as_str()).map(|s| s.to_string());
+                
+                if let Some(name) = tool_name {
+                    if val.get("arguments").is_none() {
+                        if let Some(obj) = val.as_object_mut() {
+                            let mut args_map = serde_json::Map::new();
+                            let keys: Vec<String> = obj.keys().cloned().collect();
+                            for k in keys {
+                                if k != "tool" {
+                                    if let Some(v) = obj.remove(&k) {
+                                        args_map.insert(k, v);
+                                    }
+                                }
+                            }
+                            obj.insert("arguments".to_string(), serde_json::Value::Object(args_map));
+                        }
+                    }
+                    
+                    // 🚨 SHELL INJECTION GUARDRAIL
+                    if name == "write_file" {
+                        let args = val.get("arguments");
+                        if let Some(content_val) = args.and_then(|a| a.get("content")).and_then(|c| c.as_str()) {
+                            if content_val.contains("<<EOF") || content_val.contains("cat >") || content_val.contains("$(") {
+                                let path = args.and_then(|a| a.get("path")).and_then(|p| p.as_str()).unwrap_or("file");
+                                return Ok(serde_json::json!({
+                                    "tool": "extract_and_write",
+                                    "arguments": { "path": path }
+                                }));
+                            }
+                        }
+                    }
+                    Ok(val)
+                } else {
+                    Err("Missing 'tool' key in JSON block".to_string())
+                }
+            }
+            Err(e) => {
+                // 🚑 EMERGENCY RECOVERY: Rescue from malformed JSON
+                let re_tool = regex::Regex::new(r#""tool"\s*:\s*"([^"]+)""#).unwrap();
+                let re_path = regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap();
+                
+                if let (Some(t_cap), Some(p_cap)) = (re_tool.captures(block), re_path.captures(block)) {
+                    let tool_name = t_cap.get(1).unwrap().as_str();
+                    let path = p_cap.get(1).unwrap().as_str();
+                    
+                    if !tool_name.is_empty() && !path.is_empty() {
+                        let target_tool = if tool_name == "write_file" { "extract_and_write" } else { tool_name };
+                        return Ok(serde_json::json!({
+                            "tool": target_tool,
+                            "arguments": { "path": path }
+                        }));
+                    }
+                }
+                
+                Err(format!("Invalid JSON in tool block: {}", e))
+            }
+        }
     }
 
 
@@ -797,15 +808,17 @@ impl Agent {
                     h_lock.clone()
                 };
 
-                let options = GenerationOptions::default()
+                let options = ModelOptions::default()
                     .num_ctx(self.calculate_optimal_ctx())
                     .num_predict(4096);
 
+                let tool_infos: Vec<ollama_rs::generation::tools::ToolInfo> = self.tools.iter().map(|t| t.tool_info()).collect();
                 let request = ChatMessageRequest::new(
                     self.model.clone(),
                     history_snapshot,
-                ).options(options);
+                ).options(options).tools(tool_infos);
 
+                let _ = tx.send(crate::tui::AgentEvent::Thinking(Some("Thinking".to_string()))).await;
                 let stream_res = self.ollama.send_chat_messages_stream(request).await;
                 let mut stream = match stream_res {
                     Ok(s) => s,
@@ -816,6 +829,7 @@ impl Agent {
                 };
 
                 let mut full_content = String::new();
+                let mut native_tool_calls = Vec::new();
                 while let Some(res) = stream.next().await {
                     if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
                         full_content.push_str("\n\n[USER INTERRUPTED GENERATION]");
@@ -823,7 +837,13 @@ impl Agent {
                         break;
                     }
                     if let Ok(chunk) = res {
-                        let text = chunk.message.content;
+                        let text = chunk.message.content.clone();
+                        if !chunk.message.tool_calls.is_empty() {
+                            native_tool_calls.extend(chunk.message.tool_calls.clone());
+                        }
+                        if full_content.is_empty() && !text.trim().is_empty() {
+                            let _ = tx.send(crate::tui::AgentEvent::Thinking(None)).await;
+                        }
                         full_content.push_str(&text);
                         let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
                     }
@@ -836,13 +856,55 @@ impl Agent {
                 let _ = tx.send(crate::tui::AgentEvent::Done).await;
 
                 // 🚀 TOOL EXECUTION 
-                match self.extract_tool_calls(&full_content) {
-                    Ok(tool_calls) if !tool_calls.is_empty() => {
-                        let context = self.create_tool_context(tx.clone(), tool_rx_mutex.clone());
+                let mut all_tool_calls = Vec::new();
+                for native_call in native_tool_calls {
+                    all_tool_calls.push(serde_json::json!({
+                        "tool": native_call.function.name,
+                        "arguments": native_call.function.arguments,
+                    }));
+                }
+
+                if all_tool_calls.is_empty() {
+                    match self.extract_tool_calls(&full_content) {
+                        Ok(legacy_calls) => all_tool_calls.extend(legacy_calls),
+                        Err(guardrail_msg) => {
+                            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent syntax error: {}", guardrail_msg))).await;
+                            self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("[System Guardrail] {}", guardrail_msg)));
+                            let _ = self.save_history();
+                            continue;
+                        }
+                    }
+                }
+
+                if !all_tool_calls.is_empty() {
+                    let context = self.create_tool_context(tx.clone(), tool_rx_mutex.clone());
                         
-                        for tool_req in tool_calls {
+                    for tool_req in all_tool_calls {
                             if let Some(tool_name) = tool_req.get("tool").and_then(|v| v.as_str()) {
+                                let args = tool_req.get("arguments").unwrap_or(&serde_json::Value::Null);
+
+                                // 🚀 LOOP DETECTION (TUI Port)
+                                let current_call_hash = format!("{}|{}", tool_name, serde_json::to_string(args).unwrap_or_default());
+                                {
+                                    let mut calls_lock = self.recent_tool_calls.lock().unwrap();
+                                    if calls_lock.contains(&current_call_hash) {
+                                        let guard_msg = format!(
+                                            "[System Guardrail] STOP: You just attempted to execute the exact same tool and arguments as a previous failed turn. \
+                                            \nCURRENT ACTION: '{}' with arguments '{}' is BLOCKED. \
+                                            \nINSTRUCTION: Do NOT repeat this action. Look at your history again and PIVOT to a new strategy.", 
+                                            tool_name, serde_json::to_string(args).unwrap_or_default()
+                                        );
+                                        self.history.lock().unwrap().push(ChatMessage::new(MessageRole::System, guard_msg));
+                                        let _ = self.save_history();
+                                        calls_lock.clear();
+                                        continue; 
+                                    }
+                                    calls_lock.push_back(current_call_hash);
+                                    if calls_lock.len() > 5 { calls_lock.pop_front(); }
+                                }
+
                                 if let Some(tool) = self.tools.iter().find(|t| t.name() == tool_name) {
+                                    let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_uppercase())).await;
                                     let args = tool_req.get("arguments").unwrap_or(&serde_json::Value::Null);
                                     
                                     // 🧠 PLANNING MODE GUARD
@@ -852,43 +914,41 @@ impl Agent {
                                             Present your implementation plan to the user for approval first. \
                                             Once approved, use `toggle_planning` to unlock editing.", tool_name);
                                         self.history.lock().unwrap().push(ChatMessage::new(MessageRole::System, guard_msg));
-                                        continue;
-                                    }
-
-                                    let mut allowed = true;
-                                    if tool.requires_confirmation() {
-                                        let _ = tx.send(crate::tui::AgentEvent::RequestConfirmation(tool_name.to_string(), serde_json::to_string_pretty(args).unwrap_or_else(|_| "{}".to_string()))).await;
-                                        let mut rx_lock = tool_rx_mutex.lock().await;
-                                        allowed = match rx_lock.recv().await {
-                                            Some(crate::tui::ToolResponse::Confirm(b)) => b,
-                                            _ => false,
-                                        };
-                                    }
-
-                                    if allowed {
-                                        let _ = tx.send(crate::tui::AgentEvent::ToolStart(tool_name.to_string())).await;
-                                        match tool.execute(args, context.clone()).await {
-                                            Ok(res) => {
-                                                self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, res)));
-                                            }
-                                            Err(e) => {
-                                                self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL ERROR for {}:\n{}", tool_name, e)));
-                                            }
-                                        }
-                                        let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
                                     } else {
-                                        self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("Error: User denied permission for {}.", tool_name)));
+                                        let mut allowed = true;
+                                        if tool.requires_confirmation() {
+                                            let _ = tx.send(crate::tui::AgentEvent::RequestConfirmation(tool_name.to_string(), serde_json::to_string_pretty(args).unwrap_or_else(|_| "{}".to_string()))).await;
+                                            let mut rx_lock = tool_rx_mutex.lock().await;
+                                            allowed = match rx_lock.recv().await {
+                                                Some(crate::tui::ToolResponse::Confirm(b)) => b,
+                                                _ => false,
+                                            };
+                                        }
+
+                                        if allowed {
+                                            match tool.execute(args, context.clone()).await {
+                                                Ok(res) => {
+                                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, res)));
+                                                }
+                                                Err(e) => {
+                                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL ERROR for {}:\n{}", tool_name, e)));
+                                                }
+                                            }
+                                        } else {
+                                            self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("Error: User denied permission for {}.", tool_name)));
+                                        }
                                     }
+                                    let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
                                 } else {
                                     self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("Error: No such tool '{}'", tool_name)));
                                 }
                             }
                         }
-                    }
-                    _ => break, // No more tools to call
+                } else {
+                    break; // No more tools to call
                 }
-            }
-        }
+            } // END OF if let Some(msg) = user_rx_lock.recv().await
+        } // END OF loop
         Ok(())
     }
 }

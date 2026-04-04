@@ -6,6 +6,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::process::{Command, Stdio};
 use std::io::{Read, BufReader};
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RunBackgroundArgs {
+    /// The command string to execute in the background.
+    pub command: String,
+}
 
 type ProcessLogs = Arc<Mutex<String>>;
 
@@ -22,17 +31,24 @@ impl AgentTool for RunBackgroundTool {
     fn description(&self) -> &'static str { "Spawns a long-running bash/zsh command in the background (like starting a web server). Returns a process_id immediately. Use read_process_logs to check its output." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "description": "The command string to execute in the background." }
-            },
-            "required": ["command"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<RunBackgroundArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let cmd = args.get("command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
+        let typed_args: RunBackgroundArgs = serde_json::from_value(args.clone())?;
+        let cmd = &typed_args.command;
 
         let current_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
@@ -83,24 +99,37 @@ impl AgentTool for RunBackgroundTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ReadProcessLogsArgs {
+    /// The ID returned by run_background.
+    pub process_id: String,
+}
+
 pub struct ReadProcessLogsTool;
 
 #[async_trait]
 impl AgentTool for ReadProcessLogsTool {
     fn name(&self) -> &'static str { "read_process_logs" }
     fn description(&self) -> &'static str { "Reads the stdout and stderr of a background process using its process_id." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "process_id": { "type": "string", "description": "The ID returned by run_background." }
-            },
-            "required": ["process_id"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ReadProcessLogsArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
     
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let pid = args.get("process_id").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'process_id' argument"))?;
+        let typed_args: ReadProcessLogsArgs = serde_json::from_value(args.clone())?;
+        let pid = &typed_args.process_id;
 
         let registry = process_registry().lock().unwrap();
         if let Some(logs) = registry.get(pid) {
@@ -122,6 +151,14 @@ impl AgentTool for ReadProcessLogsTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct KillProcessArgs {
+    /// Process ID to kill
+    pub pid: String,
+    /// Signal to send (default: TERM). Options: TERM, KILL, INT
+    pub signal: Option<String>,
+}
+
 pub struct KillProcessTool;
 
 #[async_trait]
@@ -130,20 +167,27 @@ impl AgentTool for KillProcessTool {
     fn description(&self) -> &'static str { "Kill a running background process by its process ID." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pid": { "type": "string", "description": "Process ID to kill" },
-                "signal": { "type": "string", "description": "Signal to send (default: TERM). Options: TERM, KILL, INT" }
-            },
-            "required": ["pid"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<KillProcessArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let pid = args.get("pid").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'pid'"))?;
-        let signal = args.get("signal").and_then(|s| s.as_str()).unwrap_or("TERM");
+        let typed_args: KillProcessArgs = serde_json::from_value(args.clone())?;
+        let pid = &typed_args.pid;
+        let signal_owned = typed_args.signal.unwrap_or_else(|| "TERM".to_string());
+        let signal = signal_owned.as_str();
 
         let output = std::process::Command::new("kill")
             .args([&format!("-{}", signal), pid])
@@ -159,6 +203,14 @@ impl AgentTool for KillProcessTool {
         }
     }
 }
+#[derive(Deserialize, JsonSchema)]
+pub struct WatchDirectoryArgs {
+    /// The directory path to recursively watch.
+    pub path: String,
+    /// The bash command to run whenever a file changes.
+    pub trigger_command: String,
+}
+
 pub struct WatchDirectoryTool;
 
 #[async_trait]
@@ -166,23 +218,28 @@ impl AgentTool for WatchDirectoryTool {
     fn name(&self) -> &'static str { "watch_directory" }
     fn description(&self) -> &'static str { "Starts a persistent background daemon that watches a directory for file modifications. When you make changes to files, it will instantly run the 'trigger_command' provided." }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "The directory path to recursively watch." },
-                "trigger_command": { "type": "string", "description": "The bash command to run whenever a file changes." }
-            },
-            "required": ["path", "trigger_command"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<WatchDirectoryArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         use notify::Watcher;
         
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path = shellexpand::tilde(path_str).to_string();
-        let cmd = args.get("trigger_command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'trigger_command'"))?.to_string();
+        let typed_args: WatchDirectoryArgs = serde_json::from_value(args.clone())?;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
+        let cmd = typed_args.trigger_command;
 
         let success_msg = format!("Successfully spawned File-Watching Daemon on directory: '{}'. It will automatically execute '{}' upon any file modifications.", path, cmd);
 

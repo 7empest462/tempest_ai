@@ -5,6 +5,19 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RunCommandArgs {
+    /// The command string to execute.
+    pub command: String,
+    /// Working directory (default '.')
+    pub cwd: Option<String>,
+    /// Timeout in seconds (default 30)
+    pub timeout_seconds: Option<u64>,
+}
 
 pub struct RunCommandTool;
 
@@ -14,27 +27,32 @@ impl AgentTool for RunCommandTool {
     fn description(&self) -> &'static str { "Executes a shell command. Features safety timeout and output capture." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "description": "The command string to execute." },
-                "cwd": { "type": "string", "description": "Working directory (default '.')" },
-                "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default 30)" }
-            },
-            "required": ["command"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<RunCommandArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let cmd_str = args.get("command").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'command'"))?;
-        let cwd = args.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
-        let timeout_secs = args.get("timeout_seconds").and_then(|t| t.as_u64()).unwrap_or(30);
+        let typed_args: RunCommandArgs = serde_json::from_value(args.clone())?;
+        let cmd_str = typed_args.command;
+        let cwd = typed_args.cwd.unwrap_or_else(|| ".".to_string());
+        let timeout_secs = typed_args.timeout_seconds.unwrap_or(30);
 
         let child = Command::new("sh")
             .arg("-c")
             .arg(cmd_str)
-            .current_dir(shellexpand::tilde(cwd).to_string())
+            .current_dir(shellexpand::tilde(&cwd).to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -69,23 +87,37 @@ impl AgentTool for RunCommandTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct RunTestsArgs {
+    /// Optional filter for specific tests.
+    pub filter: Option<String>,
+}
+
 pub struct RunTestsTool;
 
 #[async_trait]
 impl AgentTool for RunTestsTool {
     fn name(&self) -> &'static str { "run_tests" }
     fn description(&self) -> &'static str { "Runs project tests. Detects language and runs appropriate test command (e.g., cargo test, npm test)." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "filter": { "type": "string", "description": "Optional filter for specific tests." }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<RunTestsArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
             }
-        })
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let filter = args.get("filter").and_then(|f| f.as_str()).unwrap_or("");
+        let typed_args: RunTestsArgs = serde_json::from_value(args.clone())?;
+        let filter = typed_args.filter.unwrap_or_else(String::new);
         
         let cmd = if std::path::Path::new("Cargo.toml").exists() {
             format!("cargo test {} -- --nocapture", filter)
@@ -102,15 +134,33 @@ impl AgentTool for RunTestsTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct BuildProjectArgs {}
+
 pub struct BuildProjectTool;
 
 #[async_trait]
 impl AgentTool for BuildProjectTool {
     fn name(&self) -> &'static str { "build_project" }
     fn description(&self) -> &'static str { "Builds the current project using the detected build system." }
-    fn parameters(&self) -> Value { json!({}) }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<BuildProjectArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
 
     async fn execute(&self, _args: &Value, context: ToolContext) -> Result<String> {
+        let _typed_args: BuildProjectArgs = serde_json::from_value(_args.clone()).unwrap_or(BuildProjectArgs {});
         let cmd = if std::path::Path::new("Cargo.toml").exists() {
             "cargo build"
         } else if std::path::Path::new("package.json").exists() {

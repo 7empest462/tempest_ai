@@ -3,6 +3,17 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Command;
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ClipboardArgs {
+    /// 'read' to get clipboard contents, 'write' to set them
+    pub action: String,
+    /// Text to copy to clipboard (required for 'write')
+    pub content: Option<String>,
+}
 
 pub struct ClipboardTool;
 
@@ -10,23 +21,29 @@ pub struct ClipboardTool;
 impl AgentTool for ClipboardTool {
     fn name(&self) -> &'static str { "clipboard" }
     fn description(&self) -> &'static str { "Read from or write to the system clipboard. Use 'read' to get clipboard contents, or 'write' to copy text to the clipboard so the user can paste it." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "description": "'read' to get clipboard contents, 'write' to set them" },
-                "content": { "type": "string", "description": "Text to copy to clipboard (required for 'write')" }
-            },
-            "required": ["action"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ClipboardArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("read");
+        let typed_args: ClipboardArgs = serde_json::from_value(args.clone())?;
+        let action = typed_args.action;
 
-        match action {
+        match action.as_str() {
             "write" => {
-                let content = args.get("content").and_then(|c| c.as_str())
+                let content = typed_args.content
                     .ok_or_else(|| anyhow::anyhow!("Missing 'content' for clipboard write"))?;
                 let mut clipboard = arboard::Clipboard::new()
                     .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {}", e))?;
@@ -41,9 +58,17 @@ impl AgentTool for ClipboardTool {
                     .map_err(|e| anyhow::anyhow!("Failed to read clipboard: {}", e))?;
                 Ok(format!("Clipboard contents:\n{}", text))
             },
-            _ => anyhow::bail!("Unknown clipboard action '{}'. Use 'read' or 'write'.", action),
+            _ => anyhow::bail!("Unknown clipboard action. Use 'read' or 'write'."),
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NotifyArgs {
+    /// Notification title
+    pub title: String,
+    /// Notification message body
+    pub message: String,
 }
 
 pub struct NotifyTool;
@@ -52,20 +77,26 @@ pub struct NotifyTool;
 impl AgentTool for NotifyTool {
     fn name(&self) -> &'static str { "notify" }
     fn description(&self) -> &'static str { "Sends a native macOS/Linux desktop notification. Use this to alert the user when a long-running task completes." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "title": { "type": "string", "description": "Notification title" },
-                "message": { "type": "string", "description": "Notification message body" }
-            },
-            "required": ["title", "message"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<NotifyArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let title = args.get("title").and_then(|t| t.as_str()).unwrap_or("Tempest AI");
-        let message = args.get("message").and_then(|m| m.as_str()).unwrap_or("Task complete.");
+        let typed_args: NotifyArgs = serde_json::from_value(args.clone())?;
+        let title = typed_args.title;
+        let message = typed_args.message;
 
         #[cfg(target_os = "macos")]
         {
@@ -109,31 +140,45 @@ impl AgentTool for NotifyTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct EnvVarArgs {
+    /// 'get' or 'list'
+    pub action: String,
+    /// Variable name (required for get)
+    pub name: Option<String>,
+}
+
 pub struct EnvVarTool;
 
 #[async_trait]
 impl AgentTool for EnvVarTool {
     fn name(&self) -> &'static str { "env_var" }
     fn description(&self) -> &'static str { "Read environment variables. Use 'get' to read a specific variable or 'list' to show all exported variables." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "description": "'get' or 'list'" },
-                "name": { "type": "string", "description": "Variable name (required for get)" }
-            },
-            "required": ["action"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<EnvVarArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("get");
+        let typed_args: EnvVarArgs = serde_json::from_value(args.clone())?;
+        let action = typed_args.action;
 
-        match action {
+        match action.as_str() {
             "get" => {
-                let name = args.get("name").and_then(|n| n.as_str())
+                let name = typed_args.name
                     .ok_or_else(|| anyhow::anyhow!("Missing 'name' for env get"))?;
-                match std::env::var(name) {
+                match std::env::var(&name) {
                     Ok(val) => Ok(format!("{}={}", name, val)),
                     Err(_) => Ok(format!("Variable '{}' is not set.", name)),
                 }
@@ -148,9 +193,17 @@ impl AgentTool for EnvVarTool {
                     .collect();
                 Ok(format!("Environment variables (first 50):\n{}", vars.join("\n")))
             },
-            _ => anyhow::bail!("Unknown env_var action '{}'. Use 'get' or 'list'.", action),
+            _ => anyhow::bail!("Unknown env_var action. Use 'get' or 'list'."),
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ChmodArgs {
+    /// Path to file or directory
+    pub path: String,
+    /// Permission mode (e.g., '755', '644', '+x', 'u+rwx')
+    pub mode: String,
 }
 
 pub struct ChmodTool;
@@ -161,24 +214,30 @@ impl AgentTool for ChmodTool {
     fn description(&self) -> &'static str { "Change file or directory permissions using standard Unix mode strings (e.g., '755', '644', '+x')." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to file or directory" },
-                "mode": { "type": "string", "description": "Permission mode (e.g., '755', '644', '+x', 'u+rwx')" }
-            },
-            "required": ["path", "mode"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ChmodArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path = shellexpand::tilde(path_str).to_string();
-        let mode = args.get("mode").and_then(|m| m.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'mode'"))?;
+        let typed_args: ChmodArgs = serde_json::from_value(args.clone())?;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
+        let mode = typed_args.mode;
 
         let output = Command::new("chmod")
-            .args([mode, &path])
+            .arg(&mode)
+            .arg(&path)
             .output()?;
         
         if output.status.success() {

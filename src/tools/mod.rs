@@ -21,12 +21,37 @@ pub struct ToolContext {
     pub brain_path: std::path::PathBuf,
 }
 
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use schemars::Schema;
+
 /// A trait representing an autonomous tool the agent can use in its plugin-like system.
 #[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    fn parameters(&self) -> Value;
+    
+    /// LEGACY: Used by tools that have not yet migrated to typed schemas.
+    fn parameters(&self) -> Value {
+        serde_json::json!({})
+    }
+
+    /// NEW: Provides the exact native ToolInfo expected by ollama-rs 0.3.4 Native Tool Calling.
+    /// Default implementation automatically converts old JSON literal schemas into native types.
+    fn tool_info(&self) -> ToolInfo {
+        let param_value = self.parameters();
+        let parameters = serde_json::from_value::<Schema>(param_value)
+            .unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters,
+            }
+        }
+    }
+
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String>;
     
     fn requires_confirmation(&self) -> bool { false }
@@ -48,3 +73,4 @@ pub mod knowledge;
 pub mod database;
 pub mod network;
 pub mod atlas;
+pub mod telemetry;

@@ -2,6 +2,42 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use std::collections::HashMap;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchWebArgs {
+    /// The search query.
+    pub query: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReadUrlArgs {
+    /// The URL to fetch.
+    pub url: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct HttpRequestArgs {
+    /// HTTP method: GET, POST, PUT, DELETE, PATCH
+    pub method: String,
+    /// The full URL to send the request to
+    pub url: String,
+    /// Optional key-value pairs for HTTP headers (e.g., {"Authorization": "Bearer TOKEN"})
+    pub headers: Option<HashMap<String, String>>,
+    /// Optional request body (typically JSON string for POST/PUT)
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DownloadFileArgs {
+    /// URL to download from
+    pub url: String,
+    /// Local path to save the downloaded file
+    pub path: String,
+}
 
 pub struct SearchWebTool;
 
@@ -15,21 +51,25 @@ impl AgentTool for SearchWebTool {
         "Searches the web using DuckDuckGo. Returns top organic results, including titles, snippets, and URLs."
     }
 
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query."
-                }
-            },
-            "required": ["query"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<SearchWebArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+        let typed_args: SearchWebArgs = serde_json::from_value(args.clone())?;
+        let query = typed_args.query;
         
         let url = "https://lite.duckduckgo.com/lite/";
         let client = reqwest::Client::builder()
@@ -102,21 +142,25 @@ impl AgentTool for ReadUrlTool {
         "Fetches a URL and converts the page HTML to readable markdown text. Use this to read documentation or articles from search results."
     }
 
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The URL to fetch."
-                }
-            },
-            "required": ["url"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ReadUrlArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
     
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+        let typed_args: ReadUrlArgs = serde_json::from_value(args.clone())?;
+        let url = typed_args.url;
         
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -146,47 +190,50 @@ pub struct HttpRequestTool;
 impl AgentTool for HttpRequestTool {
     fn name(&self) -> &'static str { "http_request" }
     fn description(&self) -> &'static str { "Makes an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) with optional headers and body. Use this to interact with REST APIs, webhooks, or any HTTP endpoint. Returns status code, headers, and response body." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "method": { "type": "string", "description": "HTTP method: GET, POST, PUT, DELETE, PATCH" },
-                "url": { "type": "string", "description": "The full URL to send the request to" },
-                "headers": { "type": "object", "description": "Optional key-value pairs for HTTP headers (e.g., {\"Authorization\": \"Bearer TOKEN\"})" },
-                "body": { "type": "string", "description": "Optional request body (typically JSON string for POST/PUT)" }
-            },
-            "required": ["method", "url"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<HttpRequestArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let method = args.get("method").and_then(|m| m.as_str()).unwrap_or("GET").to_uppercase();
-        let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url' argument"))?;
+        let typed_args: HttpRequestArgs = serde_json::from_value(args.clone())?;
+        
+        let method = typed_args.method.to_uppercase();
+        let url = typed_args.url;
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
             .build()?;
 
         let mut request = match method.as_str() {
-            "POST" => client.post(url),
-            "PUT" => client.put(url),
-            "DELETE" => client.delete(url),
-            "PATCH" => client.patch(url),
-            _ => client.get(url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
+            "PATCH" => client.patch(&url),
+            _ => client.get(&url),
         };
 
         // Add custom headers
-        if let Some(headers) = args.get("headers").and_then(|h| h.as_object()) {
+        if let Some(headers) = typed_args.headers {
             for (key, val) in headers {
-                if let Some(v) = val.as_str() {
-                    request = request.header(key.as_str(), v);
-                }
+                request = request.header(key.as_str(), val);
             }
         }
 
         // Add body if provided
-        if let Some(body) = args.get("body").and_then(|b| b.as_str()) {
-            request = request.header("Content-Type", "application/json").body(body.to_string());
+        if let Some(body) = typed_args.body {
+            request = request.header("Content-Type", "application/json").body(body);
         }
 
         let response = request.send().await?;
@@ -217,26 +264,31 @@ impl AgentTool for DownloadFileTool {
     fn description(&self) -> &'static str { "Download a file from a URL and save it to a local path. Useful for fetching remote resources, images, scripts, or data files." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "URL to download from" },
-                "path": { "type": "string", "description": "Local path to save the downloaded file" }
-            },
-            "required": ["url", "path"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<DownloadFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let url = args.get("url").and_then(|u| u.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'url'"))?;
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path = shellexpand::tilde(path_str).to_string();
+        let typed_args: DownloadFileArgs = serde_json::from_value(args.clone())?;
+        let url = typed_args.url;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
             .build()?;
-        let response = client.get(url).send().await?;
+        let response = client.get(&url).send().await?;
         let status = response.status();
         
         if !status.is_success() {

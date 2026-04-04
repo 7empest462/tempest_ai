@@ -1,9 +1,20 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use anyhow::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use std::fs;
 use similar::{TextDiff, ChangeTag};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EditFileWithDiffArgs {
+    /// Path to the file to edit.
+    pub path: String,
+    /// The FULL new content of the file.
+    pub new_content: String,
+}
 
 pub struct EditFileWithDiffTool;
 
@@ -13,21 +24,26 @@ impl AgentTool for EditFileWithDiffTool {
     fn description(&self) -> &'static str { "Safely edits a file by applying a new version and showing a diff preview. Best for targeted code changes." }
     fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to the file to edit." },
-                "new_content": { "type": "string", "description": "The FULL new content of the file." }
-            },
-            "required": ["path", "new_content"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<EditFileWithDiffArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing path"))?;
-        let new_content = args.get("new_content").and_then(|c| c.as_str()).ok_or_else(|| anyhow::anyhow!("Missing content"))?;
-        let path = shellexpand::tilde(path_str).to_string();
+        let typed_args: EditFileWithDiffArgs = serde_json::from_value(args.clone())?;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
+        let new_content = &typed_args.new_content;
 
         let old_content = fs::read_to_string(&path).unwrap_or_default();
         

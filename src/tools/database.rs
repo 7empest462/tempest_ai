@@ -2,6 +2,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SqliteQueryArgs {
+    /// Absolute path (or ~/) to the .sqlite or .db file.
+    pub db_path: String,
+    /// The exact SQL query to execute (e.g., 'SELECT * FROM users LIMIT 5;').
+    pub query: String,
+}
 
 pub struct SqliteQueryTool;
 
@@ -10,28 +21,32 @@ impl AgentTool for SqliteQueryTool {
     fn name(&self) -> &'static str { "sqlite_query" }
     fn description(&self) -> &'static str { "Executes a raw SQL query against a specified SQLite database file. Returns a JSON string of the resulting rows." }
 
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "db_path": { "type": "string", "description": "Absolute path (or ~/) to the .sqlite or .db file." },
-                "query": { "type": "string", "description": "The exact SQL query to execute (e.g., 'SELECT * FROM users LIMIT 5;')." }
-            },
-            "required": ["db_path", "query"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<SqliteQueryArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let db_path_str = args.get("db_path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'db_path' argument"))?;
-        let db_path = shellexpand::tilde(db_path_str).to_string();
-        
-        let query = args.get("query").and_then(|q| q.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'query' argument"))?;
+        let typed_args: SqliteQueryArgs = serde_json::from_value(args.clone())?;
+        let db_path = shellexpand::tilde(&typed_args.db_path).to_string();
+        let query = typed_args.query;
 
         let conn = rusqlite::Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let mut stmt = conn.prepare(query)?;
+        let mut stmt = conn.prepare(&query)?;
         
         let column_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
 

@@ -3,6 +3,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use crate::tools::execution::RunCommandTool;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SemanticSearchArgs {
+    /// The search query in natural language.
+    pub query: String,
+    /// Number of results (default 5)
+    pub top_k: Option<usize>,
+}
 
 pub struct SemanticSearchTool;
 
@@ -10,20 +21,26 @@ pub struct SemanticSearchTool;
 impl AgentTool for SemanticSearchTool {
     fn name(&self) -> &'static str { "semantic_search" }
     fn description(&self) -> &'static str { "Searches the project's conceptual index. Best for finding 'how' things are done or locating logic by meaning rather than exact keywords." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "The search query in natural language." },
-                "top_k": { "type": "integer", "description": "Number of results (default 5)" }
-            },
-            "required": ["query"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<SemanticSearchArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap().to_string();
-        let top_k = args.get("top_k").and_then(|k| k.as_u64()).unwrap_or(5) as usize;
+        let typed_args: SemanticSearchArgs = serde_json::from_value(args.clone())?;
+        let query = typed_args.query;
+        let top_k = typed_args.top_k.unwrap_or(5);
 
         let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
             "nomic-embed-text".to_string(),
@@ -48,26 +65,40 @@ impl AgentTool for SemanticSearchTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct GrepSearchArgs {
+    /// Keywords or pattern to search for.
+    pub query: String,
+    /// Optional directory to restrict search (default '.').
+    pub path: Option<String>,
+}
+
 pub struct GrepSearchTool;
 
 #[async_trait]
 impl AgentTool for GrepSearchTool {
     fn name(&self) -> &'static str { "grep_search" }
     fn description(&self) -> &'static str { "Performs a fast keyword search across the project. Use this for finding exact variable names, function calls, or error strings." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "Keywords or pattern to search for." },
-                "path": { "type": "string", "description": "Optional directory to restrict search (default '.')." }
-            },
-            "required": ["query"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<GrepSearchArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap();
-        let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        let typed_args: GrepSearchArgs = serde_json::from_value(args.clone())?;
+        let query = typed_args.query;
+        let path = typed_args.path.unwrap_or_else(|| ".".to_string());
         
         let cmd = format!("rg --version >/dev/null 2>&1 && rg -n --no-heading --max-columns=200 \"{}\" {} || grep -rn \"{}\" {}", 
             query, path, query, path);
@@ -76,6 +107,12 @@ impl AgentTool for GrepSearchTool {
         RunCommandTool.execute(&exec_args, context).await
     }
 }
+#[derive(Deserialize, JsonSchema)]
+pub struct IndexFileSemanticallyArgs {
+    /// The path to the file to index.
+    pub path: String,
+}
+
 pub struct IndexFileSemanticallyTool;
 
 #[async_trait]
@@ -83,19 +120,25 @@ impl AgentTool for IndexFileSemanticallyTool {
     fn name(&self) -> &'static str { "index_file_semantically" }
     fn description(&self) -> &'static str { "Manually parses and indexes a local file into your conceptual search index. Use this to 'train' yourself on new codebase logic." }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "The path to the file to index." }
-            },
-            "required": ["path"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<IndexFileSemanticallyArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path = shellexpand::tilde(path_str).to_string();
+        let typed_args: IndexFileSemanticallyArgs = serde_json::from_value(args.clone())?;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
 
         let content = std::fs::read_to_string(&path)?;
         

@@ -1,8 +1,17 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use anyhow::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use ollama_rs::generation::chat::{request::ChatMessageRequest, ChatMessage, MessageRole};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AskUserArgs {
+    /// The question to ask the user.
+    pub question: String,
+}
 
 pub struct AskUserTool;
 
@@ -10,18 +19,25 @@ pub struct AskUserTool;
 impl AgentTool for AskUserTool {
     fn name(&self) -> &'static str { "ask_user" }
     fn description(&self) -> &'static str { "Stops execution to ask the user a question. Use this for clarifying ambiguous tasks." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "question": { "type": "string", "description": "The question to ask the user." }
-            },
-            "required": ["question"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<AskUserArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let question = args.get("question").and_then(|q| q.as_str()).unwrap_or("(No question)");
+        let typed_args: AskUserArgs = serde_json::from_value(args.clone())?;
+        let question = typed_args.question;
         
         let _ = context.tx.send(crate::tui::AgentEvent::RequestInput(self.name().to_string(), question.to_string())).await;
         
@@ -33,26 +49,40 @@ impl AgentTool for AskUserTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct SpawnSubAgentArgs {
+    /// The specific mission for the sub-agent.
+    pub task: String,
+    /// Optional model name to override.
+    pub model: Option<String>,
+}
+
 pub struct SpawnSubAgentTool;
 
 #[async_trait]
 impl AgentTool for SpawnSubAgentTool {
     fn name(&self) -> &'static str { "spawn_sub_agent" }
     fn description(&self) -> &'static str { "Spawns a specialized sub-agent for a localized task. Best for research or isolated debugging." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "task": { "type": "string", "description": "The specific mission for the sub-agent." },
-                "model": { "type": "string", "description": "Optional model name to override." }
-            },
-            "required": ["task"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<SpawnSubAgentArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let task = args.get("task").and_then(|t| t.as_str()).unwrap();
-        let model = args.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()).unwrap_or_else(|| context.sub_agent_model.clone());
+        let typed_args: SpawnSubAgentArgs = serde_json::from_value(args.clone())?;
+        let task = typed_args.task;
+        let model = typed_args.model.unwrap_or_else(|| context.sub_agent_model.clone());
         
         let sub_history = vec![
             ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the task and provide a CONCISE summary.".to_string()),
@@ -67,20 +97,44 @@ impl AgentTool for SpawnSubAgentTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct TogglePlanningArgs {}
+
 pub struct TogglePlanningTool;
 
 #[async_trait]
 impl AgentTool for TogglePlanningTool {
     fn name(&self) -> &'static str { "toggle_planning" }
-    fn description(&self) -> &'static str { "Toggles between PLANNING and EXECUTION mode. Use PLANNING for high-level architectural proposals." }
-    fn parameters(&self) -> Value { json!({}) }
+    fn description(&self) -> &'static str { "The Master Switch. Toggles between PLANNING and EXECUTION mode. You MUST call this to enter EXECUTION mode before any state-modifying tools (write_file, run_command, etc.) will work." }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<TogglePlanningArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
 
     async fn execute(&self, _args: &Value, context: ToolContext) -> Result<String> {
+        let _typed_args: TogglePlanningArgs = serde_json::from_value(_args.clone()).unwrap_or(TogglePlanningArgs {});
         let mut planning_lock = context.planning_mode.lock().unwrap();
         *planning_lock = !*planning_lock;
         let mode = if *planning_lock { "PLANNING" } else { "EXECUTION" };
         Ok(format!("Agent is now in {} mode.", mode))
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateTaskContextArgs {
+    /// The updated status or plan.
+    pub context: String,
 }
 
 pub struct UpdateTaskContextTool;
@@ -89,23 +143,36 @@ pub struct UpdateTaskContextTool;
 impl AgentTool for UpdateTaskContextTool {
     fn name(&self) -> &'static str { "update_task_context" }
     fn description(&self) -> &'static str { "Updates the agent's internal reflective memory (sketchpad) to track progress across multiple turns." }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "context": { "type": "string", "description": "The updated status or plan." }
-            },
-            "required": ["context"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<UpdateTaskContextArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let new_ctx = args.get("context").and_then(|c| c.as_str()).unwrap_or("");
+        let typed_args: UpdateTaskContextArgs = serde_json::from_value(args.clone())?;
+        let new_ctx = typed_args.context;
         let mut ctx_lock = context.task_context.lock().unwrap();
         *ctx_lock = new_ctx.to_string();
         Ok("Task context successfully updated.".to_string())
     }
 }
+#[derive(Deserialize, JsonSchema)]
+pub struct ExtractAndWriteArgs {
+    /// The path to the file to create or overwrite.
+    pub path: String,
+}
+
 pub struct ExtractAndWriteTool;
 
 #[async_trait]
@@ -114,19 +181,25 @@ impl AgentTool for ExtractAndWriteTool {
     fn description(&self) -> &'static str { "Extracts the latest markdown code block from your thought process and writes it to a file. MUST wrap your code in triple backticks BEFORE calling this tool." }
     fn is_modifying(&self) -> bool { true }
 
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "The path to the file to create or overwrite." }
-            },
-            "required": ["path"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ExtractAndWriteArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let path_owned = shellexpand::tilde(path_str).to_string();
+        let typed_args: ExtractAndWriteArgs = serde_json::from_value(args.clone())?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
 
         let history = context.history.lock().unwrap();
         let last_assistant_msg = history.iter().rev()

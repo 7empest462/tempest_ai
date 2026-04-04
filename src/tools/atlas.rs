@@ -3,6 +3,17 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::fs;
 use super::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TreeArgs {
+    /// Root directory to display tree for
+    pub path: String,
+    /// Maximum depth to recurse (default: 4)
+    pub max_depth: Option<u64>,
+}
 
 pub struct TreeTool;
 
@@ -10,21 +21,26 @@ pub struct TreeTool;
 impl AgentTool for TreeTool {
     fn name(&self) -> &'static str { "tree" }
     fn description(&self) -> &'static str { "Shows a recursive directory tree view. Excludes hidden directories and common noise (node_modules, target, .git) by default." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Root directory to display tree for" },
-                "max_depth": { "type": "integer", "description": "Maximum depth to recurse (default: 4)" }
-            },
-            "required": ["path"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<TreeArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-        let path_owned = shellexpand::tilde(path_str).to_string();
-        let max_depth = args.get("max_depth").and_then(|d| d.as_u64()).unwrap_or(4) as usize;
+        let typed_args: TreeArgs = serde_json::from_value(args.clone())?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
+        let max_depth = typed_args.max_depth.unwrap_or(4) as usize;
 
         let skip_dirs = ["node_modules", "target", ".git", "__pycache__", ".next", "dist", "build", ".DS_Store"];
         let mut output = String::new();
@@ -88,27 +104,40 @@ impl AgentTool for TreeTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectAtlasArgs {
+    /// 'map' to generate, 'read' to view existing atlas
+    pub action: String,
+}
+
 pub struct ProjectAtlasTool;
 
 #[async_trait]
 impl AgentTool for ProjectAtlasTool {
     fn name(&self) -> &'static str { "project_atlas" }
     fn description(&self) -> &'static str { "Generates or updates a '.tempest_atlas.md' file in the project root to maintain spatial project awareness." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "description": "'map' to generate, 'read' to view existing atlas" }
-            },
-            "required": ["action"]
-        })
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ProjectAtlasArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("map");
+        let typed_args: ProjectAtlasArgs = serde_json::from_value(args.clone())?;
+        let action = typed_args.action;
         let atlas_path = ".tempest_atlas.md";
 
-        match action {
+        match action.as_str() {
             "read" => {
                 if let Ok(content) = fs::read_to_string(atlas_path) {
                     Ok(format!("📍 CURRENT PROJECT ATLAS:\n\n{}", content))

@@ -160,16 +160,17 @@ You have direct access to tools. YOU MUST USE TOOLS TO COMPLETE TASKS.
 - CWD: {cwd}
 
 [CORE PROTOCOLS]
-1. 📍 PROJECT ATLAS FIRST:
-   - At the start of every new mission or when you feel lost, use `project_atlas` with action="read" to orient yourself.
-   - If you create or move files, use `project_atlas` with action="map" to update your spatial memory.
-   - Never assume a file exists based on your training data; always check the Atlas or use `ls`/`tree`.
+1. 📍 SPATIAL ORIENTATION:
+   - If you do not yet understand the project's layout or "where you are", use `project_atlas` with action="read" to orient yourself.
+   - Once you have the directory structure, proceed directly to OBSERVATION and PLANNING.
+   - DO NOT repeat the Atlas command if you already have the data in your recent conversation history.
 
 2. 🧠 OBSERVE -> PLAN -> VERIFY -> EXECUTE:
    - Always start in PLANNING mode (`planning_mode: true`).
    - Use research tools (`read_file`, `grep_search`, `tree`, `project_atlas`) to understand the codebase.
    - Formulate a detailed plan and present it to the user.
-   - ONLY after the user approves and you have verified the environment, use `toggle_planning` to enter EXECUTION mode.
+   - 💡 MANDATORY: Once the user approves, you MUST physically call the `toggle_planning` tool (JSON block) to enter EXECUTION mode. 
+   - You cannot call any state-modifying tools until you have successfully executed `toggle_planning`.
 
 3. ✅ VERIFY-BEFORE-REPORTING:
    - A task is NOT done just because you called a command.
@@ -183,13 +184,14 @@ You have direct access to tools. YOU MUST USE TOOLS TO COMPLETE TASKS.
 
 CRITICAL: You are running on a 16GB RAM machine. Use telemetry to avoid OOM.
 
-TOOLS (call via JSON):
+TOOLS AVAILABLE TO YOU:
 {{tool_descriptions}}
 
-FORMAT: Output a JSON block to call a tool:
+FORMAT: You must call tools by outputting a JSON block EXACTLY like this:
 ```json
-{{ "tool": "tool_name", "arguments": {{}} }}
+{{ "tool": "tool_name", "arguments": {{ "key": "value" }} }}
 ```
+DO NOT write bash scripts to invoke tools. Use the JSON block.
 "#, 
     os = std::env::consts::OS, 
     arch = std::env::consts::ARCH,
