@@ -8,7 +8,7 @@ Tempest AI is a high-performance, Rust-based autonomous agent designed to be you
 ## 🚀 "Native-Engine" Capabilities
 
 ### ⚡ 1. Native Tool-Calling Architecture
-Tempest has been migrated to the **`ollama-rs` 0.3.4** typed tool-calling framework. 
+Tempest is powered by the **`ollama-rs` 0.3.4** typed tool-calling framework. 
 - **Strongly Typed**: Every tool is defined using `schemars` JSON schemas, eliminating brittle regex-based Markdown parsing.
 - **Improved Autonomy**: The LLM receives exact structural requirements for every function, leading to a 90% reduction in malformed tool calls.
 - **Multi-Turn Chaining**: Supports multiple sequential tool executions in a single reasoning step.
@@ -23,12 +23,71 @@ Tempest is the first local agent that is truly "Sentient" of its host. It inject
 - **Load-Adaptive**: The agent can autonomously slow down or pivot tasks if it detects system memory is critically low or thermals are spiking.
 - **Cross-Platform**: Full telemetry support for macOS (Apple Silicon) and Linux (sysfs/hwmon).
 
-### 🛡️ 4. Disciplined Guardrails (The Master Switch)
+---
+
+## 🛠️ The Tempest Toolbox (50+ Native Tools)
+
+Tempest comes equipped with a vast array of specialized sensors and actuators, organized into functional suites:
+
+### 📂 File & Workflow Suite
+- **Navigation**: `project_atlas`, `tree`, `list_dir`, `search_files`.
+- **Manipulation**: `read_file`, `write_file`, `patch_file`, `append_file`, `find_replace`.
+- **Logic**: `diff_files`, `edit_file_with_diff`.
+
+### 💻 Development Suite
+- **Build & Test**: `build_project`, `run_tests`, `run_command`.
+- **Version Control**: `git_status`, `git_diff`, `git_commit`, `git_action`.
+- **Process Control**: `run_background`, `read_process_logs`, `kill_process`, `watch_directory`.
+
+### 🧠 Knowledge & RAG Suite
+- **Semantic RAG**: `index_file_semantically`, `semantic_search`.
+- **Memory**: `store_memory`, `recall_memory` (with tagging).
+- **Knowledge Base**: `distill_knowledge`, `recall_brain`.
+
+### 🛰️ System & Telemetry Suite
+- **Hardware**: `system_info`, `gpu_diagnostics`, `system_telemetry`.
+- **Deep Linux**: `kernel_diagnostic`, `systemd_manager`, `linux_process_analyzer`.
+- **Intelligence**: `advanced_system_oracle`, `telemetry_chart`.
+
+### 🌐 Network & Web Suite
+- **Connectivity**: `network_check`, `network_sniffer`.
+- **Web**: `search_web`, `read_url`, `http_request`, `download_file`.
+
+### ⚙️ Agent Ops & Utilities
+- **Meta**: `spawn_sub_agent`, `toggle_planning`, `update_task_context`, `ask_user`.
+- **Utils**: `clipboard`, `notify`, `env_var`, `chmod`.
+
+---
+
+## 🎓 The Skills Engine
+
+Tempest features a unique **Skills System** that allows it to learn and execute complex procedures without manual prompting each time.
+
+### How it Works:
+Skills are stored as Markdown files in `~/.tempest/skills/`. Each skill includes a YAML frontmatter and a set of instructions.
+
+**Example `deploy_service.md`**:
+```markdown
+---
+name: DeployService
+description: Procedure for deploying a Dockerized microservice.
+---
+1. Check if the container is already running using `run_command`.
+2. Pull the latest image.
+3. Use `run_background` to start the service.
+4. Verify logs using `read_process_logs`.
+```
+
+### Usage:
+- **`list_skills`**: Tempest can see all the procedures you've taught it.
+- **`skill_recall`**: Tempest retrieves the specific instructions for a skill and integrates them into its current reasoning chain.
+
+---
+
+## 🛡️ Disciplined Guardrails
+
 - **Planning Mode**: Tempest starts every session in a locked state. It can research and plan, but MUST physically call the **`toggle_planning`** tool to unlock system-modifying actions.
 - **Loop Interception**: A "Sentinel" layer detects duplicate tool sequences and "hallucinated loops," forcing the agent to self-correct before wasting tokens.
-
-### 🕵️ 5. Sub-Agent Delegation
-For complex research or parallel debugging, Tempest can spawn specialized **Sub-Agents**. These assistants focus on localized tasks and return a distilled report to the Principal Agent.
 
 ---
 
@@ -38,21 +97,7 @@ For complex research or parallel debugging, Tempest can spawn specialized **Sub-
 git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo build --release && sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
 ```
 
----
-
-## 🛠️ Setup & Configuration
-
-### 💎 Prerequisites
-1. **Ollama**: [Download Ollama](https://ollama.com)
-2. **Models**:
-   ```bash
-   ollama pull qwen2.5-coder:7b      # Principal Model (Recommended for Python/Rust)
-   ollama pull mistral:7b           # Alternative: Great for general reasoning
-   ollama pull nomic-embed-text      # REQUIRED: For the Vector Brain (Semantic RAG)
-   ollama pull phi3:latest           # Recommended: For Sub-Agent tasks
-   ```
-
-### ⚙️ Configuration
+## ⚙️ Configuration
 Tempest looks for its config at `~/.config/tempest_ai/config.toml`.
 ```toml
 model = "qwen2.5-coder:7b"
@@ -60,16 +105,6 @@ sub_agent_model = "phi3:latest"
 history_path = "~/.tempest_history"
 encrypt_history = true
 ```
-
----
-
-## 💻 Usage Lifecycle
-
-1. **RESEARCH**: Tempest orientates using `project_atlas` and `tree` in Planning Mode.
-2. **PLAN**: It presents a detailed architectural strategy.
-3. **TOGGLE**: Once approved, Tempest calls `toggle_planning` to enter **EXECUTION MODE**.
-4. **EXECUTE**: The agent performs file edits, git operations, and system commands.
-5. **VERIFY**: Tempest run-checks its output (Self-Correction) and summarizes the mission outcome.
 
 ---
 
