@@ -1,5 +1,5 @@
-/target
-/history.json
-
-
 brain_vectors.json
+history.json
+target/
+.DS_Store
+*.log
