@@ -115,7 +115,7 @@ pub struct ProjectAtlasTool;
 #[async_trait]
 impl AgentTool for ProjectAtlasTool {
     fn name(&self) -> &'static str { "project_atlas" }
-    fn description(&self) -> &'static str { "Generates or updates a '.tempest_atlas.md' file in the project root to maintain spatial project awareness." }
+    fn description(&self) -> &'static str { "📍 SYSTEM MAP: Generates/reads the local '.tempest_atlas.md' file. This is a NATIVE tool; do not attempt to call external 'atlas' binaries or Python scripts (e.g., /usr/bin/atlas_cli.py)." }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;

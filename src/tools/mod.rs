@@ -74,3 +74,5 @@ pub mod database;
 pub mod network;
 pub mod atlas;
 pub mod telemetry;
+pub mod network_manager;
+pub mod service_manager;

@@ -1,4 +1,5 @@
 use serde_json::Value;
+use colored::Colorize;
 use anyhow::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
@@ -39,12 +40,31 @@ impl AgentTool for AskUserTool {
         let typed_args: AskUserArgs = serde_json::from_value(args.clone())?;
         let question = typed_args.question;
         
-        let _ = context.tx.send(crate::tui::AgentEvent::RequestInput(self.name().to_string(), question.to_string())).await;
+        // 🚀 TUI HANDOFF
+        if context.tx.send(crate::tui::AgentEvent::RequestInput(self.name().to_string(), question.to_string())).await.is_ok() {
+            let mut rx_lock = context.tool_rx.lock().await;
+            match rx_lock.recv().await {
+                Some(crate::tui::ToolResponse::Text(ans)) => return Ok(format!("User responded: {}", ans)),
+                _ => anyhow::bail!("User cancelled input."),
+            }
+        }
+
+        // 🚑 CLI FALLBACK (if TUI is not running or channel is dead)
+        use std::io::{self, Write};
+        println!("\n{} \n{}", "❓ Agent Question:".yellow().bold(), question.cyan());
+        print!(">> ");
+        let _ = io::stdout().flush();
         
-        let mut rx_lock = context.tool_rx.lock().await;
-        match rx_lock.recv().await {
-            Some(crate::tui::ToolResponse::Text(ans)) => Ok(format!("User responded: {}", ans)),
-            _ => anyhow::bail!("User cancelled input."),
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_ok() {
+            let ans = input.trim().to_string();
+            if ans.is_empty() {
+                Ok("User provided an empty response.".to_string())
+            } else {
+                Ok(format!("User responded: {}", ans))
+            }
+        } else {
+            anyhow::bail!("Failed to read input from terminal.")
         }
     }
 }
@@ -98,14 +118,17 @@ impl AgentTool for SpawnSubAgentTool {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct TogglePlanningArgs {}
+pub struct TogglePlanningArgs {
+    /// Explicitly set the mode. true for PLANNING, false for EXECUTION. If omitted, toggles current state.
+    pub active: Option<bool>,
+}
 
 pub struct TogglePlanningTool;
 
 #[async_trait]
 impl AgentTool for TogglePlanningTool {
     fn name(&self) -> &'static str { "toggle_planning" }
-    fn description(&self) -> &'static str { "The Master Switch. Toggles between PLANNING and EXECUTION mode. You MUST call this to enter EXECUTION mode before any state-modifying tools (write_file, run_command, etc.) will work." }
+    fn description(&self) -> &'static str { "The Master Switch. Sets/Toggles between PLANNING and EXECUTION mode. You MUST set this to 'active: false' to enter EXECUTION mode before any state-modifying tools (write_file, run_command, etc.) will work." }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -122,10 +145,16 @@ impl AgentTool for TogglePlanningTool {
         }
     }
 
-    async fn execute(&self, _args: &Value, context: ToolContext) -> Result<String> {
-        let _typed_args: TogglePlanningArgs = serde_json::from_value(_args.clone()).unwrap_or(TogglePlanningArgs {});
+    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
+        let typed_args: TogglePlanningArgs = serde_json::from_value(args.clone()).unwrap_or(TogglePlanningArgs { active: None });
         let mut planning_lock = context.planning_mode.lock().unwrap();
-        *planning_lock = !*planning_lock;
+        
+        if let Some(active) = typed_args.active {
+            *planning_lock = active;
+        } else {
+            *planning_lock = !*planning_lock;
+        }
+        
         let mode = if *planning_lock { "PLANNING" } else { "EXECUTION" };
         Ok(format!("Agent is now in {} mode.", mode))
     }

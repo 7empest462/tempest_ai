@@ -75,6 +75,8 @@ impl Agent {
             Arc::new(crate::tools::system::NetworkSnifferTool),
             Arc::new(crate::tools::system::SystemdManagerTool),
             Arc::new(crate::tools::telemetry::SystemTelemetryTool),
+            Arc::new(crate::tools::network_manager::ListSocketsTool),
+            Arc::new(crate::tools::service_manager::ListServicesTool),
             // RESTORED WEB TOOLS
             Arc::new(crate::tools::web::SearchWebTool),
             Arc::new(crate::tools::web::ReadUrlTool),
@@ -287,11 +289,15 @@ impl Agent {
                 if !h_lock.is_empty() && h_lock[0].role == MessageRole::System {
                     let task_ctx = self.task_context.lock().unwrap();
                     let tool_desc = self.get_tool_descriptions();
+                    let is_planning = *self.planning_mode.lock().unwrap();
+                    let mode_str = if is_planning { "PLANNING" } else { "EXECUTION" };
+                    
                     h_lock[0] = ChatMessage::new(
                         MessageRole::System, 
                         self.system_prompt
                             .replace("{tool_descriptions}", &tool_desc)
                             .replace("{task_context}", &*task_ctx)
+                            .replace("{planning_mode}", mode_str)
                     );
                 }
 
@@ -524,6 +530,11 @@ impl Agent {
                                         let tool_rx = Arc::new(tokio::sync::Mutex::new(tool_rx_internal));
                                         let context = self.create_tool_context(tx, tool_rx);
 
+                                        // 🎨 UI Polish: Finish spinner before interactive tools
+                                        if tool.name() == "ask_user" {
+                                            tool_spinner.finish_and_clear();
+                                        }
+
                                         match tool.execute(args, context).await {
                                             Ok(res) => {
                                                 tool_spinner.finish_and_clear();
@@ -644,8 +655,8 @@ impl Agent {
 
         // 🚑 FALLBACK: If no backtick blocks found, try to find a raw JSON object in the text
         if calls.is_empty() {
-             // Look for the first occurrence of { "tool": or {"tool":
-             let re_raw = regex::Regex::new(r#"(?s)\{\s*"tool"\s*:.*?\}"#).unwrap();
+             // Look for the first occurrence of { "tool": or { "name":
+             let re_raw = regex::Regex::new(r#"(?s)\{\s*"(tool|name)"\s*:.*?\}"#).unwrap();
              for caps in re_raw.captures_iter(content) {
                  let block = caps.get(0).unwrap().as_str().trim();
                  if let Ok(val) = self.parse_single_tool_block(block) {
@@ -691,7 +702,10 @@ impl Agent {
 
         match serde_json::from_str::<Value>(block) {
             Ok(mut val) => {
-                let tool_name = val.get("tool").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let tool_name = val.get("tool")
+                    .or_else(|| val.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 
                 if let Some(name) = tool_name {
                     if val.get("arguments").is_none() {
@@ -699,13 +713,20 @@ impl Agent {
                             let mut args_map = serde_json::Map::new();
                             let keys: Vec<String> = obj.keys().cloned().collect();
                             for k in keys {
-                                if k != "tool" {
+                                if k != "tool" && k != "name" {
                                     if let Some(v) = obj.remove(&k) {
                                         args_map.insert(k, v);
                                     }
                                 }
                             }
                             obj.insert("arguments".to_string(), serde_json::Value::Object(args_map));
+                        }
+                    }
+                    
+                    // Add the 'tool' key if it was using 'name' so downstream code works
+                    if val.get("tool").is_none() {
+                        if let Some(obj) = val.as_object_mut() {
+                            obj.insert("tool".to_string(), serde_json::Value::String(name.clone()));
                         }
                     }
                     
@@ -724,7 +745,7 @@ impl Agent {
                     }
                     Ok(val)
                 } else {
-                    Err("Missing 'tool' key in JSON block".to_string())
+                    Err("Missing 'tool' (or 'name') key in JSON block".to_string())
                 }
             }
             Err(e) => {
@@ -791,14 +812,21 @@ impl Agent {
                 
                 let _ = self.auto_summarize_memory(true).await;
                 
-                // Update System Prompt with latest Task Context (Reflective Memory)
+                // Update System Prompt with latest Task Context & Mode (State Awareness)
                 {
                     let mut h_lock = self.history.lock().unwrap();
                     let t_lock = self.task_context.lock().unwrap();
+                    let tool_desc = self.get_tool_descriptions();
+                    let is_planning = *self.planning_mode.lock().unwrap();
+                    let mode_str = if is_planning { "PLANNING" } else { "EXECUTION" };
+                    
                     if !h_lock.is_empty() && h_lock[0].role == MessageRole::System {
                         h_lock[0] = ChatMessage::new(
                             MessageRole::System, 
-                            self.system_prompt.replace("{task_context}", &*t_lock)
+                            self.system_prompt
+                                .replace("{tool_descriptions}", &tool_desc)
+                                .replace("{task_context}", &*t_lock)
+                                .replace("{planning_mode}", mode_str)
                         );
                     }
                 }

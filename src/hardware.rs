@@ -7,7 +7,9 @@ pub struct LinuxProcessAnalyzerTool;
 #[async_trait::async_trait]
 impl AgentTool for LinuxProcessAnalyzerTool {
     fn name(&self) -> &'static str { "linux_process_analyzer" }
-    fn description(&self) -> &'static str { "Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel." }
+    fn description(&self) -> &'static str { 
+        "CRITICAL: NVIDIA ONLY. Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel. DO NOT USE ON MACOS. If you are on a Mac, use `get_system_telemetry` to see GPU stats."
+    }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
