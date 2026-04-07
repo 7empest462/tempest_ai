@@ -435,6 +435,7 @@ impl AgentTool for FindReplaceTool {
     }
 }
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct DiffFilesArgs {
     /// The first (original) file path.
     pub file1: String,
@@ -442,6 +443,7 @@ pub struct DiffFilesArgs {
     pub file2: String,
 }
 
+#[allow(dead_code)]
 pub struct DiffFilesTool;
 
 #[async_trait]

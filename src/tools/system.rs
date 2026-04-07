@@ -8,8 +8,10 @@ use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct SystemInfoArgs {}
 
+#[allow(dead_code)]
 pub struct SystemInfoTool;
 
 #[async_trait]
@@ -49,8 +51,8 @@ impl AgentTool for SystemInfoTool {
 }
 
 // Consolidation of hardware and telemetry into this module for modularity
-pub use crate::hardware::{LinuxProcessAnalyzerTool, GpuDiagnosticsTool, TelemetryChartTool};
-pub use crate::telemetry::{AdvancedSystemOracleTool, KernelDiagnosticTool, NetworkSnifferTool};
+#[allow(unused_imports)]
+pub use crate::hardware::TelemetryChartTool;
 #[derive(Deserialize, JsonSchema)]
 #[allow(dead_code)]
 pub struct SystemdManagerArgs {
@@ -60,6 +62,7 @@ pub struct SystemdManagerArgs {
     pub unit: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct SystemdManagerTool;
 
 #[async_trait]

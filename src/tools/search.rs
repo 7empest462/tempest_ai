@@ -108,11 +108,13 @@ impl AgentTool for GrepSearchTool {
     }
 }
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct IndexFileSemanticallyArgs {
     /// The path to the file to index.
     pub path: String,
 }
 
+#[allow(dead_code)]
 pub struct IndexFileSemanticallyTool;
 
 #[async_trait]

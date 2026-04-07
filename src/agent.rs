@@ -37,6 +37,7 @@ pub struct Agent {
     #[allow(dead_code)]
     theme_set: ThemeSet,
     pub telemetry: Arc<Mutex<String>>,
+    pub is_root: bool,
 }
 
 
@@ -59,26 +60,16 @@ impl Agent {
             Arc::new(crate::tools::git::GitCommitTool),
             Arc::new(crate::tools::search::SemanticSearchTool),
             Arc::new(crate::tools::search::GrepSearchTool),
-            Arc::new(crate::tools::editing::EditFileWithDiffTool),
             Arc::new(crate::tools::memory::StoreMemoryTool::new(memory_store.clone())),
             Arc::new(crate::tools::memory::RecallMemoryTool::new(memory_store.clone())),
             Arc::new(crate::tools::agent_ops::AskUserTool),
             Arc::new(crate::tools::agent_ops::SpawnSubAgentTool),
             Arc::new(crate::tools::agent_ops::TogglePlanningTool),
             Arc::new(crate::tools::agent_ops::UpdateTaskContextTool),
-            Arc::new(crate::tools::agent_ops::ExtractAndWriteTool),
-            Arc::new(crate::tools::system::SystemInfoTool),
-            Arc::new(crate::tools::system::LinuxProcessAnalyzerTool),
-            Arc::new(crate::tools::system::GpuDiagnosticsTool),
-            Arc::new(crate::tools::system::TelemetryChartTool),
-            Arc::new(crate::tools::system::AdvancedSystemOracleTool),
-            Arc::new(crate::tools::system::KernelDiagnosticTool),
-            Arc::new(crate::tools::system::NetworkSnifferTool),
-            Arc::new(crate::tools::system::SystemdManagerTool),
             Arc::new(crate::tools::telemetry::SystemTelemetryTool),
             Arc::new(crate::tools::network_manager::ListSocketsTool),
             Arc::new(crate::tools::service_manager::ListServicesTool),
-            // RESTORED WEB TOOLS
+            // WEB TOOLS
             Arc::new(crate::tools::web::SearchWebTool),
             Arc::new(crate::tools::web::ReadUrlTool),
             Arc::new(crate::tools::web::HttpRequestTool),
@@ -98,16 +89,14 @@ impl Agent {
             Arc::new(crate::tools::knowledge::RecallBrainTool),
             Arc::new(crate::tools::knowledge::ListSkillsTool),
             Arc::new(crate::tools::knowledge::SkillRecallTool),
-            // RESTORED DATABASE & NETWORK TOOLS
+            // DATABASE & NETWORK TOOLS
             Arc::new(crate::tools::database::SqliteQueryTool),
             Arc::new(crate::tools::network::NetworkCheckTool),
-            // RESTORED ATLAS TOOLS
+            // ATLAS TOOLS
             Arc::new(crate::tools::atlas::TreeTool),
             Arc::new(crate::tools::atlas::ProjectAtlasTool),
             // FINAL COMPLEMENTARY TOOLS
             Arc::new(crate::tools::git::GitActionTool),
-            Arc::new(crate::tools::file::DiffFilesTool),
-            Arc::new(crate::tools::search::IndexFileSemanticallyTool),
         ];
 
         let history_path_obj = Path::new(&history_path);
@@ -134,6 +123,7 @@ impl Agent {
             theme_set: ThemeSet::load_defaults(),
             telemetry: Arc::new(Mutex::new(String::new())),
             brain_path,
+            is_root: nix::unistd::getuid().is_root(),
         };
 
         // Standard prompt setup (TUI will override this if needed)
@@ -169,6 +159,7 @@ impl Agent {
             tool_rx,
             recent_tool_calls: self.recent_tool_calls.clone(),
             brain_path: self.brain_path.clone(),
+            is_root: self.is_root,
         }
     }
 

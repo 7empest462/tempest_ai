@@ -9,6 +9,7 @@ use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct EditFileWithDiffArgs {
     /// Path to the file to edit.
     pub path: String,
@@ -16,6 +17,7 @@ pub struct EditFileWithDiffArgs {
     pub new_content: String,
 }
 
+#[allow(dead_code)]
 pub struct EditFileWithDiffTool;
 
 #[async_trait]

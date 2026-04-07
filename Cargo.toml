@@ -41,7 +41,7 @@ futures = "0.3"
 arboard = "3.4"
 plotters = "0.3.7"
 sysctl = "0.7.1"
-nix = "0.31.2"
+nix = { version = "0.31", features = ["user"] }
 pnet = "0.35.0"
 ratatui = "0.30.0"
 crossterm = "0.29.0"

@@ -6,8 +6,10 @@ use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct AdvancedSystemOracleArgs {}
 
+#[allow(dead_code)]
 pub struct AdvancedSystemOracleTool;
 
 #[async_trait::async_trait]
@@ -107,11 +109,13 @@ impl AgentTool for AdvancedSystemOracleTool {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct KernelDiagnosticArgs {
     /// The sysctl key to read (e.g., 'hw.model', 'kern.boottime', 'net.inet.tcp.keepinit').
     pub key: String,
 }
 
+#[allow(dead_code)]
 pub struct KernelDiagnosticTool;
 
 #[async_trait::async_trait]
@@ -164,6 +168,7 @@ impl AgentTool for KernelDiagnosticTool {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct NetworkSnifferArgs {
     /// Action to perform: 'list_interfaces' or 'sniff'
     pub action: String,
@@ -171,6 +176,7 @@ pub struct NetworkSnifferArgs {
     pub interface_name: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct NetworkSnifferTool;
 
 #[async_trait::async_trait]

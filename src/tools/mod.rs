@@ -18,7 +18,8 @@ pub struct ToolContext {
     pub tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>,
     pub tool_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>>>,
     #[allow(dead_code)] pub recent_tool_calls: Arc<Mutex<std::collections::VecDeque<String>>>,
-    pub brain_path: std::path::PathBuf,
+    #[allow(dead_code)] pub brain_path: std::path::PathBuf,
+    pub is_root: bool,
 }
 
 use ollama_rs::generation::tools::ToolInfo;

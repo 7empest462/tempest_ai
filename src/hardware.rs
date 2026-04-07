@@ -12,13 +12,14 @@ pub struct LinuxProcessAnalyzerArgs {
     pub pid: i32,
 }
 
+#[allow(dead_code)]
 pub struct LinuxProcessAnalyzerTool;
 
 #[async_trait::async_trait]
 impl AgentTool for LinuxProcessAnalyzerTool {
     fn name(&self) -> &'static str { "linux_process_analyzer" }
     fn description(&self) -> &'static str { 
-        "CRITICAL: NVIDIA ONLY. Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel. DO NOT USE ON MACOS. If you are on a Mac, use `get_system_telemetry` to see GPU stats."
+        "CRITICAL: NVIDIA ONLY. Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel. DO NOT USE ON MACOS. If you are on a Mac, use `system_diagnostic_scan` to see GPU stats."
     }
     
     fn tool_info(&self) -> ToolInfo {
@@ -74,6 +75,7 @@ pub struct GpuDiagnosticsArgs {
     pub gpu_id: Option<u32>,
 }
 
+#[allow(dead_code)]
 pub struct GpuDiagnosticsTool;
 
 #[async_trait::async_trait]
@@ -143,6 +145,7 @@ impl AgentTool for GpuDiagnosticsTool {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct TelemetryChartArgs {
     /// Chart Title
     pub title: String,
@@ -156,6 +159,7 @@ pub struct TelemetryChartArgs {
     pub data_points: Vec<Vec<f64>>,
 }
 
+#[allow(dead_code)]
 pub struct TelemetryChartTool;
 
 #[async_trait::async_trait]

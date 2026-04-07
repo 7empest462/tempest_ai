@@ -197,11 +197,13 @@ impl AgentTool for UpdateTaskContextTool {
     }
 }
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 pub struct ExtractAndWriteArgs {
     /// The path to the file to create or overwrite.
     pub path: String,
 }
 
+#[allow(dead_code)]
 pub struct ExtractAndWriteTool;
 
 #[async_trait]

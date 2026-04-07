@@ -46,7 +46,12 @@ impl AgentTool for ListServicesTool {
         report.push_str("|--------|-----|-------|\n");
         
         for svc in services {
-            let status_icon = if svc.status == 0 { "✅" } else { "❌" };
+            let is_ok = if cfg!(target_os = "macos") {
+                svc.status == 0 || svc.status == 1 || svc.status == 78
+            } else {
+                svc.status == 0
+            };
+            let status_icon = if is_ok { "✅".to_string() } else { format!("❌ ({})", svc.status) };
             let pid_str = svc.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
             report.push_str(&format!("| {} | {} | {} |\n", status_icon, pid_str, svc.label));
         }
