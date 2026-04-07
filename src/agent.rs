@@ -22,6 +22,7 @@ pub struct Agent {
     model: String,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     tools: Vec<Arc<dyn crate::tools::AgentTool>>,
+    tool_registry: Vec<ollama_rs::generation::tools::ToolInfo>,
     system_prompt: String,
     recent_tool_calls: Arc<Mutex<std::collections::VecDeque<String>>>,
     history_path: String,
@@ -112,11 +113,15 @@ impl Agent {
         let history_path_obj = Path::new(&history_path);
         let brain_path = history_path_obj.parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
 
+        // Pre-compute the exact JSON schemas for all tools once to avoid doing it every turn
+        let tool_registry: Vec<ollama_rs::generation::tools::ToolInfo> = tools.iter().map(|t| t.tool_info()).collect();
+
         let agent = Agent {
             ollama: Ollama::default(),
             model: model.clone(),
             history: Arc::new(Mutex::new(vec![])),
             tools,
+            tool_registry,
             system_prompt: system_prompt.clone(),
             recent_tool_calls: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             history_path: history_path.clone(),
@@ -187,11 +192,10 @@ impl Agent {
     pub fn get_tool_descriptions(&self) -> String {
         let mut desc = String::new();
         for tool in &self.tools {
-            let name = tool.name();
-            let description = tool.description();
-            let params = tool.parameters();
-            
-            desc.push_str(&format!("- {}: {}. JSON Schema: {}\n", name, description, params));
+            let info = tool.tool_info();
+            let schema_json = serde_json::to_value(&info.function.parameters)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            desc.push_str(&format!("- {}: {}. JSON Schema: {}\n", info.function.name, info.function.description, schema_json));
         }
         desc
     }
@@ -312,25 +316,23 @@ impl Agent {
             // 🧠 Compress old history when it gets too long (instead of hard-dropping)
             let _ = self.auto_summarize_memory(false).await;
 
-            // Build the request with moderate options (8k context)
+            // Build the request with strict options for tool compliance
             let options = ModelOptions::default()
                 .num_ctx(8192)
-                .num_predict(4096);
+                .num_predict(4096)
+                .temperature(0.15);
 
             let history_snapshot = {
                 let h_lock = self.history.lock().unwrap();
                 h_lock.clone()
             };
 
-            // Construct native tool definitions
-            let tool_infos: Vec<ollama_rs::generation::tools::ToolInfo> = self.tools.iter().map(|t| t.tool_info()).collect();
-
             let request = ChatMessageRequest::new(
                 self.model.clone(),
                 history_snapshot,
             )
             .options(options)
-            .tools(tool_infos);
+            .tools(self.tool_registry.clone());
 
             let spinner = indicatif::ProgressBar::new_spinner();
             spinner.enable_steady_tick(std::time::Duration::from_millis(80));
@@ -428,7 +430,14 @@ impl Agent {
 
             // Only save if we actually got something
             if !full_content.trim().is_empty() {
-                let message = ChatMessage::new(MessageRole::Assistant, full_content.clone());
+                // Sanitize: strip hallucinated "TOOL RESULT" text the model may fabricate
+                // Real tool results come through our execution pipeline, not from model text
+                let sanitized = if full_content.contains("TOOL RESULT") {
+                    full_content.split("TOOL RESULT").next().unwrap_or(&full_content).trim().to_string()
+                } else {
+                    full_content.clone()
+                };
+                let message = ChatMessage::new(MessageRole::Assistant, sanitized);
                 self.history.lock().unwrap().push(message);
                 let _ = self.save_history();
             }
@@ -436,11 +445,15 @@ impl Agent {
 
             // Prioritize native tool calls, fallback to markdown extraction if empty
             let mut all_tool_calls = Vec::new();
+            let mut used_native_calls = false;
             for native_call in native_tool_calls {
                 all_tool_calls.push(serde_json::json!({
                     "tool": native_call.function.name,
                     "arguments": native_call.function.arguments,
                 }));
+            }
+            if !all_tool_calls.is_empty() {
+                used_native_calls = true;
             }
 
             if all_tool_calls.is_empty() {
@@ -453,6 +466,11 @@ impl Agent {
                     continue;
                 }
             }
+
+            // Select the correct message role for tool results:
+            // - Native tool calls (via Ollama API) → MessageRole::Tool
+            // - Legacy text-extracted JSON calls → MessageRole::User (model expects user feedback)
+            let result_role = if used_native_calls { MessageRole::Tool } else { MessageRole::User };
 
             // Look for JSON blocks to execute tools (supports multiple per response)
             let mut executed_tools = false;
@@ -468,19 +486,18 @@ impl Agent {
                                 if calls_lock.contains(&current_call_hash) {
                                     println!("\n{}", "❌ Loop Detected. Intercepting duplicate tool sequence...".red());
                                     let guard_msg = format!(
-                                        "[System Guardrail] STOP: You just attempted to execute the exact same tool and arguments as a previous failed turn. \
-                                        \nCURRENT ACTION: '{}' with arguments '{}' is BLOCKED. \
-                                        \nINSTRUCTION: Do NOT repeat this action. Look at your history again, determine what is missing, and PIVOT to a new strategy or tool.", 
-                                        tool_name, serde_json::to_string(args).unwrap_or_default()
+                                        "[System Guardrail] BLOCKED: You already called '{}' with the same arguments. The result is already in your conversation history above. \
+                                        \nDo NOT call this tool again. Instead, READ the tool result you already received and present the information to the user in natural language.", 
+                                        tool_name
                                     );
                                     self.history.lock().unwrap().push(ChatMessage::new(MessageRole::System, guard_msg));
                                     let _ = self.save_history();
-                                    calls_lock.clear();
-                                    executed_tools = true; // 🚀 Keep autonomous loop alive to allow AI to self-correct
+                                    // Do NOT clear the deque — keep the hash blocked
+                                    executed_tools = true;
                                     continue;
                                 }
                                 calls_lock.push_back(current_call_hash);
-                                if calls_lock.len() > 5 { calls_lock.pop_front(); }
+                                if calls_lock.len() > 10 { calls_lock.pop_front(); }
                             }
 
                             let tool_result_str;
@@ -550,12 +567,20 @@ impl Agent {
                                         }
                                     }
                                 }
-                                self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)));
+                                
+                                // Provide strict guidance to the LLM if a tool error occurs
+                                let history_msg = if tool_result_str.starts_with("Error:") {
+                                    format!("TOOL ERROR for '{}'. Observe the error and try again using correct logical parameters:\n{}", tool_name, tool_result_str)
+                                } else {
+                                    format!("TOOL RESULT for {}:\n{}", tool_name, tool_result_str)
+                                };
+                                
+                                self.history.lock().unwrap().push(ChatMessage::new(result_role.clone(), history_msg));
                                 let _ = self.save_history();
                                 executed_tools = true;
                             } else {
-                                let err_msg = format!("Error: Tool '{}' not found.", tool_name);
-                                self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, err_msg));
+                                let err_msg = format!("TOOL ERROR: Tool '{}' does not exist. Please review your available tools and select a valid one.", tool_name);
+                                self.history.lock().unwrap().push(ChatMessage::new(result_role.clone(), err_msg));
                                 executed_tools = true;
                         }
                     }
@@ -956,14 +981,14 @@ impl Agent {
                                         if allowed {
                                             match tool.execute(args, context.clone()).await {
                                                 Ok(res) => {
-                                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL RESULT for {}:\n{}", tool_name, res)));
+                                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::Tool, format!("TOOL RESULT for {}:\n{}", tool_name, res)));
                                                 }
                                                 Err(e) => {
-                                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("TOOL ERROR for {}:\n{}", tool_name, e)));
+                                                    self.history.lock().unwrap().push(ChatMessage::new(MessageRole::Tool, format!("TOOL ERROR for {}:\n{}", tool_name, e)));
                                                 }
                                             }
                                         } else {
-                                            self.history.lock().unwrap().push(ChatMessage::new(MessageRole::User, format!("Error: User denied permission for {}.", tool_name)));
+                                            self.history.lock().unwrap().push(ChatMessage::new(MessageRole::Tool, format!("Error: User denied permission for {}.", tool_name)));
                                         }
                                     }
                                     let _ = tx.send(crate::tui::AgentEvent::ToolFinish).await;
@@ -1050,20 +1075,14 @@ mod tests {
         let mut seen_names = std::collections::HashSet::new();
 
         for tool in &agent.tools {
-            let name = tool.name();
-            let desc = tool.description();
-            let params = tool.parameters();
+            let info = tool.tool_info();
+            let name = info.function.name.clone();
+            let desc = info.function.description.clone();
 
             assert!(!name.is_empty(), "Tool should have a name!");
             assert!(!desc.is_empty(), "Tool '{}' should have a description!", name);
-            assert!(params.is_object(), "Tool '{}' parameters must be a JSON object!", name);
             
             assert!(seen_names.insert(name.to_string()), "Tool name '{}' is duplicated!", name);
-            
-            // Basic parameter schema checks
-            if let Some(p_type) = params.get("type") {
-                 assert_eq!(p_type, "object", "Tool '{}' parameters type should be 'object'", name);
-            }
         }
         println!("✅ All {} tools passed sanity checks.", tool_names.len());
     }

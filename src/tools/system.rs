@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use anyhow::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
@@ -51,6 +51,15 @@ impl AgentTool for SystemInfoTool {
 // Consolidation of hardware and telemetry into this module for modularity
 pub use crate::hardware::{LinuxProcessAnalyzerTool, GpuDiagnosticsTool, TelemetryChartTool};
 pub use crate::telemetry::{AdvancedSystemOracleTool, KernelDiagnosticTool, NetworkSnifferTool};
+#[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
+pub struct SystemdManagerArgs {
+    /// The systemctl action to perform.
+    pub action: String,
+    /// The name of the service unit (e.g. 'nginx.service').
+    pub unit: Option<String>,
+}
+
 pub struct SystemdManagerTool;
 
 #[async_trait]
@@ -58,22 +67,30 @@ impl AgentTool for SystemdManagerTool {
     fn name(&self) -> &'static str { "systemd_manager" }
     fn description(&self) -> &'static str { "Natively monitor and manage Systemd services on Linux. Use 'action': 'list' to see all units, or 'start'/'stop'/'restart'/'status' with a 'unit' name. REQUIRES LINUX HOST." }
     fn is_modifying(&self) -> bool { true }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "enum": ["list", "start", "stop", "restart", "status"], "description": "The systemctl action to perform." },
-                "unit": { "type": "string", "description": "The name of the service unit (e.g. 'nginx.service')." }
-            },
-            "required": ["action"]
-        })
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<SystemdManagerArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
-
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: SystemdManagerArgs = serde_json::from_value(args.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid parameters: {}", e))?;
+            
         #[cfg(target_os = "linux")]
         {
-            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list");
-            let unit = args.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+            let action = typed_args.action.as_str();
+            let unit_opt = typed_args.unit;
+            let unit = unit_opt.as_deref().unwrap_or("");
 
             let mut cmd = std::process::Command::new("systemctl");
             match action {
@@ -99,7 +116,7 @@ impl AgentTool for SystemdManagerTool {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = args;
+            let _ = typed_args;
             Ok("Error: The systemd_manager tool is exclusive to Linux environments.".to_string())
         }
     }

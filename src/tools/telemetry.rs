@@ -54,7 +54,8 @@ impl AgentTool for SystemTelemetryTool {
         let total_mem = sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0;
         let used_mem = sys.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0;
         
-        // 🧪 PRE-CALCULATE GPU TEMP (macOS)
+        // 🧪 PRE-CALCULATE GPU TEMP (macOS only — mut is used inside cfg block)
+        #[allow(unused_mut)]
         let mut gpu_temp_str = "Unknown".to_string();
         #[cfg(target_os = "macos")]
         {

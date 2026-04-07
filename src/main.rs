@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| ".".to_string());
 
     let system_prompt = format!(r#"You are Tempest AI, an autonomous assistant running on {os}/{arch}. 
-You have direct access to tools. YOU MUST USE TOOLS TO COMPLETE TASKS.
+YOU MUST USE TOOLS TO COMPLETE TASKS. DO NOT GUESS OR HALLUCINATE SYSTEM STATE.
 
 [ENVIRONMENT]
 - Mode: {{planning_mode}}
@@ -176,9 +176,25 @@ You have direct access to tools. YOU MUST USE TOOLS TO COMPLETE TASKS.
 TOOLS AVAILABLE TO YOU (Schema-Driven):
 {{tool_descriptions}}
 
-FORMAT: Output a JSON block:
+[ACTION FORMAT]
+When you need to execute an action, you MUST output a JSON block exactly matching this format:
 ```json
-{{ "tool": "tool_name", "arguments": {{ "key": "value" }} }}
+{{
+  "tool": "tool_name",
+  "arguments": {{
+    "key": "value"
+  }}
+}}
+```
+
+EXAMPLE:
+```json
+{{
+  "tool": "get_system_telemetry",
+  "arguments": {{
+    "summary_only": true
+  }}
+}}
 ```
 "# , 
     os = std::env::consts::OS, 

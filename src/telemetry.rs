@@ -1,6 +1,12 @@
 use anyhow::Result;
 use serde_json::Value;
 use crate::tools::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AdvancedSystemOracleArgs {}
 
 pub struct AdvancedSystemOracleTool;
 
@@ -8,12 +14,20 @@ pub struct AdvancedSystemOracleTool;
 impl AgentTool for AdvancedSystemOracleTool {
     fn name(&self) -> &'static str { "system_oracle_3d" }
     fn description(&self) -> &'static str { "Perform a deep 3D topological sweep of the host environment. Returns exhaustive details on CPU layouts, physical memory, swap, mapped disks, and component thermals." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<AdvancedSystemOracleArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
     async fn execute(&self, _args: &Value, _context: ToolContext) -> Result<String> {
         use sysinfo::{System, Disks, Networks, Components};
@@ -92,23 +106,38 @@ impl AgentTool for AdvancedSystemOracleTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct KernelDiagnosticArgs {
+    /// The sysctl key to read (e.g., 'hw.model', 'kern.boottime', 'net.inet.tcp.keepinit').
+    pub key: String,
+}
+
 pub struct KernelDiagnosticTool;
 
 #[async_trait::async_trait]
 impl AgentTool for KernelDiagnosticTool {
     fn name(&self) -> &'static str { "kernel_sysctl" }
     fn description(&self) -> &'static str { "Query Unix/macOS deep kernel configurations via sysctl (e.g. read 'kern.maxfiles' or 'hw.ncpu')." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "key": { "type": "string", "description": "The sysctl key to read (e.g., 'hw.model', 'kern.boottime', 'net.inet.tcp.keepinit')." }
-            },
-            "required": ["key"]
-        })
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<KernelDiagnosticArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
+    
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
+        let typed_args: KernelDiagnosticArgs = serde_json::from_value(args.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid parameters: {}", e))?;
+        let key = typed_args.key.as_str();
         
         #[cfg(unix)]
         {
@@ -134,26 +163,42 @@ impl AgentTool for KernelDiagnosticTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct NetworkSnifferArgs {
+    /// Action to perform: 'list_interfaces' or 'sniff'
+    pub action: String,
+    /// Interface name to sniff (e.g. 'en0' or 'eth0'). Ignored for list_interfaces.
+    pub interface_name: Option<String>,
+}
+
 pub struct NetworkSnifferTool;
 
 #[async_trait::async_trait]
 impl AgentTool for NetworkSnifferTool {
     fn name(&self) -> &'static str { "network_sniffer" }
     fn description(&self) -> &'static str { "Analyze raw network topology and intercept raw packets using pnet. Provide 'action': 'list_interfaces' to see adapters, or 'sniff' and 'interface_name' to capture 5 packets (REQUIRES SUDO / ROOT PERMISSIONS)." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "enum": ["list_interfaces", "sniff"], "description": "Action to perform" },
-                "interface_name": { "type": "string", "description": "Interface name to sniff (e.g. 'en0' or 'eth0'). Ignored for list_interfaces." }
-            },
-            "required": ["action"]
-        })
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<NetworkSnifferArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
+    
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         use pnet::datalink::{self, NetworkInterface};
 
-        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list_interfaces");
+        let typed_args: NetworkSnifferArgs = serde_json::from_value(args.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid parameters: {}", e))?;
+        let action = typed_args.action.as_str();
 
         let interfaces = datalink::interfaces();
 
@@ -172,7 +217,7 @@ impl AgentTool for NetworkSnifferTool {
         }
 
         if action == "sniff" {
-            let iface_name = args.get("interface_name").and_then(|i| i.as_str()).unwrap_or("");
+            let iface_name = typed_args.interface_name.as_deref().unwrap_or("");
             
             let interface_match = interfaces.into_iter()
                 .find(|iface: &NetworkInterface| iface.name == iface_name);

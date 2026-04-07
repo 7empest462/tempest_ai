@@ -120,8 +120,8 @@ impl AgentTool for NotifyTool {
         #[cfg(target_os = "linux")]
         {
             let output = Command::new("notify-send")
-                .arg(title)
-                .arg(message)
+                .arg(&title)
+                .arg(&message)
                 .output();
             match output {
                 Ok(o) if o.status.success() => Ok(format!("🔔 Notification sent: {} — {}", title, message)),

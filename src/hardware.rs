@@ -1,6 +1,16 @@
 use anyhow::Result;
 use serde_json::Value;
 use crate::tools::{AgentTool, ToolContext};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+
+#[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
+pub struct LinuxProcessAnalyzerArgs {
+    /// The target Process ID to analyze.
+    pub pid: i32,
+}
 
 pub struct LinuxProcessAnalyzerTool;
 
@@ -10,20 +20,31 @@ impl AgentTool for LinuxProcessAnalyzerTool {
     fn description(&self) -> &'static str { 
         "CRITICAL: NVIDIA ONLY. Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel. DO NOT USE ON MACOS. If you are on a Mac, use `get_system_telemetry` to see GPU stats."
     }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pid": { "type": "integer", "description": "The target Process ID to analyze." }
-            },
-            "required": ["pid"]
-        })
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<LinuxProcessAnalyzerArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
+    
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: LinuxProcessAnalyzerArgs = serde_json::from_value(args.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid arguments for linux_process_analyzer: {}", e))?;
+        
         #[cfg(target_os = "linux")]
         {
             use procfs::WithCurrentSystemInfo;
-            let pid = args.get("pid").and_then(|p| p.as_i64()).ok_or_else(|| anyhow::anyhow!("Missing 'pid'"))? as i32;
+            let pid = typed_args.pid;
             let process = procfs::process::Process::new(pid)?;
             
             let stat = process.stat()?;
@@ -40,10 +61,17 @@ impl AgentTool for LinuxProcessAnalyzerTool {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = args;
+            let _ = typed_args;
             Ok("Error: The linux_process_analyzer tool relies on the pristine Linux procfs kernel mapping. You are currently running on macOS (Darwin). Use `system_info` or `run_command` with macOS specific polling instead.".to_string())
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
+pub struct GpuDiagnosticsArgs {
+    /// Optional GPU ID (default 0).
+    pub gpu_id: Option<u32>,
 }
 
 pub struct GpuDiagnosticsTool;
@@ -52,18 +80,30 @@ pub struct GpuDiagnosticsTool;
 impl AgentTool for GpuDiagnosticsTool {
     fn name(&self) -> &'static str { "gpu_diagnostics" }
     fn description(&self) -> &'static str { "Read Nvidia GPU telemetry (temperature, clock speeds, active instances) natively." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "gpu_id": { "type": "integer", "description": "Optional GPU ID (default 0).", "default": 0 }
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<GpuDiagnosticsArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
             }
-        })
+        }
     }
+    
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: GpuDiagnosticsArgs = serde_json::from_value(args.clone())
+            .unwrap_or(GpuDiagnosticsArgs { gpu_id: Some(0) });
+            
         #[cfg(target_os = "linux")]
         {
-            let gpu_id = args.get("gpu_id").and_then(|g| g.as_i64()).unwrap_or(0) as u32;
+            let gpu_id = typed_args.gpu_id.unwrap_or(0);
             
             let nvml = match nvml_wrapper::Nvml::init() {
                 Ok(n) => n,
@@ -96,10 +136,24 @@ impl AgentTool for GpuDiagnosticsTool {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = args;
+            let _ = typed_args;
             Ok("Error: The gpu_diagnostics tool maps exclusively to the Nvidia Hardware Management Library. Your current host is an Apple Silicon Mac without an Nvidia GPU.".to_string())
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TelemetryChartArgs {
+    /// Chart Title
+    pub title: String,
+    /// X-axis Label
+    pub x_label: String,
+    /// Y-axis Label
+    pub y_label: String,
+    /// Name of the line series
+    pub series_name: String,
+    /// An array of precise [X, Y] arrays (e.g. [[1, 5], [2, 10], [3, 20]]). CRITICAL: MUST BE RAW FLOATS. DO NOT use expressions like Math.sin()
+    pub data_points: Vec<Vec<f64>>,
 }
 
 pub struct TelemetryChartTool;
@@ -108,45 +162,39 @@ pub struct TelemetryChartTool;
 impl AgentTool for TelemetryChartTool {
     fn name(&self) -> &'static str { "generate_telemetry_chart" }
     fn description(&self) -> &'static str { "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes. CRITICAL: data_points MUST be raw numbers (e.g. 0.707), DO NOT put JavaScript math expressions like Math.sin() in the JSON." }
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "title": { "type": "string", "description": "Chart Title" },
-                "x_label": { "type": "string", "description": "X-axis Label" },
-                "y_label": { "type": "string", "description": "Y-axis Label" },
-                "series_name": { "type": "string", "description": "Name of the line series" },
-                "data_points": {
-                    "type": "array",
-                    "description": "An array of precise [X, Y] arrays (e.g. [[1, 5], [2, 10], [3, 20]]). CRITICAL: MUST BE RAW FLOATS. DO NOT use expressions like Math.sin()",
-                    "items": {
-                        "type": "array",
-                        "items": { "type": "number" }
-                    }
-                }
-            },
-            "required": ["title", "x_label", "y_label", "series_name", "data_points"]
-        })
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<TelemetryChartArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
     }
+    
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let title = args.get("title").and_then(|t| t.as_str()).unwrap_or("Telemetry Chart");
-        let x_label = args.get("x_label").and_then(|x| x.as_str()).unwrap_or("X");
-        let y_label = args.get("y_label").and_then(|y| y.as_str()).unwrap_or("Y");
-        let series_name = args.get("series_name").and_then(|s| s.as_str()).unwrap_or("Data");
+        let typed_args: TelemetryChartArgs = serde_json::from_value(args.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid parameters for chart tool: {}", e))?;
+            
+        let title = typed_args.title.as_str();
+        let x_label = typed_args.x_label.as_str();
+        let y_label = typed_args.y_label.as_str();
+        let series_name = typed_args.series_name.as_str();
         
         // Parse data points
-        let data_arr = args.get("data_points")
-            .and_then(|a| a.as_array())
-            .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'data_points' array"))?;
+        let data_arr = typed_args.data_points;
             
         let mut points: Vec<(f64, f64)> = Vec::new();
         for p in data_arr {
-            if let Some(arr) = p.as_array() {
-                if arr.len() == 2 {
-                    let x = arr[0].as_f64().unwrap_or(0.0);
-                    let y = arr[1].as_f64().unwrap_or(0.0);
-                    points.push((x, y));
-                }
+            if p.len() == 2 {
+                points.push((p[0], p[1]));
             }
         }
 
