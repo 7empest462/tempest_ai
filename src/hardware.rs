@@ -4,6 +4,8 @@ use crate::tools::{AgentTool, ToolContext};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+#[cfg(target_os = "linux")]
+use procfs::WithCurrentSystemInfo;
 
 #[derive(Deserialize, JsonSchema)]
 #[allow(dead_code)]
