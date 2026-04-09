@@ -99,6 +99,7 @@ impl AgentTool for SystemTelemetryTool {
             report.push_str("\n- Full Sensor List:\n");
         let sensor_list: &Components = &components;
         for component in sensor_list {
+            #[allow(unused_mut)]
             let mut label = component.label().to_string();
             let raw_label = label.clone();
             
