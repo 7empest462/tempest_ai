@@ -18,7 +18,7 @@ pub struct ToolContext {
     #[allow(dead_code)] pub telemetry: Arc<Mutex<String>>,
     pub tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>,
     pub tool_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>>>,
-    #[allow(dead_code)] pub recent_tool_calls: Arc<Mutex<std::collections::VecDeque<String>>>,
+    #[allow(dead_code)] pub recent_tool_calls: Arc<dashmap::DashMap<String, String>>,
     #[allow(dead_code)] pub brain_path: std::path::PathBuf,
     pub is_root: bool,
 }

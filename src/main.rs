@@ -118,23 +118,27 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     AppConfig::default()
 }
 
+use std::net::SocketAddr;
+use metrics_exporter_prometheus::PrometheusBuilder;
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize Prometheus metrics exporter on port 7777
+    let addr: SocketAddr = "0.0.0.0:7777".parse().expect("Invalid metrics address");
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .install()
+        .expect("failed to install Prometheus recorder");
+
     // Install error handlers
     color_eyre::install().map_err(|e| miette::miette!("Failed to install color-eyre: {}", e))?;
 
-    // Initialize metrics exporter for prometheus
-    metrics_exporter_prometheus::PrometheusBuilder::new()
-        .with_http_listener(([127, 0, 0, 1], 9090))
-        .install()
-        .into_diagnostic()?;
+    let cli = Cli::parse();
 
     // Initialize tracing for performance monitoring
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-
-    let cli = Cli::parse();
 
     if cli.install_daemon {
         crate::daemon::install_daemon();

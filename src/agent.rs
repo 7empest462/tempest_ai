@@ -34,7 +34,7 @@ pub struct Agent {
     tools: Arc<DashMap<String, Arc<dyn crate::tools::AgentTool>>>,
     tool_registry: Vec<ollama_rs::generation::tools::ToolInfo>,
     system_prompt: String,
-    recent_tool_calls: Arc<Mutex<std::collections::VecDeque<String>>>,
+    recent_tool_calls: Arc<DashMap<String, String>>,
     history_path: String,
     brain_path: std::path::PathBuf,
     pub planning_mode: Arc<Mutex<bool>>,
@@ -128,7 +128,7 @@ impl Agent {
             tools: tools_map,
             tool_registry,
             system_prompt,
-            recent_tool_calls: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            recent_tool_calls: Arc::new(DashMap::new()),
             history_path,
             brain_path,
             planning_mode: Arc::new(Mutex::new(true)),
@@ -369,19 +369,31 @@ impl Agent {
     }
 
     async fn process_single_tool_call(&self, tool_req: Value) -> (String, String, bool) {
-        let tool_name = tool_req.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let tool_name = tool_req.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
         let args = tool_req.get("arguments").unwrap_or(&Value::Null);
 
-        if let Some(tool) = self.tools.get(tool_name).map(|r| r.value().clone()) {
+        if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
             if *self.planning_mode.lock() && tool.is_modifying() {
                  return (tool_name.to_string(), "Blocked: PLANNING MODE ACTIVE".to_string(), false);
             }
+            let start = std::time::Instant::now();
+            metrics::gauge!("tool.semaphore_available_permits").set(self.concurrency_semaphore.available_permits() as f64);
+            
             let _permit = self.concurrency_semaphore.acquire().await.ok();
             let context = self.get_tool_context();
-            match tool.execute(args, context).await {
+            
+            let result = match tool.execute(args, context).await {
                 Ok(res) => (tool_name.to_string(), res, true),
                 Err(e) => (tool_name.to_string(), format!("Error: {}", e), false),
-            }
+            };
+
+            let duration = start.elapsed();
+            metrics::histogram!("tool.execution_ms", "tool" => tool_name.clone()).record(duration.as_millis() as f64);
+            
+            // Update concurrent tracking
+            self.recent_tool_calls.insert(tool_name.to_string(), result.1.chars().take(100).collect());
+            
+            result
         } else {
             (tool_name.to_string(), format!("Tool '{}' not found", tool_name), false)
         }
