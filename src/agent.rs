@@ -12,6 +12,7 @@ use futures::StreamExt;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
 use std::sync::Arc;
+use std::io::Write;
 use parking_lot::Mutex;
 use dashmap::DashMap;
 use miette::IntoDiagnostic;
@@ -319,6 +320,12 @@ impl Agent {
                     first_token = false;
                 }
                 full_content.push_str(&text);
+
+                if self.event_tx.lock().is_none() {
+                    print!("{}", text);
+                    let _ = std::io::stdout().flush();
+                }
+
                 let tx_opt = self.event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
                     let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
