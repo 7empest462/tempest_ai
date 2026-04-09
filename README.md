@@ -142,8 +142,8 @@ git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo
 ## ⚙️ Configuration
 Tempest looks for its config at `~/.config/tempest_ai/config.toml`.
 ```toml
-model = "qwen2.5-coder:7b"
-sub_agent_model = "phi3:latest"
+model = "ministral-3:8b"
+sub_agent_model = "qwen3.5:2b"
 history_path = "~/.tempest_history"
 encrypt_history = true
 ```
