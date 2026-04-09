@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Command;
@@ -35,8 +35,7 @@ impl AgentTool for NetworkCheckTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<NetworkCheckArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<NetworkCheckArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -49,13 +48,13 @@ impl AgentTool for NetworkCheckTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: NetworkCheckArgs = serde_json::from_value(args.clone())?;
+        let typed_args: NetworkCheckArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
 
         match typed_args.action {
             NetworkAction::Ping => {
                 let output = Command::new("ping")
                     .args(["-c", "4", "-W", "3", &typed_args.host])
-                    .output()?;
+                    .output().into_diagnostic()?;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 if output.status.success() {
@@ -67,7 +66,7 @@ impl AgentTool for NetworkCheckTool {
             NetworkAction::Dns => {
                 let output = Command::new("dig")
                     .args(["+short", "+time=3", "+tries=1", &typed_args.host])
-                    .output()?;
+                    .output().into_diagnostic()?;
                 let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if result.is_empty() {
                     Ok(format!("❌ DNS lookup failed for '{}'", typed_args.host))
@@ -76,7 +75,7 @@ impl AgentTool for NetworkCheckTool {
                 }
             },
             NetworkAction::Port => {
-                let port = typed_args.port.ok_or_else(|| anyhow::anyhow!("Missing 'port' for port check"))?;
+                let port = typed_args.port.ok_or_else(|| miette!("Missing 'port' for port check"))?;
                 let addr = format!("{}:{}", typed_args.host, port);
                 // Simple TCP connect attempt
                 match std::net::TcpStream::connect_timeout(

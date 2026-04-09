@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -8,6 +8,7 @@ use super::{AgentTool, ToolContext};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use crate::error::ExecutionError;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct RunCommandArgs {
@@ -25,7 +26,6 @@ pub struct RunCommandTool;
 impl AgentTool for RunCommandTool {
     fn name(&self) -> &'static str { "run_command" }
     fn description(&self) -> &'static str { "Executes a shell command. Features safety timeout and output capture." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
@@ -44,18 +44,19 @@ impl AgentTool for RunCommandTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: RunCommandArgs = serde_json::from_value(args.clone())?;
+        let typed_args: RunCommandArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let cmd_str = typed_args.command;
         let cwd = typed_args.cwd.unwrap_or_else(|| ".".to_string());
         let timeout_secs = typed_args.timeout_seconds.unwrap_or(30);
 
         let child = Command::new("sh")
             .arg("-c")
-            .arg(cmd_str)
+            .arg(&cmd_str)
             .current_dir(shellexpand::tilde(&cwd).to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|e| ExecutionError::CommandFailed { command: cmd_str.clone(), message: e.to_string() })?;
 
         let res = timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
         
@@ -79,9 +80,9 @@ impl AgentTool for RunCommandTool {
                 }
                 Ok(full_output)
             }
-            Ok(Err(e)) => anyhow::bail!("Command error: {}", e),
+            Ok(Err(e)) => Err(ExecutionError::CommandFailed { command: cmd_str, message: e.to_string() }.into()),
             Err(_) => {
-                Ok(format!("Error: Command timed out after {}s.", timeout_secs))
+                Err(ExecutionError::Timeout { command: cmd_str }.into())
             }
         }
     }
@@ -116,7 +117,7 @@ impl AgentTool for RunTestsTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: RunTestsArgs = serde_json::from_value(args.clone())?;
+        let typed_args: RunTestsArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let filter = typed_args.filter.unwrap_or_else(String::new);
         
         let cmd = if std::path::Path::new("Cargo.toml").exists() {
@@ -126,7 +127,7 @@ impl AgentTool for RunTestsTool {
         } else if std::path::Path::new("pytest.ini").exists() || std::path::Path::new("tests").exists() {
             format!("pytest {}", filter)
         } else {
-            anyhow::bail!("No supported test suite detected.");
+            return Err(miette!("No supported test suite detected."));
         };
 
         let exec_args = json!({ "command": cmd, "timeout_seconds": 300 });
@@ -160,7 +161,6 @@ impl AgentTool for BuildProjectTool {
     }
 
     async fn execute(&self, _args: &Value, context: ToolContext) -> Result<String> {
-        let _typed_args: BuildProjectArgs = serde_json::from_value(_args.clone()).unwrap_or(BuildProjectArgs {});
         let cmd = if std::path::Path::new("Cargo.toml").exists() {
             "cargo build"
         } else if std::path::Path::new("package.json").exists() {
@@ -168,7 +168,7 @@ impl AgentTool for BuildProjectTool {
         } else if std::path::Path::new("Makefile").exists() {
             "make"
         } else {
-            anyhow::bail!("No supported build system detected.");
+            return Err(miette!("No supported build system detected."));
         };
 
         let exec_args = json!({ "command": cmd, "timeout_seconds": 600 });

@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use crate::tools::execution::RunCommandTool;
@@ -19,8 +19,7 @@ impl AgentTool for GitStatusTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<GitStatusArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<GitStatusArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -33,7 +32,6 @@ impl AgentTool for GitStatusTool {
     }
 
     async fn execute(&self, _args: &Value, context: ToolContext) -> Result<String> {
-        let _typed_args: GitStatusArgs = serde_json::from_value(_args.clone()).unwrap_or(GitStatusArgs {});
         let exec_args = json!({ "command": "git status -s" });
         let out = RunCommandTool.execute(&exec_args, context).await?;
         if out.contains("clean") || out.trim().is_empty() {
@@ -59,8 +57,7 @@ impl AgentTool for GitDiffTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<GitDiffArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<GitDiffArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -73,7 +70,7 @@ impl AgentTool for GitDiffTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: GitDiffArgs = serde_json::from_value(args.clone())?;
+        let typed_args: GitDiffArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = typed_args.path.unwrap_or_else(String::new);
         let cmd = format!("git diff {}", path);
         let exec_args = json!({ "command": cmd });
@@ -93,13 +90,11 @@ pub struct GitCommitTool;
 impl AgentTool for GitCommitTool {
     fn name(&self) -> &'static str { "git_commit" }
     fn description(&self) -> &'static str { "Stages and commits changes with a given message." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<GitCommitArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<GitCommitArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -112,7 +107,7 @@ impl AgentTool for GitCommitTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: GitCommitArgs = serde_json::from_value(args.clone())?;
+        let typed_args: GitCommitArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let message = typed_args.message;
         
         let add_args = json!({ "command": "git add ." });
@@ -122,6 +117,7 @@ impl AgentTool for GitCommitTool {
         RunCommandTool.execute(&commit_args, context).await
     }
 }
+
 #[derive(Deserialize, JsonSchema)]
 pub struct GitActionArgs {
     /// Array of string arguments for git.
@@ -138,8 +134,7 @@ impl AgentTool for GitActionTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<GitActionArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<GitActionArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -152,12 +147,12 @@ impl AgentTool for GitActionTool {
     }
 
     async fn execute(&self, json_args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: GitActionArgs = serde_json::from_value(json_args.clone())?;
+        let typed_args: GitActionArgs = serde_json::from_value(json_args.clone()).into_diagnostic()?;
         let string_args = typed_args.args;
 
         let output = std::process::Command::new("git")
             .args(&string_args)
-            .output()?;
+            .output().into_diagnostic()?;
 
         let mut result = String::from_utf8_lossy(&output.stdout).to_string();
         let err_result = String::from_utf8_lossy(&output.stderr).to_string();
@@ -168,7 +163,7 @@ impl AgentTool for GitActionTool {
         }
 
         if !output.status.success() {
-            anyhow::bail!("Git command failed with status {}:\n{}", output.status, result);
+            return Err(miette!("Git command failed with status {}:\n{}", output.status, result));
         }
 
         Ok(result)

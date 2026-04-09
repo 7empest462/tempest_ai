@@ -1,6 +1,7 @@
 use serde_json::Value;
-use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use miette::Result;
+use std::sync::Arc;
+use parking_lot::Mutex;
 use ollama_rs::Ollama;
 use ollama_rs::generation::chat::ChatMessage;
 
@@ -35,7 +36,6 @@ pub trait AgentTool: Send + Sync {
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String>;
     
-    fn requires_confirmation(&self) -> bool { false }
     fn is_modifying(&self) -> bool { false }
 }
 
@@ -57,3 +57,4 @@ pub mod atlas;
 pub mod telemetry;
 pub mod network_manager;
 pub mod service_manager;
+pub mod developer;

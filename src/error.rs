@@ -1,24 +1,33 @@
-#![allow(dead_code)]
-
 use thiserror::Error;
+use miette::Diagnostic;
 
-#[derive(Error, Debug)]
-pub enum TempestError {
-    #[error("Failed to connect to Ollama: {0}")]
-    OllamaConnection(String),
+#[derive(Error, Diagnostic, Debug)]
+pub enum FileError {
+    #[error("File not found: {0}")]
+    #[diagnostic(code(tempest::file::not_found), help("Check if the path exists and is correctly typed."))]
+    NotFound(String),
 
-    #[error("Tool execution failed: {tool} — {message}")]
-    ToolExecution { tool: String, message: String },
+    #[error("Permission denied: {0}")]
+    #[diagnostic(code(tempest::file::permission_denied), help("Run with sudo or check file ownership."))]
+    PermissionDenied(String),
 
-    #[error("Configuration parse error: {0}")]
-    ConfigParse(String),
+    #[error("File too large: {path} ({size} bytes, max {max} bytes)")]
+    #[diagnostic(code(tempest::file::too_large))]
+    TooLarge { path: String, size: u64, max: u64 },
 
-    #[error("History file corrupted or unreadable: {0}")]
-    HistoryCorrupted(String),
-
-    #[error("Encryption error: {0}")]
-    Encryption(String),
-
-    #[error("Session error: {0}")]
-    Session(String),
+    #[error("IO error: {path} - {source}")]
+    #[diagnostic(code(tempest::file::io))]
+    Io { path: String, #[source] source: std::io::Error },
 }
+
+#[derive(Error, Diagnostic, Debug)]
+pub enum ExecutionError {
+    #[error("Command execution failed: {command} - {message}")]
+    #[diagnostic(code(tempest::exec::command_failed))]
+    CommandFailed { command: String, message: String },
+
+    #[error("Timeout exceeded: {command}")]
+    #[diagnostic(code(tempest::exec::timeout))]
+    Timeout { command: String },
+}
+

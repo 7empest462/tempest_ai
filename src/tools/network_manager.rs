@@ -1,5 +1,5 @@
 use serde_json::Value;
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use schemars::JsonSchema;
@@ -28,8 +28,7 @@ impl AgentTool for ListSocketsTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ListSocketsArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<ListSocketsArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -42,7 +41,7 @@ impl AgentTool for ListSocketsTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: ListSocketsArgs = serde_json::from_value(args.clone())?;
+        let typed_args: ListSocketsArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         
         let mut sys = System::new_with_specifics(sysinfo::RefreshKind::everything());
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);

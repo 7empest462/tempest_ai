@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,7 +29,6 @@ pub struct RunBackgroundTool;
 impl AgentTool for RunBackgroundTool {
     fn name(&self) -> &'static str { "run_background" }
     fn description(&self) -> &'static str { "Spawns a long-running bash/zsh command in the background (like starting a web server). Returns a process_id immediately. Use read_process_logs to check its output." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
@@ -47,7 +46,7 @@ impl AgentTool for RunBackgroundTool {
         }
     }
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: RunBackgroundArgs = serde_json::from_value(args.clone())?;
+        let typed_args: RunBackgroundArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let cmd = &typed_args.command;
 
         let current_path = std::env::var("PATH").unwrap_or_default();
@@ -59,15 +58,15 @@ impl AgentTool for RunBackgroundTool {
             .arg(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn().into_diagnostic()?;
 
         let process_id = child.id().to_string();
         
         // Setup shared log buffer
         let logs = Arc::new(Mutex::new(String::new()));
         
-        let stdout = child.stdout.take().expect("Failed to open stdout");
-        let stderr = child.stderr.take().expect("Failed to open stderr");
+        let stdout = child.stdout.take().ok_or_else(|| miette!("Failed to open stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| miette!("Failed to open stderr"))?;
         
         let logs_clone1 = Arc::clone(&logs);
         std::thread::spawn(move || {
@@ -93,7 +92,7 @@ impl AgentTool for RunBackgroundTool {
             }
         });
 
-        process_registry().lock().unwrap().insert(process_id.clone(), logs);
+        process_registry().lock().map_err(|_| miette!("Registry Poisoned"))?.insert(process_id.clone(), logs);
 
         Ok(format!("Background process spawned successfully with ID: {}", process_id))
     }
@@ -128,12 +127,12 @@ impl AgentTool for ReadProcessLogsTool {
     }
     
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: ReadProcessLogsArgs = serde_json::from_value(args.clone())?;
+        let typed_args: ReadProcessLogsArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let pid = &typed_args.process_id;
 
-        let registry = process_registry().lock().unwrap();
+        let registry = process_registry().lock().map_err(|_| miette!("Registry Poisoned"))?;
         if let Some(logs) = registry.get(pid) {
-            let log_text = logs.lock().unwrap().clone();
+            let log_text = logs.lock().map_err(|_| miette!("Logs Poisoned"))?.clone();
             if log_text.is_empty() {
                 Ok("Process has produced no output yet.".to_string())
             } else {
@@ -165,7 +164,6 @@ pub struct KillProcessTool;
 impl AgentTool for KillProcessTool {
     fn name(&self) -> &'static str { "kill_process" }
     fn description(&self) -> &'static str { "Kill a running background process by its process ID." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
@@ -184,18 +182,18 @@ impl AgentTool for KillProcessTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: KillProcessArgs = serde_json::from_value(args.clone())?;
+        let typed_args: KillProcessArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let pid = &typed_args.pid;
         let signal_owned = typed_args.signal.unwrap_or_else(|| "TERM".to_string());
         let signal = signal_owned.as_str();
 
         let output = std::process::Command::new("kill")
             .args([&format!("-{}", signal), pid])
-            .output()?;
+            .output().into_diagnostic()?;
         
         if output.status.success() {
             // Also cleanup registry if it was a background process we were tracking
-            process_registry().lock().unwrap().remove(pid);
+            process_registry().lock().map_err(|_| miette!("Registry Poisoned"))?.remove(pid);
             Ok(format!("✅ Sent {} signal to process {}", signal, pid))
         } else {
             let err = String::from_utf8_lossy(&output.stderr);
@@ -203,6 +201,7 @@ impl AgentTool for KillProcessTool {
         }
     }
 }
+
 #[derive(Deserialize, JsonSchema)]
 pub struct WatchDirectoryArgs {
     /// The directory path to recursively watch.
@@ -237,7 +236,7 @@ impl AgentTool for WatchDirectoryTool {
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         use notify::Watcher;
         
-        let typed_args: WatchDirectoryArgs = serde_json::from_value(args.clone())?;
+        let typed_args: WatchDirectoryArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let cmd = typed_args.trigger_command;
 

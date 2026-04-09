@@ -1,6 +1,6 @@
 use serde_json::Value;
 use colored::Colorize;
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use ollama_rs::generation::chat::{request::ChatMessageRequest, ChatMessage, MessageRole};
@@ -23,8 +23,7 @@ impl AgentTool for AskUserTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<AskUserArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<AskUserArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -37,7 +36,7 @@ impl AgentTool for AskUserTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: AskUserArgs = serde_json::from_value(args.clone())?;
+        let typed_args: AskUserArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let question = typed_args.question;
         
         // 🚀 TUI HANDOFF
@@ -45,7 +44,7 @@ impl AgentTool for AskUserTool {
             let mut rx_lock = context.tool_rx.lock().await;
             match rx_lock.recv().await {
                 Some(crate::tui::ToolResponse::Text(ans)) => return Ok(format!("User responded: {}", ans)),
-                _ => anyhow::bail!("User cancelled input."),
+                _ => return Err(miette!("User cancelled input.")),
             }
         }
 
@@ -64,7 +63,7 @@ impl AgentTool for AskUserTool {
                 Ok(format!("User responded: {}", ans))
             }
         } else {
-            anyhow::bail!("Failed to read input from terminal.")
+            Err(miette!("Failed to read input from terminal."))
         }
     }
 }
@@ -86,8 +85,7 @@ impl AgentTool for SpawnSubAgentTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<SpawnSubAgentArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<SpawnSubAgentArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -100,27 +98,25 @@ impl AgentTool for SpawnSubAgentTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: SpawnSubAgentArgs = serde_json::from_value(args.clone())?;
+        let typed_args: SpawnSubAgentArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let task = typed_args.task;
         let model = typed_args.model.unwrap_or_else(|| context.sub_agent_model.clone());
         
         let sub_history = vec![
-            ChatMessage::new(MessageRole::System, "You are a specialized Sub-Agent. Perform the task and provide a CONCISE summary.".to_string()),
+            ChatMessage::new(MessageRole::System, "You are a specialized Disciplined Sub-Agent. \
+                 Perform the focused mission described below. \
+                 1. NO HALLUCINATION: Be honest if you find no data. \
+                 2. NO PREAMBLE: Output your report directly without 'Sure' or 'Here is'. \
+                 3. CONCISE: Provide critical details first.".to_string()),
             ChatMessage::new(MessageRole::User, task.to_string()),
         ];
         
         let req = ChatMessageRequest::new(model, sub_history);
         match context.ollama.send_chat_messages(req).await {
             Ok(res) => Ok(format!("[SUB-AGENT REPORT]: {}", res.message.content)),
-            Err(e) => anyhow::bail!("Sub-agent error: {}", e),
+            Err(e) => Err(miette!("Sub-agent error: {}", e)),
         }
     }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct TogglePlanningArgs {
-    /// Explicitly set the mode. true for PLANNING, false for EXECUTION. If omitted, toggles current state.
-    pub active: Option<bool>,
 }
 
 pub struct TogglePlanningTool;
@@ -132,8 +128,7 @@ impl AgentTool for TogglePlanningTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<TogglePlanningArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<TogglePlanningArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -147,7 +142,7 @@ impl AgentTool for TogglePlanningTool {
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: TogglePlanningArgs = serde_json::from_value(args.clone()).unwrap_or(TogglePlanningArgs { active: None });
-        let mut planning_lock = context.planning_mode.lock().unwrap();
+        let mut planning_lock = context.planning_mode.lock();
         
         if let Some(active) = typed_args.active {
             *planning_lock = active;
@@ -160,12 +155,6 @@ impl AgentTool for TogglePlanningTool {
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub struct UpdateTaskContextArgs {
-    /// The updated status or plan.
-    pub context: String,
-}
-
 pub struct UpdateTaskContextTool;
 
 #[async_trait]
@@ -175,8 +164,7 @@ impl AgentTool for UpdateTaskContextTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<UpdateTaskContextArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<UpdateTaskContextArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -189,95 +177,22 @@ impl AgentTool for UpdateTaskContextTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: UpdateTaskContextArgs = serde_json::from_value(args.clone())?;
+        let typed_args: UpdateTaskContextArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let new_ctx = typed_args.context;
-        let mut ctx_lock = context.task_context.lock().unwrap();
+        let mut ctx_lock = context.task_context.lock();
         *ctx_lock = new_ctx.to_string();
         Ok("Task context successfully updated.".to_string())
     }
 }
+
 #[derive(Deserialize, JsonSchema)]
-#[allow(dead_code)]
-pub struct ExtractAndWriteArgs {
-    /// The path to the file to create or overwrite.
-    pub path: String,
+pub struct TogglePlanningArgs {
+    /// Explicitly set the mode. true for PLANNING, false for EXECUTION. If omitted, toggles current state.
+    pub active: Option<bool>,
 }
 
-#[allow(dead_code)]
-pub struct ExtractAndWriteTool;
-
-#[async_trait]
-impl AgentTool for ExtractAndWriteTool {
-    fn name(&self) -> &'static str { "extract_and_write" }
-    fn description(&self) -> &'static str { "Extracts the latest markdown code block from your thought process and writes it to a file. MUST wrap your code in triple backticks BEFORE calling this tool." }
-    fn is_modifying(&self) -> bool { true }
-
-    fn tool_info(&self) -> ToolInfo {
-        let mut settings = schemars::generate::SchemaSettings::draft07();
-        settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ExtractAndWriteArgs>();
-        
-        ToolInfo {
-            tool_type: ToolType::Function,
-            function: ToolFunctionInfo {
-                name: self.name().to_string(),
-                description: self.description().to_string(),
-                parameters: payload.into(),
-            }
-        }
-    }
-
-    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: ExtractAndWriteArgs = serde_json::from_value(args.clone())?;
-        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
-
-        let history = context.history.lock().unwrap();
-        let last_assistant_msg = history.iter().rev()
-            .find(|m| m.role == MessageRole::Assistant)
-            .ok_or_else(|| anyhow::anyhow!("No assistant message found in history."))?;
-
-        let content = &last_assistant_msg.content;
-        let blocks: Vec<&str> = content.split("```").collect();
-        
-        // Code blocks are at odd indices
-        let mut code_block = "";
-        for i in (1..blocks.len()).step_by(2).rev() {
-            let b = blocks[i].trim();
-            // Skip the tool call block itself (which is JSON)
-            if !b.to_lowercase().starts_with("json") {
-                code_block = blocks[i];
-                break;
-            }
-        }
-
-        if code_block.is_empty() {
-             // Fallback: take the last block if we didn't find a non-json one
-             if blocks.len() >= 2 {
-                 code_block = blocks[blocks.len() - 2];
-             } else {
-                 anyhow::bail!("No markdown code block found in your previous response.");
-             }
-        }
-
-        // Clean up the language tag if present
-        let clean_code = if let Some(first_newline) = code_block.find('\n') {
-            let first_line = &code_block[0..first_newline];
-            if !first_line.contains(' ') && !first_line.is_empty() {
-                &code_block[first_newline + 1..]
-            } else {
-                code_block
-            }
-        } else {
-            code_block
-        };
-
-        let path = std::path::Path::new(&path_owned);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, clean_code)?;
-
-        Ok(format!("Successfully extracted and wrote {} bytes to {}", clean_code.len(), path_owned))
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateTaskContextArgs {
+    /// The updated status or plan.
+    pub context: String,
 }

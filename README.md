@@ -23,6 +23,48 @@ Tempest is the first local agent that is truly "Sentient" of its host. It inject
 - **Load-Adaptive**: The agent can autonomously slow down or pivot tasks if it detects system memory is critically low or thermals are spiking.
 - **Cross-Platform**: Full telemetry support for macOS (Apple Silicon) and Linux (sysfs/hwmon).
 
+### 🔍 4. Granular Error Handling
+Tempest features detailed, categorized error types for improved debugging and reliability.
+- **Tool-Specific Errors**: File operations, Git commands, network requests, and execution failures each have dedicated error variants with contextual information.
+- **Better Diagnostics**: Errors include specific details like file paths, command strings, and error codes, making troubleshooting faster.
+- **Robust Recovery**: Structured error handling prevents generic "something went wrong" messages, allowing the agent to provide precise guidance for fixes.
+
+### ⚡ 5. Performance Optimization & Profiling
+Tempest includes built-in performance monitoring and profiling capabilities for low-latency operation.
+- **Execution Timing**: All tool executions are timed and logged, helping identify performance bottlenecks.
+- **Concurrency Control**: Semaphore-based limiting prevents resource exhaustion under load.
+- **Tracing Integration**: Full tracing support for detailed performance analysis.
+- **Benchmarking**: Criterion-based benchmarks for tool performance testing.
+
+#### Profiling Commands
+```bash
+# Run benchmarks
+cargo bench
+
+# Profile with flamegraph
+cargo flamegraph --bench tool_performance
+
+# Runtime introspection with tokio-console
+RUSTFLAGS="--cfg tokio_unstable" cargo run --features tokio-console
+
+# Then connect with: tokio-console
+```
+
+---
+
+## ⚡ The High-Fidelity TUI Experience
+
+Tempest AI features a professional, industrial Terminal User Interface designed for high-stakes engineering. This "Principal Engineer" dashboard provides real-time situational awareness and fluid interaction.
+
+![Tempest AI High-Fidelity TUI Interface](docs/tui_hero.png)
+
+### 🛠️ Visual Dashboard Features:
+- **Industrial Branding**: Centered high-fidelity ASCII logo with 🌪️ AI Core accents.
+- **Real-Time Telemetry**: Live tracking of **CPU, RAM, GPU, and Thermals** directly in the sidebar.
+- **Synchronized Reasoning**: Dynamic ASCII spinners that activate when the agent is in a "Thinking" state.
+- **Fluid Token Streaming**: Messages stream into the chat area token-by-token for a responsive, high-speed experience.
+- **Mathematical Isolation**: Multi-line system stats are precisely formatted to prevent layout overlap.
+
 ---
 
 ## 🛠️ The Tempest Toolbox (50+ Native Tools)

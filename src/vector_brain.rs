@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VectorEntry {
@@ -67,19 +67,20 @@ impl VectorBrain {
     #[allow(dead_code)]
     pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).into_diagnostic()?;
         }
-        let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
+        let json = serde_json::to_string_pretty(self).into_diagnostic()?;
+        fs::write(path, json).into_diagnostic()?;
         Ok(())
     }
 
     pub fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self> {
-        if !path.as_ref().exists() {
+        let path_ref = path.as_ref();
+        if !path_ref.exists() {
             return Ok(Self::new());
         }
-        let json = fs::read_to_string(path)?;
-        let brain: VectorBrain = serde_json::from_str(&json)?;
+        let json = fs::read_to_string(path_ref).into_diagnostic()?;
+        let brain: VectorBrain = serde_json::from_str(&json).into_diagnostic()?;
         Ok(brain)
     }
 }

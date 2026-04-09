@@ -50,8 +50,26 @@ include_dir = "0.7"
 walkdir = "2.5"
 similar = "2.6"
 schemars = "1.2.1"
+miette = { version = "7.5", features = ["fancy"] }
+color-eyre = "0.6"
+parking_lot = "0.12"
+dashmap = "6.1"
+tracing-opentelemetry = "0.28"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 [build-dependencies]
 chrono = "0.4"
+[dev-dependencies]
+tokio-console = "0.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+tempfile = "3.0"
+[profile.release]
+debug = true
+[profile.bench]
+debug = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nvml-wrapper = "0.12.0"

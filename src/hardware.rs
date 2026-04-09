@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, miette};
 use serde_json::Value;
 use crate::tools::{AgentTool, ToolContext};
 use schemars::JsonSchema;
@@ -25,8 +25,7 @@ impl AgentTool for LinuxProcessAnalyzerTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<LinuxProcessAnalyzerArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<LinuxProcessAnalyzerArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -40,17 +39,16 @@ impl AgentTool for LinuxProcessAnalyzerTool {
     
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: LinuxProcessAnalyzerArgs = serde_json::from_value(args.clone())
-            .map_err(|e| anyhow::anyhow!("Invalid arguments for linux_process_analyzer: {}", e))?;
+            .map_err(|e| miette!("Invalid arguments for linux_process_analyzer: {}", e))?;
         
         #[cfg(target_os = "linux")]
         {
-            use procfs::WithCurrentSystemInfo;
             let pid = typed_args.pid;
-            let process = procfs::process::Process::new(pid)?;
+            let process = procfs::process::Process::new(pid).into_diagnostic()?;
             
-            let stat = process.stat()?;
-            let io = process.io()?;
-            let cmdline = process.cmdline()?.join(" ");
+            let stat = process.stat().into_diagnostic()?;
+            let io = process.io().into_diagnostic()?;
+            let cmdline = process.cmdline().into_diagnostic()?.join(" ");
 
             let mut out = format!("Process [{}] - {}\n", pid, cmdline);
             out.push_str(&format!("State: {:?}\n", stat.state));
@@ -86,8 +84,7 @@ impl AgentTool for GpuDiagnosticsTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<GpuDiagnosticsArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<GpuDiagnosticsArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -165,13 +162,12 @@ pub struct TelemetryChartTool;
 #[async_trait::async_trait]
 impl AgentTool for TelemetryChartTool {
     fn name(&self) -> &'static str { "generate_telemetry_chart" }
-    fn description(&self) -> &'static str { "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes. CRITICAL: data_points MUST be raw numbers (e.g. 0.707), DO NOT put JavaScript math expressions like Math.sin() in the JSON." }
+    fn description(&self) -> &'static str { "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes." }
     
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<TelemetryChartArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<TelemetryChartArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -185,18 +181,15 @@ impl AgentTool for TelemetryChartTool {
     
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: TelemetryChartArgs = serde_json::from_value(args.clone())
-            .map_err(|e| anyhow::anyhow!("Invalid parameters for chart tool: {}", e))?;
+            .map_err(|e| miette!("Invalid parameters for chart tool: {}", e))?;
             
         let title = typed_args.title.as_str();
         let x_label = typed_args.x_label.as_str();
         let y_label = typed_args.y_label.as_str();
         let series_name = typed_args.series_name.as_str();
         
-        // Parse data points
-        let data_arr = typed_args.data_points;
-            
         let mut points: Vec<(f64, f64)> = Vec::new();
-        for p in data_arr {
+        for p in typed_args.data_points {
             if p.len() == 2 {
                 points.push((p[0], p[1]));
             }
@@ -206,7 +199,6 @@ impl AgentTool for TelemetryChartTool {
             return Ok("Error: No valid data points provided.".to_string());
         }
 
-        // Find min/max for chart auto-scaling
         let mut min_x = f64::MAX;
         let mut max_x = f64::MIN;
         let mut min_y = f64::MAX;
@@ -219,7 +211,6 @@ impl AgentTool for TelemetryChartTool {
             if *y > max_y { max_y = *y; }
         }
         
-        // Add minimal padding
         let x_padding = (max_x - min_x) * 0.05;
         let y_padding = (max_y - min_y) * 0.05;
 
@@ -228,16 +219,14 @@ impl AgentTool for TelemetryChartTool {
         min_y -= y_padding;
         max_y += y_padding;
         
-        // Ensure bounds aren't invalid if min == max
         if min_x == max_x { max_x += 1.0; min_x -= 1.0; }
         if min_y == max_y { max_y += 1.0; min_y -= 1.0; }
 
         let path = format!("/tmp/tempest_chart_{}.png", format!("{}", chrono::Local::now().format("%H%M%S")));
         
-        // Actually draw using Plotters
         use plotters::prelude::*;
         let root = BitMapBackend::new(&path, (800, 600)).into_drawing_area();
-        root.fill(&WHITE).map_err(|e| anyhow::anyhow!("Plotters Error: {}", e))?;
+        root.fill(&WHITE).map_err(|e| miette!("Plotters Error: {}", e))?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(title, ("sans-serif", 30).into_font())
@@ -245,16 +234,16 @@ impl AgentTool for TelemetryChartTool {
             .x_label_area_size(40)
             .y_label_area_size(50)
             .build_cartesian_2d(min_x..max_x, min_y..max_y)
-            .map_err(|e| anyhow::anyhow!("Plotters Error: {}", e))?;
+            .map_err(|e| miette!("Plotters Error: {}", e))?;
 
         chart.configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
             .draw()
-            .map_err(|e| anyhow::anyhow!("Plotters Error: {}", e))?;
+            .map_err(|e| miette!("Plotters Error: {}", e))?;
 
         chart.draw_series(LineSeries::new(points, &RED))
-            .map_err(|e| anyhow::anyhow!("Plotters Error: {}", e))?
+            .map_err(|e| miette!("Plotters Error: {}", e))?
             .label(series_name)
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
 
@@ -262,19 +251,16 @@ impl AgentTool for TelemetryChartTool {
             .background_style(&WHITE.mix(0.8))
             .border_style(&BLACK)
             .draw()
-            .map_err(|e| anyhow::anyhow!("Plotters Error: {}", e))?;
+            .map_err(|e| miette!("Plotters Error: {}", e))?;
 
-        root.present().map_err(|e| anyhow::anyhow!("Plotters Error: {}", e))?;
+        root.present().map_err(|e| miette!("Plotters Error: {}", e))?;
 
         Ok(format!("Successfully generated analytical chart! Saved natively to: {}", path))
     }
 }
 
-/// 📊 Linux GPU Usage Probe
-/// Tries to find GPU usage % across different vendors (Intel, AMD, Nvidia)
 #[cfg(target_os = "linux")]
 pub fn get_linux_gpu_usage() -> i32 {
-    // 1. Try NVIDIA via NVML if available
     if let Ok(nvml) = nvml_wrapper::Nvml::init() {
         if let Ok(device) = nvml.device_by_index(0) {
             if let Ok(util) = device.utilization_rates() {
@@ -283,7 +269,6 @@ pub fn get_linux_gpu_usage() -> i32 {
         }
     }
 
-    // 2. Iterate through potential DRM cards (Intel, AMD)
     for card in 0..3 {
         let card_paths = [
             format!("/sys/class/drm/card{}/device", card),
@@ -291,15 +276,12 @@ pub fn get_linux_gpu_usage() -> i32 {
         ];
 
         for base in card_paths {
-            // A. Try direct usage counters (AMD, some newer Intel)
             if let Ok(content) = std::fs::read_to_string(format!("{}/gpu_busy_percent", base)) {
                 if let Ok(val) = content.trim().parse::<i32>() {
                     return val;
                 }
             }
 
-            // B. Intel Frequency-based Proxy
-            // If we can't get usage%, the ratio of current frequency vs max frequency is an excellent proxy for load.
             let cur_f = std::fs::read_to_string(format!("{}/gt_cur_freq_mhz", base));
             let max_f = std::fs::read_to_string(format!("{}/gt_max_freq_mhz", base));
             let min_f = std::fs::read_to_string(format!("{}/gt_min_freq_mhz", base));
@@ -317,13 +299,11 @@ pub fn get_linux_gpu_usage() -> i32 {
         }
     }
 
-    // 3. Last resort: status-based indicator
     if let Ok(status) = std::fs::read_to_string("/sys/class/drm/card0/device/power/runtime_status") {
         if status.trim() == "active" {
             return 5; 
         }
     }
-
     0
 }
 

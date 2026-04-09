@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic};
 use async_trait::async_trait;
 use serde_json::Value;
 use super::{AgentTool, ToolContext};
@@ -18,8 +18,7 @@ impl AgentTool for ListSkillsTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ListSkillsArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<ListSkillsArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -30,8 +29,8 @@ impl AgentTool for ListSkillsTool {
             }
         }
     }
+
     async fn execute(&self, _args: &Value, _context: ToolContext) -> Result<String> {
-        let _typed_args: ListSkillsArgs = serde_json::from_value(_args.clone()).unwrap_or(ListSkillsArgs {});
         let skills = crate::skills::load_skills();
         if skills.is_empty() {
             Ok("No skills found in ~/.tempest/skills/. Create a .md file with YAML frontmatter (name, description) and markdown instructions to add a skill.".to_string())
@@ -46,12 +45,6 @@ impl AgentTool for ListSkillsTool {
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub struct SkillRecallArgs {
-    /// The name of the skill to recall (as listed by list_skills).
-    pub name: String,
-}
-
 pub struct SkillRecallTool;
 
 #[async_trait]
@@ -61,8 +54,7 @@ impl AgentTool for SkillRecallTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<SkillRecallArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<SkillRecallArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -73,8 +65,9 @@ impl AgentTool for SkillRecallTool {
             }
         }
     }
+
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: SkillRecallArgs = serde_json::from_value(args.clone())?;
+        let typed_args: SkillRecallArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let name = typed_args.name;
         let skills = crate::skills::load_skills();
         if let Some(skill) = skills.iter().find(|s| s.name == name) {
@@ -83,14 +76,6 @@ impl AgentTool for SkillRecallTool {
             Ok(format!("No skill found with name '{}'. Use `list_skills` to see available skills.", name))
         }
     }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct DistillKnowledgeArgs {
-    /// A short slug identifying this knowledge (e.g., 'network_scanner', 'rust_procfs_fix').
-    pub topic: String,
-    /// A 1-2 paragraph summary of what you did, key decisions, gotchas, and user preferences you observed.
-    pub summary: String,
 }
 
 pub struct DistillKnowledgeTool;
@@ -103,8 +88,7 @@ impl AgentTool for DistillKnowledgeTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<DistillKnowledgeArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<DistillKnowledgeArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -115,8 +99,9 @@ impl AgentTool for DistillKnowledgeTool {
             }
         }
     }
+
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: DistillKnowledgeArgs = serde_json::from_value(args.clone())?;
+        let typed_args: DistillKnowledgeArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let topic = &typed_args.topic;
         let summary = &typed_args.summary;
 
@@ -132,15 +117,9 @@ impl AgentTool for DistillKnowledgeTool {
             topic, timestamp, summary
         );
 
-        std::fs::write(&filepath, &content)?;
+        std::fs::write(&filepath, &content).into_diagnostic()?;
         Ok(format!("🧠 Knowledge distilled! Saved '{}' to {}. This will be available in future sessions.", topic, filepath.display()))
     }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RecallBrainArgs {
-    /// The keyword to search for in your brain knowledge items.
-    pub keyword: String,
 }
 
 pub struct RecallBrainTool;
@@ -152,8 +131,7 @@ impl AgentTool for RecallBrainTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<RecallBrainArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<RecallBrainArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -164,8 +142,9 @@ impl AgentTool for RecallBrainTool {
             }
         }
     }
+
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: RecallBrainArgs = serde_json::from_value(args.clone())?;
+        let typed_args: RecallBrainArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let keyword = &typed_args.keyword;
         let results = crate::skills::search_brain(keyword);
         if results.is_empty() {
@@ -178,4 +157,24 @@ impl AgentTool for RecallBrainTool {
             Ok(out)
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillRecallArgs {
+    /// The name of the skill to recall (as listed by list_skills).
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DistillKnowledgeArgs {
+    /// A short slug identifying this knowledge (e.g., 'network_scanner', 'rust_procfs_fix').
+    pub topic: String,
+    /// A 1-2 paragraph summary of what you did, key decisions, gotchas, and user preferences you observed.
+    pub summary: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RecallBrainArgs {
+    /// The keyword to search for in your brain knowledge items.
+    pub keyword: String,
 }

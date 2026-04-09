@@ -1,5 +1,5 @@
 use rusqlite::Connection;
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic};
 use std::path::PathBuf;
 use crate::crypto::{encrypt_history, decrypt_history};
 use std::fs;
@@ -13,7 +13,7 @@ impl MemoryStore {
     pub fn new(passphrase: String) -> Result<Self> {
         let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         path.push("tempest_ai");
-        fs::create_dir_all(&path)?;
+        fs::create_dir_all(&path).into_diagnostic()?;
         path.push("brain.db");
         
         #[cfg(unix)]
@@ -28,7 +28,7 @@ impl MemoryStore {
             }
         }
 
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open(&path).into_diagnostic()?;
         
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memories (
@@ -38,7 +38,7 @@ impl MemoryStore {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
             [],
-        )?;
+        ).into_diagnostic()?;
 
         // 🛡️ MIGRATION: Add tags if it doesn't exist for legacy databases
         if let Err(_) = conn.execute("SELECT tags FROM memories LIMIT 1", []) {
@@ -56,22 +56,22 @@ impl MemoryStore {
             "INSERT INTO memories (topic, data, tags, updated_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
              ON CONFLICT(topic) DO UPDATE SET data=excluded.data, tags=excluded.tags, updated_at=CURRENT_TIMESTAMP",
             rusqlite::params![topic, encrypted, tag_str],
-        )?;
+        ).into_diagnostic()?;
         Ok(())
     }
 
     pub fn recall(&self, keyword: &str) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT topic, data FROM memories WHERE topic LIKE ?1 OR tags LIKE ?1 ORDER BY updated_at DESC")?;
+        let mut stmt = self.conn.prepare("SELECT topic, data FROM memories WHERE topic LIKE ?1 OR tags LIKE ?1 ORDER BY updated_at DESC").into_diagnostic()?;
         let search = format!("%{}%", keyword);
         let rows = stmt.query_map(rusqlite::params![search], |row| {
             let topic: String = row.get(0)?;
             let data: Vec<u8> = row.get(1)?;
             Ok((topic, data))
-        })?;
+        }).into_diagnostic()?;
 
         let mut results = Vec::new();
         for r in rows {
-            let (t, encrypted_data) = r?;
+            let (t, encrypted_data) = r.into_diagnostic()?;
             if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase) {
                 if let Ok(content_str) = String::from_utf8(decrypted) {
                     results.push((t, content_str));

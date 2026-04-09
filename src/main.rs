@@ -11,9 +11,11 @@ mod vector_brain;
 mod skills;
 
 use agent::Agent;
-use anyhow::Result;
 use clap::Parser;
 use colored::*;
+use miette::{Result, IntoDiagnostic};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Tempest AI — An autonomous AI pair-programmer and system assistant
 #[derive(Parser, Debug)]
@@ -66,20 +68,17 @@ impl Default for AppConfig {
     }
 }
 
-fn load_config(cli_config_path: Option<&str>) -> AppConfig {
-    // Priority: CLI --config > ~/.config/tempest_ai/config.toml > defaults
+fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     let mut paths_to_try: Vec<std::path::PathBuf> = vec![];
     
     if let Some(p) = cli_config_path {
         paths_to_try.push(std::path::PathBuf::from(p));
     }
     
-    // 🛡️ SUDO SUPPORT: If running as root via sudo, try to find the original user's config
     if let Ok(sudo_user) = std::env::var("SUDO_USER") {
         if !sudo_user.is_empty() && sudo_user != "root" {
             #[cfg(unix)]
             {
-                // Common paths for Linux (/home) and macOS (/Users)
                 let prefixes = ["/home", "/Users"];
                 for prefix in prefixes {
                     let p = std::path::PathBuf::from(prefix)
@@ -93,42 +92,48 @@ fn load_config(cli_config_path: Option<&str>) -> AppConfig {
         }
     }
 
-    // Check platform-standard config dir (~/Library/Application Support on macOS)
     if let Some(config_dir) = dirs::config_dir() {
         paths_to_try.push(config_dir.join("tempest_ai").join("config.toml"));
     }
-    // Also check ~/.config (XDG convention, common on macOS too)
     if let Some(home) = dirs::home_dir() {
         paths_to_try.push(home.join(".config").join("tempest_ai").join("config.toml"));
     }
 
     for path in &paths_to_try {
         if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    match toml::from_str::<AppConfig>(&content) {
-                        Ok(config) => {
-                            println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
-                            return config;
-                        }
-                        Err(e) => {
-                            println!("{} {} {}: {}", "⚠️".yellow(), "Failed to parse config at".bold(), path.display(), e);
-                        }
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(config) = toml::from_str::<AppConfig>(&content) {
+                    if !tui_mode {
+                        println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
                     }
-                }
-                Err(e) => {
-                    println!("{} {} {}: {}", "⚠️".yellow(), "Found config but could not read".bold(), path.display(), e);
+                    return config;
                 }
             }
         }
     }
 
-    println!("{} No valid config found. Using default settings.", "ℹ️".dimmed());
+    if !tui_mode {
+        println!("{} No valid config found. Using default settings.", "ℹ️".dimmed());
+    }
     AppConfig::default()
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install error handlers
+    color_eyre::install().map_err(|e| miette::miette!("Failed to install color-eyre: {}", e))?;
+
+    // Initialize metrics exporter for prometheus
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(([127, 0, 0, 1], 9090))
+        .install()
+        .into_diagnostic()?;
+
+    // Initialize tracing for performance monitoring
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let cli = Cli::parse();
 
     if cli.install_daemon {
@@ -145,112 +150,44 @@ async fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
-    let config = load_config(cli.config.as_deref());
+    let config = load_config(cli.config.as_deref(), !cli.cli);
 
-    let current_user = std::env::var("USER").unwrap_or_else(|_| "unknown_user".to_string());
-    let _home_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string());
-    let cwd = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| ".".to_string());
-    
-    let is_root = nix::unistd::getuid().is_root();
-    let privilege = if is_root { "ROOT (Full Access)" } else { "USER (Restricted Access)" };
 
-    let system_prompt = format!(r#"You are Tempest AI, an autonomous system engineer running on {os}/{arch}. 
-YOU ARE DRIVEN BY TOOLS. DO NOT GUESS STATE.
+    let system_prompt = format!(r##"You are Tempest AI, a disciplined Principal Engineer. You follow a strict industrial protocol.
 
-[ENVIRONMENT]
-- Mode: {{planning_mode}}
-- User: {user} ({privilege}) | CWD: {cwd}
+[CORE PROTOCOLS]
+1. YOU ARE TOOL-DRIVEN: Never claim an action is done unless you see the `TOOL RESULT`.
+2. MISSION-FIRST: Identify the goal, gather facts, verify, and then execute.
+3. PROTOCOL SENTINEL: If you are in PLANNING mode, you MUST NOT use modifying tools. To modify, you MUST first switch modes.
 
-[CORE PROTOCOL]
-1. 📍 OBSERVE: Use `project_atlas(action="read")` to map the workspace.
-2. 🧠 PLAN: In PLANNING mode, design a multi-step solution. 
-3. 🚀 EXECUTE: Use `toggle_planning(active=false)` to unlock state-modifying tools.
-4. ✅ VERIFY: Run `run_tests` or `run_command` to confirm every change.
+[PLANNING MODE - WORKFLOW]
+THOUGHT: Reason about the task. Check what you know and what you don't.
+PLAN: Numbered list of steps.
+NEXT: The specific tool call or user question to advance the plan.
 
-[SYSTEM TRUTH]
-- TELEMETRY: `system_diagnostic_scan` is the ONLY source for hardware stats. 
-- **MANDATORY**: If the user asks for a "scan", "check", or "diagnostics", you MUST call `system_diagnostic_scan`. Failure to do so is a protocol violation.
-- **DEEP SCAN**: Use `system_diagnostic_scan(extensive=true)` for "Health Checks", "Process Audits", or when investigating network/disk issues. It provides 30+ processes, service health, and network sockets.
-- **PRIVILEGE**: Current session is {privilege}. If restricted, certain GPU metrics will be "Unknown". Instruct the user to run with `sudo` if they need deep hardware metrics.
-- **DANGER**: DO NOT FABRICATE GPU models, fan speeds, or temperatures. If `system_diagnostic_scan` says "Unknown" or the sensor is missing, you MUST say "I cannot determine that from current sensors."
-- FILE EDITS: Prefer `patch_file` for targeted code changes. Use `write_file` only for new files.
+[EXECUTION MODE - WORKFLOW]
+THOUGHT: Confirm we are ready to modify.
+ACTION: The tool call that performs the state change.
+NEXT: Verify the result or move to the next step.
 
 [TOOL SCHEMA]
 {{tool_descriptions}}
 
-[EXAMPLE: SUCCESSFUL DIAGNOSTIC]
-User: "Run a full system check."
-Assistant:
-```json
-{{
-  "tool": "system_diagnostic_scan",
-  "arguments": {{ "extensive": true }}
-}}
-```
-
-[EXAMPLE: REFUSAL TO GUESS]
-User: "What is my fan speed?"
-Assistant:
-```json
-{{
-  "tool": "system_diagnostic_scan",
-  "arguments": {{ "summary_only": true }}
-}}
-```
-TOOL RESULT: [Telemetry output showing no Fan info]
-Assistant: I checked your system telemetry, but there are no fan sensors exposing data to the current monitor. I cannot determine your fan speeds at this time.
-
-[EXAMPLE: FILE PATCHING]
-User: "Fix the timeout in config.rs"
-Assistant:
-```json
-{{
-  "tool": "patch_file",
-  "arguments": {{
-    "file_path": "src/config.rs",
-    "start_line": 42,
-    "end_line": 42,
-    "content": "const TIMEOUT: u64 = 60;"
-  }}
-}}
-```
-
-[ACTION FORMAT]
-```json
-{{
-  "tool": "tool_name",
-  "arguments": {{ "key": "value" }}
-}}
-```
-"# , 
-    os = std::env::consts::OS, 
-    arch = std::env::consts::ARCH,
-    user = current_user,
-    cwd = cwd,
-    privilege = privilege).to_string();
-
-
-    use sysinfo::System;
-    let mut sys = System::new_all();
-    sys.refresh_all();
-    let used_mem = sys.used_memory() as f64 / sys.total_memory() as f64;
-    if used_mem > 0.90 {
-        println!("\n{}", "⚠️  WARNING: System Memory is critically low (>90% full).".yellow().bold());
-        println!("{}", "Reasoning models (DeepSeek-R1) may hang or respond very slowly in this state.".yellow());
-        println!("{}\n", "HINT: Close heavy apps (Chrome, Xcode) or switch to a smaller model (phi4-mini).".dimmed());
-    }
+[RESPONSE FORMAT]
+CRITICAL: Emit exactly ONE tool call JSON block per turn. 
+MANDATORY: Follow the THOUGHT / PLAN / NEXT or THOUGHT / ACTION / NEXT structure exactly.
+"##);
 
     // Model priority: CLI flag > env var > config file > default
     let model = cli.model
         .or_else(|| std::env::var("OLLAMA_MODEL").ok())
-        .or(config.model)
+        .or(config.model.clone())
         .unwrap_or_else(|| "qwen2.5-coder:7b".to_string());
 
     let mut config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     config_dir.push("tempest_ai");
     let _ = std::fs::create_dir_all(&config_dir);
 
-    // Standardize history path: config file > default (~/.config/tempest_ai/history.json)
     let history_raw = config.history_path
         .unwrap_or_else(|| "history.json".to_string());
     
@@ -266,7 +203,6 @@ Assistant:
         std::fs::read_to_string(&key_path).unwrap_or_else(|_| "fallback_key".to_string())
     } else {
         let new_key = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
-        let _ = std::fs::create_dir_all(&config_dir);
         let _ = std::fs::write(&key_path, &new_key);
         #[cfg(unix)]
         {
@@ -279,19 +215,22 @@ Assistant:
         new_key
     };
 
-    let memory_store = std::sync::Arc::new(std::sync::Mutex::new(crate::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
-    
+    let memory_store = Arc::new(Mutex::new(crate::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
     let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "phi3:latest".to_string());
-    
     let agent = Agent::new(model, system_prompt, history_path, memory_store, sub_agent_model);
     
     if let Err(e) = agent.check_connection().await {
+        if !cli.cli {
+            // In TUI mode, we might want to just exit or show an error later?
+            // But since TUI hasn't started, plain print is ok, 
+            // but we can make it cleaner.
+        }
         println!("{}", format!("Agent Error: {}", e).red());
         std::process::exit(1);
     }
     
     let _ = agent.load_history();
-    let _ = agent.initialize_atlas().await;
+    let _ = agent.initialize_atlas(false).await;
 
     if cli.cli {
         run_cli_mode(agent).await?;
@@ -303,11 +242,8 @@ Assistant:
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(100);
     let (tool_tx, tool_rx) = tokio::sync::mpsc::channel::<crate::tui::ToolResponse>(1);
 
-    let app = crate::tui::App::new();
-
-    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag_agent = stop_flag.clone();
-    let stop_flag_tui = stop_flag.clone();
 
     let agent_tx_metrics = agent_tx.clone();
     let shared_telemetry = agent.telemetry.clone();
@@ -317,7 +253,6 @@ Assistant:
         let mut networks = Networks::new_with_refreshed_list();
         let mut components = Components::new_with_refreshed_list();
         
-        // Compile regex once outside the loop (was being compiled every 1s tick)
         #[cfg(target_os = "macos")]
         let gpu_re = regex::Regex::new(r#""Device Utilization %"=(\d+)"#).unwrap();
 
@@ -326,18 +261,15 @@ Assistant:
             networks.refresh(true);
             components.refresh(true);
             
-            // 🤖 AI MEMORY (Ollama/Llama Tracking)
             let mut ollama_mem_bytes = 0;
             for process in sys.processes().values() {
                 let name = process.name().to_string_lossy().to_lowercase();
                 if name.contains("ollama") || name.contains("llama") {
-                    // Use max() to avoid over-counting shared memory segments in multi-process setups
                     ollama_mem_bytes = std::cmp::max(ollama_mem_bytes, process.memory());
                 }
             }
             let ollama_mb = ollama_mem_bytes / 1024 / 1024;
 
-            // 🎨 GPU LOAD (Apple Silicon / macOS / Linux)
             let gpu_load = {
                 #[cfg(target_os = "macos")]
                 {
@@ -417,7 +349,7 @@ Assistant:
             
             let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
             {
-                let mut lock = shared_telemetry.lock().unwrap();
+                let mut lock = shared_telemetry.lock();
                 *lock = update_str;
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -425,13 +357,15 @@ Assistant:
     });
 
     let agent_tx_agent = agent_tx.clone();
+    *agent.event_tx.lock() = Some(agent_tx.clone());
+    
     tokio::spawn(async move {
         if let Err(e) = agent.run_tui_mode(user_rx, agent_tx_agent, tool_rx, stop_flag_agent).await {
             let _ = agent_tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
         }
     });
 
-    if let Err(e) = crate::tui::run_tui(app, agent_rx, user_tx, tool_tx, stop_flag_tui).await {
+    if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx).await {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
     
@@ -440,7 +374,7 @@ Assistant:
 
 async fn run_cli_mode(agent: Agent) -> Result<()> {
     use rustyline::DefaultEditor;
-    let mut rl = DefaultEditor::new()?;
+    let mut rl = DefaultEditor::new().into_diagnostic()?;
     
     println!("{}", "=".repeat(60).blue());
     println!("{} {} Mode: ON", "🚀".green(), "Tempest Command".bold());

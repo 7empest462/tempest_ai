@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use serde_json::Value;
 use super::{AgentTool, ToolContext};
@@ -54,8 +54,7 @@ impl AgentTool for SearchWebTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<SearchWebArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<SearchWebArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -68,23 +67,23 @@ impl AgentTool for SearchWebTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: SearchWebArgs = serde_json::from_value(args.clone())?;
+        let typed_args: SearchWebArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let query = typed_args.query;
         
         let url = "https://lite.duckduckgo.com/lite/";
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-            .build()?;
+            .build().into_diagnostic()?;
             
         let res = client.post(url)
             .form(&[("q", &query)])
-            .send().await?
-            .text().await?;
+            .send().await.into_diagnostic()?
+            .text().await.into_diagnostic()?;
             
         let document = scraper::Html::parse_document(&res);
-        let tr_selector = scraper::Selector::parse("tr").unwrap();
-        let a_selector = scraper::Selector::parse("a.result-link").unwrap();
-        let snippet_selector = scraper::Selector::parse("td.result-snippet").unwrap();
+        let tr_selector = scraper::Selector::parse("tr").map_err(|e| miette!("Selector Error: {:?}", e))?;
+        let a_selector = scraper::Selector::parse("a.result-link").map_err(|e| miette!("Selector Error: {:?}", e))?;
+        let snippet_selector = scraper::Selector::parse("td.result-snippet").map_err(|e| miette!("Selector Error: {:?}", e))?;
         
         let mut results = String::new();
         let mut current_title = String::new();
@@ -145,8 +144,7 @@ impl AgentTool for ReadUrlTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ReadUrlArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<ReadUrlArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -159,15 +157,15 @@ impl AgentTool for ReadUrlTool {
     }
     
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: ReadUrlArgs = serde_json::from_value(args.clone())?;
+        let typed_args: ReadUrlArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let url = typed_args.url;
         
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .build()?;
+            .build().into_diagnostic()?;
             
-        let res = client.get(&url).send().await?;
-        let html_bytes = res.bytes().await?;
+        let res = client.get(&url).send().await.into_diagnostic()?;
+        let html_bytes = res.bytes().await.into_diagnostic()?;
         
         // Use html2text to strip HTML tags and present clean text
         let text = html2text::from_read(html_bytes.as_ref(), 100);
@@ -193,8 +191,7 @@ impl AgentTool for HttpRequestTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<HttpRequestArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<HttpRequestArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -207,14 +204,14 @@ impl AgentTool for HttpRequestTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: HttpRequestArgs = serde_json::from_value(args.clone())?;
+        let typed_args: HttpRequestArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         
         let method = typed_args.method.to_uppercase();
         let url = typed_args.url;
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
-            .build()?;
+            .build().into_diagnostic()?;
 
         let mut request = match method.as_str() {
             "POST" => client.post(&url),
@@ -236,14 +233,14 @@ impl AgentTool for HttpRequestTool {
             request = request.header("Content-Type", "application/json").body(body);
         }
 
-        let response = request.send().await?;
+        let response = request.send().await.into_diagnostic()?;
         let status = response.status();
         let resp_headers: Vec<String> = response.headers().iter()
             .take(10)
             .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or("?")))
             .collect();
 
-        let body = response.text().await?;
+        let body = response.text().await.into_diagnostic()?;
         let max_len = 15000;
         let mut truncated_body = body;
         if truncated_body.len() > max_len {
@@ -262,13 +259,11 @@ pub struct DownloadFileTool;
 impl AgentTool for DownloadFileTool {
     fn name(&self) -> &'static str { "download_file" }
     fn description(&self) -> &'static str { "Download a file from a URL and save it to a local path. Useful for fetching remote resources, images, scripts, or data files." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<DownloadFileArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<DownloadFileArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -281,28 +276,28 @@ impl AgentTool for DownloadFileTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: DownloadFileArgs = serde_json::from_value(args.clone())?;
+        let typed_args: DownloadFileArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let url = typed_args.url;
         let path = shellexpand::tilde(&typed_args.path).to_string();
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
-            .build()?;
-        let response = client.get(&url).send().await?;
+            .build().into_diagnostic()?;
+        let response = client.get(&url).send().await.into_diagnostic()?;
         let status = response.status();
         
         if !status.is_success() {
-            anyhow::bail!("Download failed with status {}", status);
+            return Err(miette!("Download failed with status {}", status));
         }
 
-        let bytes = response.bytes().await?;
+        let bytes = response.bytes().await.into_diagnostic()?;
         
         if let Some(parent) = std::path::Path::new(&path).parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(parent).into_diagnostic()?;
             }
         }
-        std::fs::write(&path, &bytes)?;
+        std::fs::write(&path, &bytes).into_diagnostic()?;
         Ok(format!("✅ Downloaded {} bytes from {} → {}", bytes.len(), url, path))
     }
 }

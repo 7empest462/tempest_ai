@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Command;
@@ -24,8 +24,7 @@ impl AgentTool for ClipboardTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ClipboardArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<ClipboardArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -38,27 +37,27 @@ impl AgentTool for ClipboardTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: ClipboardArgs = serde_json::from_value(args.clone())?;
+        let typed_args: ClipboardArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let action = typed_args.action;
 
         match action.as_str() {
             "write" => {
                 let content = typed_args.content
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'content' for clipboard write"))?;
+                    .ok_or_else(|| miette!("Missing 'content' for clipboard write"))?;
                 let mut clipboard = arboard::Clipboard::new()
-                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {}", e))?;
+                    .map_err(|e| miette!("Failed to access clipboard: {}", e))?;
                 clipboard.set_text(content.to_string())
-                    .map_err(|e| anyhow::anyhow!("Failed to write to clipboard: {}", e))?;
+                    .map_err(|e| miette!("Failed to write to clipboard: {}", e))?;
                 Ok(format!("✅ Copied {} characters to clipboard.", content.len()))
             },
             "read" => {
                 let mut clipboard = arboard::Clipboard::new()
-                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {}", e))?;
+                    .map_err(|e| miette!("Failed to access clipboard: {}", e))?;
                 let text = clipboard.get_text()
-                    .map_err(|e| anyhow::anyhow!("Failed to read clipboard: {}", e))?;
+                    .map_err(|e| miette!("Failed to read clipboard: {}", e))?;
                 Ok(format!("Clipboard contents:\n{}", text))
             },
-            _ => anyhow::bail!("Unknown clipboard action. Use 'read' or 'write'."),
+            _ => Err(miette!("Unknown clipboard action. Use 'read' or 'write'.")),
         }
     }
 }
@@ -80,8 +79,7 @@ impl AgentTool for NotifyTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<NotifyArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<NotifyArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -94,7 +92,7 @@ impl AgentTool for NotifyTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: NotifyArgs = serde_json::from_value(args.clone())?;
+        let typed_args: NotifyArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let title = typed_args.title;
         let message = typed_args.message;
 
@@ -108,12 +106,12 @@ impl AgentTool for NotifyTool {
             let output = Command::new("osascript")
                 .arg("-e")
                 .arg(&script)
-                .output()?;
+                .output().into_diagnostic()?;
             if output.status.success() {
                 Ok(format!("🔔 Notification sent: {} — {}", title, message))
             } else {
                 let err = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("Failed to send notification: {}", err)
+                Err(miette!("Failed to send notification: {}", err))
             }
         }
 
@@ -127,15 +125,17 @@ impl AgentTool for NotifyTool {
                 Ok(o) if o.status.success() => Ok(format!("🔔 Notification sent: {} — {}", title, message)),
                 Ok(o) => {
                     let err = String::from_utf8_lossy(&o.stderr);
-                    anyhow::bail!("Failed to send notification (is libnotify installed?): {}", err)
+                    Err(miette!("Failed to send notification (is libnotify installed?): {}", err))
                 }
-                Err(_) => anyhow::bail!("notify-send not found. Install with: sudo apt install libnotify-bin"),
+                Err(_) => Err(miette!("notify-send not found. Install with: sudo apt install libnotify-bin")),
             }
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            Ok(format!("Notification not supported on this platform. Title: {} Message: {}", title, message))
+            let _ = title;
+            let _ = message;
+            Ok("Notification not supported on this platform.".to_string())
         }
     }
 }
@@ -157,8 +157,7 @@ impl AgentTool for EnvVarTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<EnvVarArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<EnvVarArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -171,13 +170,13 @@ impl AgentTool for EnvVarTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: EnvVarArgs = serde_json::from_value(args.clone())?;
+        let typed_args: EnvVarArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let action = typed_args.action;
 
         match action.as_str() {
             "get" => {
                 let name = typed_args.name
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'name' for env get"))?;
+                    .ok_or_else(|| miette!("Missing 'name' for env get"))?;
                 match std::env::var(&name) {
                     Ok(val) => Ok(format!("{}={}", name, val)),
                     Err(_) => Ok(format!("Variable '{}' is not set.", name)),
@@ -193,7 +192,7 @@ impl AgentTool for EnvVarTool {
                     .collect();
                 Ok(format!("Environment variables (first 50):\n{}", vars.join("\n")))
             },
-            _ => anyhow::bail!("Unknown env_var action. Use 'get' or 'list'."),
+            _ => Err(miette!("Unknown env_var action. Use 'get' or 'list'.")),
         }
     }
 }
@@ -212,13 +211,11 @@ pub struct ChmodTool;
 impl AgentTool for ChmodTool {
     fn name(&self) -> &'static str { "chmod" }
     fn description(&self) -> &'static str { "Change file or directory permissions using standard Unix mode strings (e.g., '755', '644', '+x')." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ChmodArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<ChmodArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -231,20 +228,20 @@ impl AgentTool for ChmodTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: ChmodArgs = serde_json::from_value(args.clone())?;
+        let typed_args: ChmodArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let mode = typed_args.mode;
 
         let output = Command::new("chmod")
             .arg(&mode)
             .arg(&path)
-            .output()?;
+            .output().into_diagnostic()?;
         
         if output.status.success() {
             Ok(format!("✅ Changed permissions of '{}' to '{}'", path, mode))
         } else {
             let err = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("chmod failed: {}", err.trim())
+            Err(miette!("chmod failed: {}", err.trim()))
         }
     }
 }

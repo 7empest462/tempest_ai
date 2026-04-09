@@ -1,5 +1,5 @@
 use serde_json::Value;
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use std::fs;
@@ -24,13 +24,11 @@ pub struct EditFileWithDiffTool;
 impl AgentTool for EditFileWithDiffTool {
     fn name(&self) -> &'static str { "edit_file_with_diff" }
     fn description(&self) -> &'static str { "Safely edits a file by applying a new version and showing a diff preview. Best for targeted code changes." }
-    fn requires_confirmation(&self) -> bool { true }
     fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<EditFileWithDiffArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<EditFileWithDiffArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -43,7 +41,7 @@ impl AgentTool for EditFileWithDiffTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: EditFileWithDiffArgs = serde_json::from_value(args.clone())?;
+        let typed_args: EditFileWithDiffArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let new_content = &typed_args.new_content;
 
@@ -67,7 +65,7 @@ impl AgentTool for EditFileWithDiffTool {
         let _ = context.tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🔄 Proposed changes for {}:\n\n{}", path, diff_output))).await;
         
         // Actually write it
-        fs::write(&path, new_content)?;
+        fs::write(&path, new_content).into_diagnostic()?;
         Ok(format!("Successfully applied changes to {}.", path))
     }
 }

@@ -1,5 +1,5 @@
 use serde_json::Value;
-use anyhow::Result;
+use miette::Result;
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use schemars::JsonSchema;

@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use crate::tools::execution::RunCommandTool;
@@ -24,8 +24,7 @@ impl AgentTool for SemanticSearchTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<SemanticSearchArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<SemanticSearchArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -38,7 +37,7 @@ impl AgentTool for SemanticSearchTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: SemanticSearchArgs = serde_json::from_value(args.clone())?;
+        let typed_args: SemanticSearchArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let query = typed_args.query;
         let top_k = typed_args.top_k.unwrap_or(5);
 
@@ -50,7 +49,7 @@ impl AgentTool for SemanticSearchTool {
         match context.ollama.generate_embeddings(req).await {
             Ok(res) => {
                 if let Some(embedding) = res.embeddings.first() {
-                    let hits = context.vector_brain.lock().expect("VectorBrain Poisoned").search(embedding, top_k);
+                    let hits = context.vector_brain.lock().search(embedding, top_k);
                     let mut report = format!("Conceptual matches for '{}':\n\n", query);
                     for (entry, sim) in hits {
                         report.push_str(&format!("[{:.1}%] {}: {}\n---\n", sim * 100.0, entry.source, entry.text));
@@ -60,7 +59,7 @@ impl AgentTool for SemanticSearchTool {
                     Ok("No embeddings generated for query.".to_string())
                 }
             }
-            Err(e) => anyhow::bail!("Embedding error: {}", e),
+            Err(e) => Err(miette!("Embedding error: {}", e)),
         }
     }
 }
@@ -82,8 +81,7 @@ impl AgentTool for GrepSearchTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<GrepSearchArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<GrepSearchArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -96,7 +94,7 @@ impl AgentTool for GrepSearchTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: GrepSearchArgs = serde_json::from_value(args.clone())?;
+        let typed_args: GrepSearchArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let query = typed_args.query;
         let path = typed_args.path.unwrap_or_else(|| ".".to_string());
         
@@ -107,14 +105,7 @@ impl AgentTool for GrepSearchTool {
         RunCommandTool.execute(&exec_args, context).await
     }
 }
-#[derive(Deserialize, JsonSchema)]
-#[allow(dead_code)]
-pub struct IndexFileSemanticallyArgs {
-    /// The path to the file to index.
-    pub path: String,
-}
 
-#[allow(dead_code)]
 pub struct IndexFileSemanticallyTool;
 
 #[async_trait]
@@ -125,8 +116,7 @@ impl AgentTool for IndexFileSemanticallyTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<IndexFileSemanticallyArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<IndexFileSemanticallyArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -139,10 +129,10 @@ impl AgentTool for IndexFileSemanticallyTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: IndexFileSemanticallyArgs = serde_json::from_value(args.clone())?;
+        let typed_args: IndexFileSemanticallyArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path).into_diagnostic()?;
         
         let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
             "nomic-embed-text".to_string(),
@@ -152,7 +142,7 @@ impl AgentTool for IndexFileSemanticallyTool {
         match context.ollama.generate_embeddings(req).await {
             Ok(res) => {
                 if let Some(embedding) = res.embeddings.first() {
-                    let mut brain = context.vector_brain.lock().map_err(|_| anyhow::anyhow!("Brain Poisoned"))?;
+                    let mut brain = context.vector_brain.lock();
                     brain.add_entry(content.clone(), embedding.clone(), path.clone(), std::collections::HashMap::new());
                     let _ = brain.save_to_disk(context.brain_path);
                     Ok(format!("✅ Successfully indexed file: {} ({} bytes)", path, content.len()))
@@ -160,7 +150,13 @@ impl AgentTool for IndexFileSemanticallyTool {
                     Ok("No embeddings generated for file content.".to_string())
                 }
             }
-            Err(e) => anyhow::bail!("Embedding index error: {}", e),
+            Err(e) => Err(miette!("Embedding index error: {}", e)),
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct IndexFileSemanticallyArgs {
+    /// The path to the file to index.
+    pub path: String,
 }

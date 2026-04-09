@@ -6,6 +6,7 @@ use aes_gcm::{
 };
 use argon2::Argon2;
 use zeroize::Zeroizing;
+use miette::{Result, miette};
 
 const SALT: &[u8] = b"tempest_ai_v1_salt";
 const NONCE_SIZE: usize = 12;
@@ -20,10 +21,10 @@ fn derive_key(passphrase: &str) -> Zeroizing<[u8; 32]> {
 }
 
 /// Encrypt data using AES-256-GCM with an Argon2-derived key
-pub fn encrypt_history(data: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>> {
+pub fn encrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     let key = derive_key(passphrase);
     let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-        .map_err(|e| anyhow::anyhow!("Cipher init failed: {}", e))?;
+        .map_err(|e| miette!("Cipher init failed: {}", e))?;
     
     // Generate a random nonce
     let nonce_bytes: [u8; NONCE_SIZE] = {
@@ -35,7 +36,7 @@ pub fn encrypt_history(data: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>>
     let nonce = Nonce::from_slice(&nonce_bytes);
     
     let ciphertext = cipher.encrypt(nonce, data)
-        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        .map_err(|e| miette!("Encryption failed: {}", e))?;
     
     // Prepend the nonce to the ciphertext for storage
     let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
@@ -45,20 +46,20 @@ pub fn encrypt_history(data: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>>
 }
 
 /// Decrypt data using AES-256-GCM with an Argon2-derived key
-pub fn decrypt_history(data: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>> {
+pub fn decrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     if data.len() < NONCE_SIZE {
-        anyhow::bail!("Encrypted data too short to contain nonce");
+        return Err(miette!("Encrypted data too short to contain nonce"));
     }
     
     let key = derive_key(passphrase);
     let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-        .map_err(|e| anyhow::anyhow!("Cipher init failed: {}", e))?;
+        .map_err(|e| miette!("Cipher init failed: {}", e))?;
     
     let nonce = Nonce::from_slice(&data[..NONCE_SIZE]);
     let ciphertext = &data[NONCE_SIZE..];
     
     let plaintext = cipher.decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow::anyhow!("Decryption failed (wrong passphrase?): {}", e))?;
+        .map_err(|e| miette!("Decryption failed (wrong passphrase?): {}", e))?;
     
     Ok(plaintext)
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::fs;
@@ -6,6 +6,13 @@ use super::{AgentTool, ToolContext};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use std::path::Path;
+use walkdir::WalkDir;
+use colored::*;
+use std::sync::Arc;
+use parking_lot::Mutex;
+use ollama_rs::Ollama;
+use crate::vector_brain::VectorBrain;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct TreeArgs {
@@ -24,8 +31,7 @@ impl AgentTool for TreeTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<TreeArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<TreeArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -38,7 +44,7 @@ impl AgentTool for TreeTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: TreeArgs = serde_json::from_value(args.clone())?;
+        let typed_args: TreeArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path_owned = shellexpand::tilde(&typed_args.path).to_string();
         let max_depth = typed_args.max_depth.unwrap_or(4) as usize;
 
@@ -119,8 +125,7 @@ impl AgentTool for ProjectAtlasTool {
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<ProjectAtlasArgs>();
+        let payload = settings.into_generator().into_root_schema_for::<ProjectAtlasArgs>();
         
         ToolInfo {
             tool_type: ToolType::Function,
@@ -133,7 +138,7 @@ impl AgentTool for ProjectAtlasTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: ProjectAtlasArgs = serde_json::from_value(args.clone())?;
+        let typed_args: ProjectAtlasArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let action = typed_args.action;
         let atlas_path = ".tempest_atlas.md";
 
@@ -200,10 +205,106 @@ impl AgentTool for ProjectAtlasTool {
                 output.push_str(&format!("---\nGenerated at: {}\n{} directories, {} files\n", 
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), dir_count, file_count));
 
-                fs::write(atlas_path, &output)?;
-                Ok(format!("✅ Project Atlas generated and saved to '{}'.", atlas_path))
+                fs::write(atlas_path, &output).into_diagnostic()?;
+                
+                // 🧠 SEMANTIC SYNC
+                println!("{} Syncing conceptual map with project atlas...", "🧠".magenta().bold());
+                let brain = _context.vector_brain.clone();
+                let ollama = _context.ollama.clone();
+                let brain_path = _context.brain_path.clone();
+                
+                tokio::spawn(async move {
+                    let _ = run_semantic_indexing(&ollama, brain, &brain_path, true).await;
+                });
+
+                Ok(format!("✅ Project Atlas generated and saved to '{}'. Conceptual re-indexing started in background.", atlas_path))
             },
-            _ => anyhow::bail!("Unknown project_atlas action '{}'.", action),
+            _ => Err(miette!("Unknown project_atlas action '{}'.", action)),
         }
     }
+}
+
+pub async fn run_semantic_indexing(ollama: &Ollama, brain_lock: Arc<Mutex<VectorBrain>>, brain_path: &Path, force: bool) -> Result<()> {
+    // 1. Check if we need to do anything
+    {
+        let mut brain = brain_lock.lock();
+        if !brain.entries.is_empty() && !force {
+            return Ok(());
+        }
+        if force {
+            println!("{} Forced re-indexing triggered. Clearing old conceptual map...", "🔄".yellow().bold());
+            brain.entries.clear();
+        }
+    }
+
+    println!("{} Initializing Semantic Project Map...", "📍".blue().bold());
+    
+    let skip_dirs = ["node_modules", "target", ".git", "__pycache__", ".next", "dist", "build", ".DS_Store"];
+    let extensions = ["rs", "toml", "md", "py", "js", "ts", "c", "cpp", "h", "sql", "sh"];
+    
+    let mut files_to_index = Vec::new();
+    for entry in WalkDir::new(".")
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file()) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy();
+            
+            if name.starts_with('.') || path.components().any(|c| skip_dirs.contains(&c.as_os_str().to_str().unwrap_or(""))) {
+                continue;
+            }
+            
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if extensions.contains(&ext) {
+                    files_to_index.push(path.to_path_buf());
+                }
+            }
+    }
+
+    if files_to_index.is_empty() {
+        return Ok(());
+    }
+
+    println!("{} Found {} files for indexing. Processing conceptual embeddings...", "🔍".cyan(), files_to_index.len());
+
+    for path in files_to_index {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if content.trim().is_empty() { continue; }
+            
+            let chunk = if content.len() > 8000 { &content[..8000] } else { &content };
+            
+            let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                "nomic-embed-text".to_string(),
+                chunk.to_string().into()
+            );
+
+            match ollama.generate_embeddings(req).await {
+                Ok(res) => {
+                    if let Some(embedding) = res.embeddings.first() {
+                        // Acquire lock briefly to add the entry
+                        let mut brain = brain_lock.lock();
+                        brain.add_entry(
+                            content, 
+                            embedding.clone(), 
+                            path.to_string_lossy().to_string(), 
+                            std::collections::HashMap::new()
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} Failed to index {}: {}", "⚠️".yellow(), path.display(), e);
+                }
+            }
+        }
+    }
+
+    // Final save
+    {
+        let brain = brain_lock.lock();
+        let _ = brain.save_to_disk(brain_path);
+    }
+    
+    println!("{} Project indexing complete. Conceptual search is now ENABLED.", "✅".green().bold());
+    
+    Ok(())
 }
