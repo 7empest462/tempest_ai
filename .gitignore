@@ -1,5 +1,7 @@
-brain_vectors.json
-history.json
-target/
+/target
 .DS_Store
 *.log
+brain_vectors.json
+history.json
+master.key
+temp_agent_chunk*.rs
