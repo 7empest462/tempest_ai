@@ -90,7 +90,8 @@ impl AgentTool for SystemTelemetryTool {
             gpu_temp_str
         );
 
-        if !context.is_root {
+        use std::sync::atomic::Ordering;
+        if !context.is_root.load(Ordering::SeqCst) {
             report.push_str("⚠️  Note: Restricted privileges. Run as sudo for full GPU/SMC matrix.\n");
         }
 

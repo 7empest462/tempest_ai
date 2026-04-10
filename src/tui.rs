@@ -19,12 +19,19 @@ pub enum AgentEvent {
     SystemUpdate(String), // Telemetry
     #[allow(dead_code)] Thinking(Option<String>),
     RequestInput(String, String), // (tool_name, question)
+    RequestPrivileges {
+        rationale: String,
+        response_tx: tokio::sync::mpsc::Sender<ToolResponse>,
+    },
     StreamToken(String),
 }
 
 pub enum ToolResponse {
     Confirm,
+    Confirmed(bool),
     Text(String),
+    #[allow(dead_code)]
+    Error(String),
 }
 
 pub struct App {
@@ -42,6 +49,7 @@ pub struct App {
     pub pending_input: Option<(String, String)>,
     pub input_response_buffer: String,
     pub pending_confirmation: Option<(String, String)>,
+    pub pending_privilege_request: Option<(String, tokio::sync::mpsc::Sender<ToolResponse>)>,
 }
 
 impl App {
@@ -65,6 +73,7 @@ impl App {
             pending_input: None,
             input_response_buffer: String::new(),
             pending_confirmation: None,
+            pending_privilege_request: None,
         }
     }
 }
@@ -87,7 +96,7 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
 
         if event::poll(timeout).into_diagnostic()? {
             if let Event::Key(key) = event::read().into_diagnostic()? {
-                if app.pending_input.is_some() {
+                if let Some((_tool, _question)) = &app.pending_input {
                     match key.code {
                         KeyCode::Enter => {
                             let resp = app.input_response_buffer.clone();
@@ -110,8 +119,25 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                             app.pending_confirmation = None;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            // Cancelled - we don't have a way to send 'false' yet in simplified ToolResponse
                             app.pending_confirmation = None;
+                        }
+                        _ => {}
+                    }
+                } else if let Some((_rationale, resp_tx)) = &app.pending_privilege_request {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                             let tx = resp_tx.clone();
+                             tokio::spawn(async move {
+                                 let _ = tx.send(ToolResponse::Confirmed(true)).await;
+                             });
+                             app.pending_privilege_request = None;
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                             let tx = resp_tx.clone();
+                             tokio::spawn(async move {
+                                 let _ = tx.send(ToolResponse::Confirmed(false)).await;
+                             });
+                             app.pending_privilege_request = None;
                         }
                         _ => {}
                     }
@@ -129,10 +155,9 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                         }
                         KeyCode::Enter => {
                             if !app.input_buffer.is_empty() {
-                                let msg = app.input_buffer.clone();
+                                let msg = app.input_buffer.drain(..).collect::<String>();
                                 app.messages.push(format!("You: {}", msg));
                                 let _ = user_tx.send(msg).await;
-                                app.input_buffer.clear();
                                 app.auto_scroll = true;
                             }
                         }
@@ -182,12 +207,14 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                 }
                 AgentEvent::Thinking(msg) => app.thinking_msg = msg,
                 AgentEvent::RequestInput(tool, question) => {
-                    app.pending_input = Some((tool, question));
+                    app.pending_input = Some((tool.clone(), question));
                     app.input_response_buffer.clear();
+                }
+                AgentEvent::RequestPrivileges { rationale, response_tx } => {
+                    app.pending_privilege_request = Some((rationale, response_tx));
                 }
                 AgentEvent::StreamToken(token) => {
                     if token.is_empty() {
-                        // Empty token = End of stream
                         if !app.current_stream.is_empty() {
                             app.messages.push(format!("Tempest: {}", app.current_stream));
                             app.current_stream.clear();
@@ -370,6 +397,10 @@ fn ui(f: &mut Frame, app: &mut App) {
         input_title = format!(" ❓ INPUT REQUIRED for {} ", tool);
         input_text = format!("{}: {} >> {}", "Question", question, app.input_response_buffer);
         input_style = Style::default().fg(Color::Cyan);
+    } else if let Some((rationale, _resp_tx)) = &app.pending_privilege_request {
+        input_title = " 🔒 SECURE ESCALATION REQUIRED ".to_string();
+        input_text = format!("Rationale: {} | Accept root privileges? (y/n)", rationale);
+        input_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
     } else if let Some((tool, args)) = &app.pending_confirmation {
         input_title = format!(" ⚠️ CONFIRMATION REQUIRED for {} ", tool);
         input_text = format!("Confirm {}? (y/n) >> {}", args, " ");

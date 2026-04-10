@@ -63,16 +63,25 @@ impl AgentTool for ReadFileTool {
         let typed_args: ReadFileArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path_owned = shellexpand::tilde(&typed_args.path).to_string();
         
-        let metadata = fs::metadata(&path_owned).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => FileError::NotFound(path_owned.clone()),
-            std::io::ErrorKind::PermissionDenied => FileError::PermissionDenied(path_owned.clone()),
-            _ => FileError::Io { path: path_owned.clone(), source: e },
-        })?;
-        if metadata.len() > 1_000_000 {
-            return Err(FileError::TooLarge { path: path_owned, size: metadata.len(), max: 1_000_000 }.into());
-        }
+        // Move blocking file operations to a dedicated thread pool
+        let (_metadata, content) = tokio::task::spawn_blocking(move || {
+            let metadata = fs::metadata(&path_owned).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => FileError::NotFound(path_owned.clone()),
+                std::io::ErrorKind::PermissionDenied => FileError::PermissionDenied(path_owned.clone()),
+                _ => FileError::Io { path: path_owned.clone(), source: e },
+            })?;
+            
+            if metadata.len() > 1_000_000 {
+                return Err(FileError::TooLarge { path: path_owned, size: metadata.len(), max: 1_000_000 });
+            }
+            
+            let content = fs::read_to_string(&path_owned)
+                .map_err(|e| FileError::Io { path: path_owned, source: e })?;
+            
+            Ok((metadata, content))
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
         
-        fs::read_to_string(&path_owned).map_err(|e| FileError::Io { path: path_owned, source: e }.into())
+        Ok(content)
     }
 }
 
@@ -108,12 +117,15 @@ impl AgentTool for WriteFileTool {
             return Err(miette!("Guardrail: Placeholder detected. You must provide the full file content."));
         }
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).into_diagnostic()?;
-        }
-        
-        fs::write(&path, &content).into_diagnostic()?;
-        Ok(format!("Successfully wrote {} bytes to {}", content.len(), path.display()))
+        // Move blocking file operations to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).into_diagnostic()?;
+            }
+            
+            fs::write(&path, &content).into_diagnostic()?;
+            Ok(format!("Successfully wrote {} bytes to {}", content.len(), path.display()))
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
 
@@ -143,14 +155,17 @@ impl AgentTool for ListDirTool {
         let path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
         let path_owned = shellexpand::tilde(&path_val).to_string();
         
-        let mut out = Vec::new();
-        for entry in fs::read_dir(&path_owned).into_diagnostic()? {
-            let entry = entry.into_diagnostic()?;
-            let meta = entry.metadata().into_diagnostic()?;
-            let kind = if meta.is_dir() { "DIR " } else { "FILE" };
-            out.push(format!("[{}] {}", kind, entry.file_name().to_string_lossy()));
-        }
-        Ok(out.join("\n"))
+        // Move blocking directory operations to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in fs::read_dir(&path_owned).into_diagnostic()? {
+                let entry = entry.into_diagnostic()?;
+                let meta = entry.metadata().into_diagnostic()?;
+                let kind = if meta.is_dir() { "DIR " } else { "FILE" };
+                out.push(format!("[{}] {}", kind, entry.file_name().to_string_lossy()));
+            }
+            Ok(out.join("\n"))
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
 
@@ -183,20 +198,23 @@ impl AgentTool for SearchFilesTool {
         
         use walkdir::WalkDir;
         
-        let mut matches = Vec::new();
-        for entry in WalkDir::new(&path_owned).into_iter().filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy();
-            if name.contains(&pattern) {
-                matches.push(entry.path().display().to_string());
+        // Move blocking filesystem traversal to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            let mut matches = Vec::new();
+            for entry in WalkDir::new(&path_owned).into_iter().filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy();
+                if name.contains(&pattern) {
+                    matches.push(entry.path().display().to_string());
+                }
+                if matches.len() > 100 { break; }
             }
-            if matches.len() > 100 { break; }
-        }
-        
-        if matches.is_empty() {
-            Ok("No files found matching pattern.".to_string())
-        } else {
-            Ok(matches.join("\n"))
-        }
+            
+            if matches.is_empty() {
+                Ok("No files found matching pattern.".to_string())
+            } else {
+                Ok(matches.join("\n"))
+            }
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
 
@@ -235,13 +253,16 @@ impl AgentTool for AppendFileTool {
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let content = typed_args.content;
 
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path).into_diagnostic()?;
-        file.write_all(content.as_bytes()).into_diagnostic()?;
-        Ok(format!("✅ Appended {} bytes to {}", content.len(), path))
+        // Move blocking file operations to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path).into_diagnostic()?;
+            file.write_all(content.as_bytes()).into_diagnostic()?;
+            Ok(format!("✅ Appended {} bytes to {}", content.len(), path))
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
 
@@ -294,27 +315,30 @@ impl AgentTool for PatchFileTool {
             return Err(miette!("Invalid line range."));
         }
 
-        let file_content = fs::read_to_string(&path_owned).into_diagnostic()?;
-        let lines: Vec<&str> = file_content.lines().collect();
+        // Move blocking file operations to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            let file_content = fs::read_to_string(&path_owned).into_diagnostic()?;
+            let lines: Vec<&str> = file_content.lines().collect();
 
-        if start_line > lines.len() + 1 {
-            return Err(miette!("start_line out of bounds."));
-        }
+            if start_line > lines.len() + 1 {
+                return Err(miette!("start_line out of bounds."));
+            }
 
-        let mut new_lines = Vec::new();
-        for i in 1..start_line {
-            if i - 1 < lines.len() {
+            let mut new_lines = Vec::new();
+            for i in 1..start_line {
+                if i - 1 < lines.len() {
+                    new_lines.push(lines[i - 1].to_string());
+                }
+            }
+            new_lines.push(content.to_string());
+            for i in (end_line + 1)..=lines.len() {
                 new_lines.push(lines[i - 1].to_string());
             }
-        }
-        new_lines.push(content.to_string());
-        for i in (end_line + 1)..=lines.len() {
-            new_lines.push(lines[i - 1].to_string());
-        }
 
-        let final_content = new_lines.join("\n") + "\n";
-        fs::write(&path_owned, final_content).into_diagnostic()?;
-        Ok(format!("✅ Patched {} from line {} to {}", path_owned, start_line, end_line))
+            let final_content = new_lines.join("\n") + "\n";
+            fs::write(&path_owned, final_content).into_diagnostic()?;
+            Ok(format!("✅ Patched {} from line {} to {}", path_owned, start_line, end_line))
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
 
@@ -357,76 +381,79 @@ impl AgentTool for FindReplaceTool {
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: FindReplaceArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path_owned = shellexpand::tilde(&typed_args.path).to_string();
-        let find = &typed_args.find;
-        let replace = &typed_args.replace;
+        let find = typed_args.find.clone();
+        let replace = typed_args.replace.clone();
         let is_regex = typed_args.is_regex.unwrap_or(false);
-        let file_pattern = typed_args.file_pattern.as_deref();
+        let file_pattern = typed_args.file_pattern.clone();
 
-        let path = std::path::Path::new(&path_owned);
-        let mut files_to_process = Vec::new();
+        // Move blocking find/replace operations to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            let path = std::path::Path::new(&path_owned);
+            let mut files_to_process = Vec::new();
 
-        if path.is_file() {
-            files_to_process.push(path.to_path_buf());
-        } else if path.is_dir() {
-            fn collect_files(dir: &std::path::Path, pattern: Option<&str>, out: &mut Vec<PathBuf>) {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.is_dir() {
-                            if !p.file_name().map_or(false, |n| n.to_string_lossy().starts_with('.')) {
-                                collect_files(&p, pattern, out);
-                            }
-                        } else if p.is_file() {
-                            if let Some(pat) = pattern {
-                                let glob = pat.trim_start_matches('*');
-                                if p.to_string_lossy().ends_with(glob) {
+            if path.is_file() {
+                files_to_process.push(path.to_path_buf());
+            } else if path.is_dir() {
+                fn collect_files(dir: &std::path::Path, pattern: Option<&str>, out: &mut Vec<PathBuf>) {
+                    if let Ok(entries) = fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let p = entry.path();
+                            if p.is_dir() {
+                                if !p.file_name().map_or(false, |n| n.to_string_lossy().starts_with('.')) {
+                                    collect_files(&p, pattern, out);
+                                }
+                            } else if p.is_file() {
+                                if let Some(pat) = pattern {
+                                    let glob = pat.trim_start_matches('*');
+                                    if p.to_string_lossy().ends_with(glob) {
+                                        out.push(p);
+                                    }
+                                } else {
                                     out.push(p);
                                 }
-                            } else {
-                                out.push(p);
                             }
                         }
                     }
                 }
+                collect_files(path, file_pattern.as_deref(), &mut files_to_process);
+            } else {
+                 return Err(miette!("Path not found."));
             }
-            collect_files(path, file_pattern, &mut files_to_process);
-        } else {
-             return Err(miette!("Path not found."));
-        }
 
-        let mut total = 0;
-        let mut modified = 0;
-        let mut summary = String::new();
+            let mut total = 0;
+            let mut modified = 0;
+            let mut summary = String::new();
 
-        for file in &files_to_process {
-            if let Ok(content) = fs::read_to_string(file) {
-                let new_content = if is_regex {
-                    let re = regex::Regex::new(find).map_err(|e| miette!("Invalid regex: {}", e))?;
-                    let count = re.find_iter(&content).count();
-                    if count > 0 {
-                        total += count;
-                        modified += 1;
-                        summary.push_str(&format!("  {} ({} matches)\n", file.display(), count));
-                        re.replace_all(&content, replace).to_string()
-                    } else { continue; }
-                } else {
-                    let count = content.matches(find).count();
-                    if count > 0 {
-                        total += count;
-                        modified += 1;
-                        summary.push_str(&format!("  {} ({} matches)\n", file.display(), count));
-                        content.replace(find, replace)
-                    } else { continue; }
-                };
-                fs::write(file, new_content).into_diagnostic()?;
+            for file in &files_to_process {
+                if let Ok(content_str) = fs::read_to_string(file) {
+                    let new_content = if is_regex {
+                        let re = regex::Regex::new(&find).map_err(|e| miette!("Invalid regex: {}", e))?;
+                        let count = re.find_iter(&content_str).count();
+                        if count > 0 {
+                            total += count;
+                            modified += 1;
+                            summary.push_str(&format!("  {} ({} matches)\n", file.display(), count));
+                            re.replace_all(&content_str, &replace).to_string()
+                        } else { continue; }
+                    } else {
+                        let count = content_str.matches(&find).count();
+                        if count > 0 {
+                            total += count;
+                            modified += 1;
+                            summary.push_str(&format!("  {} ({} matches)\n", file.display(), count));
+                            content_str.replace(&find, &replace)
+                        } else { continue; }
+                    };
+                    fs::write(file, new_content).into_diagnostic()?;
+                }
             }
-        }
 
-        if total == 0 {
-            Ok(format!("No matches found for '{}'.", find))
-        } else {
-            Ok(format!("✅ {} replacements in {} files:\n{}", total, modified, summary))
-        }
+            if total == 0 {
+                Ok(format!("No matches found for '{}'.", find))
+            } else {
+                Ok(format!("✅ {} replacements in {} files:\n{}", total, modified, summary))
+            }
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
 #[derive(Deserialize, JsonSchema)]

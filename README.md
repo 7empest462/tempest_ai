@@ -26,15 +26,11 @@ Tempest is the first local agent that is truly "Sentient" of its host. It inject
 ### 🔍 4. Granular Error Handling
 Tempest features detailed, categorized error types for improved debugging and reliability.
 - **Tool-Specific Errors**: File operations, Git commands, network requests, and execution failures each have dedicated error variants with contextual information.
-- **Better Diagnostics**: Errors include specific details like file paths, command strings, and error codes, making troubleshooting faster.
-- **Robust Recovery**: Structured error handling prevents generic "something went wrong" messages, allowing the agent to provide precise guidance for fixes.
 
 ### ⚡ 5. Performance Optimization & Profiling
 Tempest includes built-in performance monitoring and profiling capabilities for low-latency operation.
 - **Execution Timing**: All tool executions are timed and logged, helping identify performance bottlenecks.
 - **Concurrency Control**: Semaphore-based limiting prevents resource exhaustion under load.
-- **Tracing Integration**: Full tracing support for detailed performance analysis.
-- **Benchmarking**: Criterion-based benchmarks for tool performance testing.
 
 #### Profiling Commands
 ```bash
@@ -50,6 +46,17 @@ RUSTFLAGS="--cfg tokio_unstable" cargo run --features tokio-console
 # Then connect with: tokio-console
 ```
 
+### 🛡️ 6. "Principal Engineer" Privilege Protocol
+Tempest features a secure, user-approved protocol for session-based privilege escalation.
+- **Secure Sudo-Bridge**: The agent uses the `request_privileges` tool to proactively ask for root access via a high-fidelity TUI prompt.
+- **Non-blocking Elevation**: Commands are wrapped in `sudo -n` (non-interactive mode), ensuring the agent never hangs waiting for a ghost password challenge.
+- **Transparent Logic**: Users confirm escalation rationale before the agent gains root-level sensor and actuator access.
+
+### ⚡ 7. High-Performance Async Hardening
+The agent core has been hardened for zero-latency autonomous development.
+- **Non-Blocking I/O**: All blocking filesystem operations (`read_file`, `write_file`, `patch_file`, `append_file`, `find_replace`) are offloaded to dedicated `spawn_blocking` thread pools.
+- **Responsive Reasoning**: Ensuring the reasoning engine remains 100% responsive even during massive repository refactors or heavy system I/O.
+
 ---
 
 ## ⚡ The High-Fidelity TUI Experience
@@ -62,8 +69,8 @@ Tempest AI features a professional, industrial Terminal User Interface designed 
 - **Industrial Branding**: Centered high-fidelity ASCII logo with 🌪️ AI Core accents.
 - **Real-Time Telemetry**: Live tracking of **CPU, RAM, GPU, and Thermals** directly in the sidebar.
 - **Synchronized Reasoning**: Dynamic ASCII spinners that activate when the agent is in a "Thinking" state.
+- **Secure Escalation Prompts**: Dedicated UI blocks for user confirmation of privilege requests.
 - **Fluid Token Streaming**: Messages stream into the chat area token-by-token for a responsive, high-speed experience.
-- **Mathematical Isolation**: Multi-line system stats are precisely formatted to prevent layout overlap.
 
 ---
 
@@ -96,38 +103,12 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 - **Web**: `search_web`, `read_url`, `http_request`, `download_file`.
 
 ### ⚙️ Agent Ops & Utilities
-- **Meta**: `spawn_sub_agent`, `toggle_planning`, `update_task_context`, `ask_user`.
+- **Meta**: `spawn_sub_agent`, `toggle_planning`, `request_privileges`, `update_task_context`, `ask_user`.
 - **Utils**: `clipboard`, `notify`, `env_var`, `chmod`.
 
 ---
 
-## 🎓 The Skills Engine
-
-Tempest features a unique **Skills System** that allows it to learn and execute complex procedures without manual prompting each time.
-
-### How it Works:
-Skills are stored as Markdown files in `~/.tempest/skills/`. Each skill includes a YAML frontmatter and a set of instructions.
-
-**Example `deploy_service.md`**:
-```markdown
----
-name: DeployService
-description: Procedure for deploying a Dockerized microservice.
----
-1. Check if the container is already running using `run_command`.
-2. Pull the latest image.
-3. Use `run_background` to start the service.
-4. Verify logs using `read_process_logs`.
-```
-
-### Usage:
-- **`list_skills`**: Tempest can see all the procedures you've taught it.
-- **`skill_recall`**: Tempest retrieves the specific instructions for a skill and integrates them into its current reasoning chain.
-
----
-
-## 🛡️ Disciplined Guardrails
-
+## 🛡️ Guardrails & Safety
 - **Planning Mode**: Tempest starts every session in a locked state. It can research and plan, but MUST physically call the **`toggle_planning`** tool to unlock system-modifying actions.
 - **Loop Interception**: A "Sentinel" layer detects duplicate tool sequences and "hallucinated loops," forcing the agent to self-correct before wasting tokens.
 

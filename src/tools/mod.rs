@@ -4,6 +4,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use ollama_rs::Ollama;
 use ollama_rs::generation::chat::ChatMessage;
+use std::sync::atomic::AtomicBool;
 
 /// The context passed to every tool, providing safe, thread-safe access to agent state.
 #[derive(Clone)]
@@ -20,7 +21,7 @@ pub struct ToolContext {
     pub tool_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>>>,
     #[allow(dead_code)] pub recent_tool_calls: Arc<dashmap::DashMap<String, String>>,
     #[allow(dead_code)] pub brain_path: std::path::PathBuf,
-    pub is_root: bool,
+    pub is_root: Arc<AtomicBool>,
 }
 
 use ollama_rs::generation::tools::ToolInfo;
@@ -58,3 +59,4 @@ pub mod telemetry;
 pub mod network_manager;
 pub mod service_manager;
 pub mod developer;
+pub mod privilege;

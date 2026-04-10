@@ -1,4 +1,4 @@
-use miette::{Result, IntoDiagnostic};
+use miette::{miette, Result, IntoDiagnostic};
 use async_trait::async_trait;
 use serde_json::Value;
 use super::{AgentTool, ToolContext};
@@ -42,11 +42,13 @@ impl AgentTool for SqliteQueryTool {
         let db_path = shellexpand::tilde(&typed_args.db_path).to_string();
         let query = typed_args.query;
 
-        let conn = rusqlite::Connection::open(&db_path).into_diagnostic()?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;").into_diagnostic()?;
-        conn.execute_batch("PRAGMA synchronous=NORMAL;").into_diagnostic()?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;").into_diagnostic()?;
-        let mut stmt = conn.prepare(&query).into_diagnostic()?;
+        // Move blocking SQLite operations to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db_path).into_diagnostic()?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;").into_diagnostic()?;
+            conn.execute_batch("PRAGMA synchronous=NORMAL;").into_diagnostic()?;
+            conn.execute_batch("PRAGMA foreign_keys=ON;").into_diagnostic()?;
+            let mut stmt = conn.prepare(&query).into_diagnostic()?;
         
         let column_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
 
@@ -75,5 +77,6 @@ impl AgentTool for SqliteQueryTool {
         }
 
         serde_json::to_string_pretty(&results).into_diagnostic()
+        }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }

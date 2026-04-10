@@ -12,6 +12,7 @@ use futures::StreamExt;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::io::Write;
 use parking_lot::Mutex;
 use dashmap::DashMap;
@@ -47,7 +48,7 @@ pub struct Agent {
     #[allow(dead_code)]
     theme_set: Arc<ThemeSet>,
     pub telemetry: Arc<Mutex<String>>,
-    pub is_root: bool,
+    pub is_root: Arc<AtomicBool>,
     pub concurrency_semaphore: Arc<tokio::sync::Semaphore>,
     pub event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
 }
@@ -107,6 +108,7 @@ impl Agent {
             Arc::new(crate::tools::system::SystemdManagerTool),
             Arc::new(crate::tools::system::CurrentProcessTool),
             Arc::new(crate::tools::system::SystemTelemetryTool),
+            Arc::new(crate::tools::privilege::RequestPrivilegesTool),
         ];
 
         let tools_map = Arc::new(DashMap::new());
@@ -138,7 +140,7 @@ impl Agent {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: Arc::new(ThemeSet::load_defaults()),
             telemetry: Arc::new(Mutex::new(String::new())),
-            is_root: nix::unistd::getuid().is_root(),
+            is_root: Arc::new(AtomicBool::new(nix::unistd::getuid().is_root())),
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(5)),
             event_tx: Arc::new(Mutex::new(None)),
         }
@@ -416,7 +418,7 @@ impl Agent {
             tool_rx: Arc::new(tokio::sync::Mutex::new(trx)),
             recent_tool_calls: self.recent_tool_calls.clone(),
             brain_path: self.brain_path.clone(),
-            is_root: self.is_root,
+            is_root: self.is_root.clone(),
         }
     }
 

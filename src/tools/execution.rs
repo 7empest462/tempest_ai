@@ -43,20 +43,28 @@ impl AgentTool for RunCommandTool {
         }
     }
 
-    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: RunCommandArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let cmd_str = typed_args.command;
         let cwd = typed_args.cwd.unwrap_or_else(|| ".".to_string());
         let timeout_secs = typed_args.timeout_seconds.unwrap_or(30);
 
+        use std::sync::atomic::Ordering;
+        let is_elevated = context.is_root.load(Ordering::SeqCst);
+        let final_cmd = if is_elevated && !cmd_str.starts_with("sudo ") {
+            format!("sudo -n {}", cmd_str)
+        } else {
+            cmd_str.clone()
+        };
+
         let child = Command::new("sh")
             .arg("-c")
-            .arg(&cmd_str)
+            .arg(&final_cmd)
             .current_dir(shellexpand::tilde(&cwd).to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| ExecutionError::CommandFailed { command: cmd_str.clone(), message: e.to_string() })?;
+            .map_err(|e| ExecutionError::CommandFailed { command: final_cmd.clone(), message: e.to_string() })?;
 
         let res = timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
         
