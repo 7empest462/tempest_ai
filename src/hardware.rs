@@ -1,4 +1,6 @@
-use miette::{Result, miette, IntoDiagnostic};
+use miette::{Result, miette};
+#[cfg(target_os = "linux")]
+use miette::IntoDiagnostic;
 use serde_json::Value;
 use crate::tools::{AgentTool, ToolContext};
 use schemars::JsonSchema;
@@ -7,10 +9,14 @@ use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
 #[cfg(target_os = "linux")]
 use procfs::WithCurrentSystemInfo;
 
+#[cfg(target_os = "linux")]
 use parking_lot::Mutex;
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
 static INTEL_GPU_STATE: Mutex<Option<HashMap<String, (u64, Instant)>>> = Mutex::new(None);
 
 #[derive(Deserialize, JsonSchema)]
