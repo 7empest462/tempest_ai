@@ -259,7 +259,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Line::from(Span::styled("    | |  |  __| | |\\/| |  ___/|  __|  \\___ \\   | |   ", Style::default().fg(Color::Cyan))),
         Line::from(Span::styled("    | |  | |____| |  | | |    | |____ ____) |  | |   ", Style::default().fg(Color::Cyan))),
         Line::from(Span::styled("    |_|  |______|_|  |_|_|    |______|_____/   |_|   ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("🌪️  PRINCIPAL ENGINEER & AUTONOMOUS DEVELOPMENT CORE  🌪️", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("🌪️  AUTONOMOUS AGENTIC CORE  🌪️", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))),
     ];
     let header_block = Paragraph::new(logo)
         .alignment(ratatui::layout::Alignment::Center)
