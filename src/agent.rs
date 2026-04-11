@@ -302,7 +302,7 @@ impl Agent {
         if *self.planning_mode.lock() {
             history_snapshot.push(ChatMessage::new(
                 MessageRole::System,
-                "CRITICAL PROTOCOL: YOU ARE IN PLANNING MODE. DO NOT EXECUTE ANY ACTIONS. DO NOT USE TOOLS. RESEARCH AND PLAN ONLY.".to_string()
+                "CRITICAL PROTOCOL: YOU ARE IN PLANNING MODE. USE RESEARCH AND READ-ONLY TOOLS ONLY. DO NOT EXECUTE SYSTEM COMMANDS OR FILE WRITES. FOCUS ON ANALYSIS AND STRATEGY.".to_string()
             ));
         }
         
