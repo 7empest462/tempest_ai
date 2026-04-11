@@ -1,4 +1,4 @@
-use miette::{Result, miette};
+use miette::{Result, miette, IntoDiagnostic};
 use serde_json::Value;
 use crate::tools::{AgentTool, ToolContext};
 use schemars::JsonSchema;
