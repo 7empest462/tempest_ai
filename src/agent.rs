@@ -301,8 +301,8 @@ impl Agent {
         let mut history_snapshot = self.history.lock().clone();
         if *self.planning_mode.lock() {
             history_snapshot.push(ChatMessage::new(
-                MessageRole::Assistant,
-                "I am in PLANNING MODE. I will not execute any actions or claim I have done anything yet.".to_string()
+                MessageRole::System,
+                "CRITICAL PROTOCOL: YOU ARE IN PLANNING MODE. DO NOT EXECUTE ANY ACTIONS. DO NOT USE TOOLS. RESEARCH AND PLAN ONLY.".to_string()
             ));
         }
         
