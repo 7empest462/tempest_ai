@@ -1,4 +1,4 @@
-use miette::{Result, miette};
+use miette::{Result, miette, IntoDiagnostic};
 use serde_json::Value;
 use crate::tools::{AgentTool, ToolContext};
 use schemars::JsonSchema;
@@ -6,6 +6,12 @@ use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
 #[cfg(target_os = "linux")]
 use procfs::WithCurrentSystemInfo;
+
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::time::Instant;
+
+static INTEL_GPU_STATE: Mutex<Option<HashMap<String, (u64, Instant)>>> = Mutex::new(None);
 
 #[derive(Deserialize, JsonSchema)]
 #[allow(dead_code)]
@@ -298,6 +304,39 @@ pub fn get_linux_gpu_usage() -> i32 {
                 (base.join("gt_cur_freq_mhz"), base.join("gt_max_freq_mhz"), base.join("gt_min_freq_mhz")),
                 (base.join("gt/gt0/rps_cur_freq_mhz"), base.join("gt/gt0/rps_max_freq_mhz"), base.join("gt/gt0/rps_min_freq_mhz")),
             ];
+
+            // 3. NEW: Intel RC6 Residency Check (High precision for Intel)
+            let rc6_path = base.join("gt/gt0/rc6_residency_ms");
+            if rc6_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&rc6_path) {
+                    if let Ok(residency) = content.trim().parse::<u64>() {
+                        let mut state_lock = INTEL_GPU_STATE.lock();
+                        if state_lock.is_none() {
+                            *state_lock = Some(HashMap::new());
+                        }
+                        
+                        if let Some(map) = state_lock.as_mut() {
+                            let now = Instant::now();
+                            if let Some((last_res, last_time)) = map.get(&name) {
+                                let time_diff = now.duration_since(*last_time).as_millis() as u64;
+                                let res_diff = residency.saturating_sub(*last_res);
+                                
+                                if time_diff > 500 { // Only update if we have a reasonable sample (>0.5s)
+                                    map.insert(name.clone(), (residency, now));
+                                    // Utilization = 1.0 - (Idle Time / Total Time)
+                                    // RC6 is idle time.
+                                    let idle_frac = (res_diff as f64 / time_diff as f64).clamp(0.0, 1.0);
+                                    let usage = (1.0 - idle_frac) * 100.0;
+                                    return usage.clamp(0.0, 100.0) as i32;
+                                }
+                            } else {
+                                // First sample
+                                map.insert(name.clone(), (residency, now));
+                            }
+                        }
+                    }
+                }
+            }
 
             for (cur_p, max_p, min_p) in freq_paths {
                 let cur_f = std::fs::read_to_string(cur_p);
