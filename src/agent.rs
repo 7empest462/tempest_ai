@@ -298,7 +298,14 @@ impl Agent {
             .num_predict(4096)
             .temperature(if *self.planning_mode.lock() { 0.05 } else { 0.30 });
 
-        let history_snapshot = self.history.lock().clone();
+        let mut history_snapshot = self.history.lock().clone();
+        if *self.planning_mode.lock() {
+            history_snapshot.push(ChatMessage::new(
+                MessageRole::Assistant,
+                "I am in PLANNING MODE. I will not execute any actions or claim I have done anything yet.".to_string()
+            ));
+        }
+        
         let request = ChatMessageRequest::new(self.model.clone(), history_snapshot)
             .options(options)
             .tools(self.tool_registry.clone());
