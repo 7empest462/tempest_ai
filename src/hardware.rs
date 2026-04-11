@@ -263,6 +263,7 @@ impl AgentTool for TelemetryChartTool {
 
 #[cfg(target_os = "linux")]
 pub fn get_linux_gpu_usage() -> i32 {
+    // 1. Try Nvidia NVML (Gold standard for Nvidia)
     if let Ok(nvml) = nvml_wrapper::Nvml::init() {
         if let Ok(device) = nvml.device_by_index(0) {
             if let Ok(util) = device.utilization_rates() {
@@ -271,41 +272,65 @@ pub fn get_linux_gpu_usage() -> i32 {
         }
     }
 
-    for card in 0..3 {
-        let card_paths = [
-            format!("/sys/class/drm/card{}/device", card),
-            format!("/sys/class/drm/card{}", card),
-        ];
+    // 2. Scan for DRM cards (Intel/AMD/etc)
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("card") || name.len() < 5 {
+                continue;
+            }
+            
+            let base = entry.path();
+            let device_path = base.join("device");
 
-        for base in card_paths {
-            if let Ok(content) = std::fs::read_to_string(format!("{}/gpu_busy_percent", base)) {
-                if let Ok(val) = content.trim().parse::<i32>() {
-                    return val;
+            // Look for gpu_busy_percent (common on AMD and some Intel)
+            for p in &[&device_path, &base] {
+                if let Ok(content) = std::fs::read_to_string(p.join("gpu_busy_percent")) {
+                    if let Ok(val) = content.trim().parse::<i32>() {
+                        return val;
+                    }
                 }
             }
 
-            let cur_f = std::fs::read_to_string(format!("{}/gt_cur_freq_mhz", base));
-            let max_f = std::fs::read_to_string(format!("{}/gt_max_freq_mhz", base));
-            let min_f = std::fs::read_to_string(format!("{}/gt_min_freq_mhz", base));
+            // Frequency-based estimation (Common on Intel)
+            // Try both the root card path and the gt/gt0 paths
+            let freq_paths = [
+                (base.join("gt_cur_freq_mhz"), base.join("gt_max_freq_mhz"), base.join("gt_min_freq_mhz")),
+                (base.join("gt/gt0/rps_cur_freq_mhz"), base.join("gt/gt0/rps_max_freq_mhz"), base.join("gt/gt0/rps_min_freq_mhz")),
+            ];
 
-            if let (Ok(cur), Ok(max), Ok(min)) = (cur_f, max_f, min_f) {
-                let c_v = cur.trim().parse::<f32>().unwrap_or(0.0);
-                let m_v = max.trim().parse::<f32>().unwrap_or(1.0);
-                let n_v = min.trim().parse::<f32>().unwrap_or(0.0);
+            for (cur_p, max_p, min_p) in freq_paths {
+                let cur_f = std::fs::read_to_string(cur_p);
+                let max_f = std::fs::read_to_string(max_p);
+                let min_f = std::fs::read_to_string(min_p);
 
-                if m_v > n_v {
-                    let usage = ((c_v - n_v) / (m_v - n_v)) * 100.0;
-                    return usage.clamp(0.0, 100.0) as i32;
+                if let (Ok(cur), Ok(max), Ok(min)) = (cur_f, max_f, min_f) {
+                    let c_v = cur.trim().parse::<f32>().unwrap_or(0.0);
+                    let m_v = max.trim().parse::<f32>().unwrap_or(1.0);
+                    let n_v = min.trim().parse::<f32>().unwrap_or(0.0);
+
+                    if m_v > n_v {
+                        let usage = ((c_v - n_v) / (m_v - n_v)) * 100.0;
+                        let val = usage.clamp(0.0, 100.0) as i32;
+                        if val > 0 { return val; }
+                    } else if m_v > 0.0 && c_v > 0.0 {
+                        // If max == min, but both are non-zero, it has a fixed clock.
+                        // We check runtime status later as a fallback.
+                    }
+                }
+            }
+
+            // Runtime Status Fallback
+            if let Ok(status) = std::fs::read_to_string(device_path.join("power/runtime_status")) {
+                if status.trim() == "active" {
+                    // If we can't get a real percentage but it's "active", return a small non-zero value
+                    // to indicate it's not totally dormant.
+                    return 2; 
                 }
             }
         }
     }
 
-    if let Ok(status) = std::fs::read_to_string("/sys/class/drm/card0/device/power/runtime_status") {
-        if status.trim() == "active" {
-            return 5; 
-        }
-    }
     0
 }
 
