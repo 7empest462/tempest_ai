@@ -300,7 +300,8 @@ impl Agent {
 
         let mut history_snapshot = self.history.lock().clone();
         if *self.planning_mode.lock() {
-            history_snapshot.push(ChatMessage::new(
+            let pos = history_snapshot.len().saturating_sub(1);
+            history_snapshot.insert(pos, ChatMessage::new(
                 MessageRole::System,
                 "CRITICAL PROTOCOL: YOU ARE IN PLANNING MODE. USE RESEARCH AND READ-ONLY TOOLS ONLY. DO NOT EXECUTE SYSTEM COMMANDS OR FILE WRITES. FOCUS ON ANALYSIS AND STRATEGY.".to_string()
             ));
