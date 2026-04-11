@@ -296,7 +296,7 @@ impl Agent {
         let options = ModelOptions::default()
             .num_ctx(self.calculate_optimal_ctx())
             .num_predict(4096)
-            .temperature(if *self.planning_mode.lock() { 0.15 } else { 0.05 });
+            .temperature(if *self.planning_mode.lock() { 0.05 } else { 0.30 });
 
         let history_snapshot = self.history.lock().clone();
         let request = ChatMessageRequest::new(self.model.clone(), history_snapshot)

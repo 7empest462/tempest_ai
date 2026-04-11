@@ -41,7 +41,7 @@ impl AgentTool for SystemdManagerTool {
     }
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: SystemdManagerArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let _typed_args: SystemdManagerArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
             
         #[cfg(target_os = "linux")]
         {

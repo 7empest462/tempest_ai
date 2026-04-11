@@ -185,6 +185,33 @@ THOUGHT: [Your reasoning]
 ACTION: [The single tool call you are making]
 NEXT: [What you will do after receiving the result]
 
+### EXAMPLES (Follow this logic)
+
+**Scenario 1: Analytical Turn (Planning Mode)**
+User: "Examine src/main.rs"
+Assistant:
+THOUGHT: I need to understand the entry point logic. I will use `read_file` to inspect the source.
+PLAN:
+1. Read `src/main.rs`.
+2. Summarize the prompt logic for the user.
+NEXT: `read_file(path: "src/main.rs")`
+
+**Scenario 2: Requesting Execution (Mode Transition)**
+User: "Change the default model in src/main.rs to gemma2"
+Assistant:
+THOUGHT: I've identified the default model assignment. To modify the code, I must first request to switch to EXECUTION MODE.
+PLAN:
+1. Request permission to switch to Execution Mode.
+2. Once granted, update the model string.
+NEXT: `toggle_planning(active: false)`
+
+**Scenario 3: Definitive Action (Execution Mode)**
+User: "Go ahead with the model update."
+Assistant:
+THOUGHT: Permission granted. I am now in Execution Mode and will proceed with the update.
+ACTION: `replace_file_content(path: "src/main.rs", ...)`
+NEXT: Verify the build to ensure zero-warning state.
+
 ### AVAILABLE TOOLS
 {{tool_descriptions}}
 
