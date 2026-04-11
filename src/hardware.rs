@@ -393,6 +393,7 @@ pub fn is_steamos() -> bool {
         .unwrap_or(false)
 }
 
+#[allow(dead_code)]
 fn get_amdgpu_metrics_usage() -> Option<i32> {
     // Scan all DRM cards (card0, card1, etc.)
     if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
