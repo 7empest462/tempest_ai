@@ -196,3 +196,78 @@ pub struct UpdateTaskContextArgs {
     /// The updated status or plan.
     pub context: String,
 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct QuerySchemaArgs {
+    /// Optional specific tool name to get full details for. If omitted, returns a summary of all tools.
+    pub tool_name: Option<String>,
+}
+
+pub struct QuerySchemaTool;
+
+#[async_trait]
+impl AgentTool for QuerySchemaTool {
+    fn name(&self) -> &'static str { "query_schema" }
+    fn description(&self) -> &'static str { 
+        "META-TOOL: Inspects the agent's current capabilities. Returns a list of all available tools and their descriptions. Use this if you are unsure what tools you have or if a tool call returns 'unknown'." 
+    }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<QuerySchemaArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
+        let typed_args: QuerySchemaArgs = serde_json::from_value(args.clone()).unwrap_or(QuerySchemaArgs { tool_name: None });
+        
+        if let Some(target) = typed_args.tool_name {
+            if let Some(info) = context.all_tools.iter().find(|t| t.function.name == target) {
+                return Ok(format!("Full Tool Schema for {}:\n{}", target, serde_json::to_string_pretty(info).unwrap_or_default()));
+            }
+            return Err(miette!("Tool '{}' not found in current schema.", target));
+        }
+
+        let mut summary = "🌪️ TEMPEST INDUSTRIAL TOOLBOX SCHEMA:\n".to_string();
+        for tool in &context.all_tools {
+            summary.push_str(&format!("- {}: {}\n", tool.function.name, tool.function.description));
+        }
+        summary.push_str("\nUse query_schema(tool_name: \"name\") for detailed JSON parameters of a specific tool.");
+        Ok(summary)
+    }
+}
+
+pub struct NoOpTool;
+
+#[async_trait]
+impl AgentTool for NoOpTool {
+    fn name(&self) -> &'static str { "no_op" }
+    fn description(&self) -> &'static str { "Does nothing. Use this when you just want to think or continue planning without taking any action." }
+    fn tool_info(&self) -> ollama_rs::generation::tools::ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<()>(); // Use unit type for no arguments
+
+        ollama_rs::generation::tools::ToolInfo {
+            tool_type: ollama_rs::generation::tools::ToolType::Function,
+            function: ollama_rs::generation::tools::ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            },
+        }
+    }
+
+    async fn execute(&self, _args: &Value, _context: ToolContext) -> Result<String> {
+        Ok("No operation performed. Continuing in planning mode.".to_string())
+    }
+}

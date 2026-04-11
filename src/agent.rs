@@ -63,6 +63,9 @@ impl Agent {
             Arc::new(crate::tools::file::AppendFileTool),
             Arc::new(crate::tools::file::PatchFileTool),
             Arc::new(crate::tools::file::FindReplaceTool),
+            Arc::new(crate::tools::file::CreateDirectoryTool),
+            Arc::new(crate::tools::file::DeleteFileTool),
+            Arc::new(crate::tools::file::RenameFileTool),
             Arc::new(crate::tools::execution::RunCommandTool),
             Arc::new(crate::tools::execution::RunTestsTool),
             Arc::new(crate::tools::execution::BuildProjectTool),
@@ -77,6 +80,7 @@ impl Agent {
             Arc::new(crate::tools::agent_ops::SpawnSubAgentTool),
             Arc::new(crate::tools::agent_ops::TogglePlanningTool),
             Arc::new(crate::tools::agent_ops::UpdateTaskContextTool),
+            Arc::new(crate::tools::agent_ops::NoOpTool),
             Arc::new(crate::tools::telemetry::SystemTelemetryTool),
             Arc::new(crate::tools::network_manager::ListSocketsTool),
             Arc::new(crate::tools::service_manager::ListServicesTool),
@@ -94,9 +98,10 @@ impl Agent {
             Arc::new(crate::tools::utilities::EnvVarTool),
             Arc::new(crate::tools::utilities::ChmodTool),
             Arc::new(crate::tools::knowledge::DistillKnowledgeTool),
+            Arc::new(crate::tools::knowledge::SkillRecallTool),
             Arc::new(crate::tools::knowledge::RecallBrainTool),
             Arc::new(crate::tools::knowledge::ListSkillsTool),
-            Arc::new(crate::tools::knowledge::SkillRecallTool),
+            Arc::new(crate::tools::agent_ops::QuerySchemaTool),
             Arc::new(crate::tools::database::SqliteQueryTool),
             Arc::new(crate::tools::network::NetworkCheckTool),
             Arc::new(crate::tools::atlas::TreeTool),
@@ -308,9 +313,33 @@ impl Agent {
         let mut native_tool_calls = Vec::new();
         let mut first_token = true;
 
+        let mut last_segments: Vec<String> = Vec::new();
+
         while let Some(res) = stream.next().await {
             if let Ok(chunk) = res {
                 let text = chunk.message.content.clone();
+                
+                // --- 🛡️ REPETITION SENTINEL ---
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    last_segments.push(trimmed.to_string());
+                    if last_segments.len() > 10 { last_segments.remove(0); }
+                    
+                    // Simple logic: if the same segment appears 5 times in the last 10, it's likely a loop
+                    if last_segments.iter().filter(|&s| s == trimmed).count() >= 5 {
+                        let warning = "\n\n⚠️ [REPETITION SENTINEL TRIGGERED]: Context overload or model instability detected. Breaking loop to preserve reasoning.";
+                        full_content.push_str(warning);
+                        
+                        let tx_opt = self.event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.send(crate::tui::AgentEvent::StreamToken(warning.to_string())).await;
+                            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("Loop detected and broken.".to_string())).await;
+                        }
+                        break; 
+                    }
+                }
+                // --- END SENTINEL ---
+
                 if !chunk.message.tool_calls.is_empty() {
                     native_tool_calls.extend(chunk.message.tool_calls.clone());
                 }
@@ -371,8 +400,15 @@ impl Agent {
     }
 
     async fn process_single_tool_call(&self, tool_req: Value) -> (String, String, bool) {
-        let tool_name = tool_req.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let args = tool_req.get("arguments").unwrap_or(&Value::Null);
+        let tool_name = tool_req.get("tool")
+            .or_else(|| tool_req.get("action"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+            
+        let args = tool_req.get("arguments")
+            .or_else(|| tool_req.get("params"))
+            .unwrap_or(&Value::Null);
 
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
             if *self.planning_mode.lock() && tool.is_modifying() {
@@ -419,6 +455,7 @@ impl Agent {
             recent_tool_calls: self.recent_tool_calls.clone(),
             brain_path: self.brain_path.clone(),
             is_root: self.is_root.clone(),
+            all_tools: self.tool_registry.clone(),
         }
     }
 

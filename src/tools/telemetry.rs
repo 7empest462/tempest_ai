@@ -98,23 +98,41 @@ impl AgentTool for SystemTelemetryTool {
         if !summary_only {
             // Termals (Sensors)
             report.push_str("\n- Full Sensor List:\n");
-        let sensor_list: &Components = &components;
-        for component in sensor_list {
-            #[allow(unused_mut)]
-            let mut label = component.label().to_string();
-            let raw_label = label.clone();
+            let total_sensors = components.len();
             
-            #[cfg(target_os = "macos")]
-            if label.len() == 4 {
-                label = format!("{} ({})", tempest_monitor::macos_helper::decode_smc_label(&label), label);
-            }
-            
-            if extensive {
-                report.push_str(&format!("  - {}: {:.1} °C [Raw: {}]\n", label, component.temperature().unwrap_or(0.0), raw_label));
+            let mut sensor_list = components.iter()
+                .filter(|c| c.temperature().unwrap_or(0.0) > 0.0)
+                .collect::<Vec<_>>();
+                
+            // 🔥 Priority: Sort by temperature descending to catch overheating first
+            sensor_list.sort_by(|a, b| b.temperature().unwrap_or(0.0).partial_cmp(&a.temperature().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
+
+            let sensor_limit = 15;
+            let show_count = std::cmp::min(sensor_list.len(), sensor_limit);
+
+            if show_count > 0 {
+                for sensor in &sensor_list[..show_count] {
+                    #[allow(unused_mut)]
+                    let mut label = sensor.label().to_string();
+                    let raw_label = label.clone();
+                    
+                    #[cfg(target_os = "macos")]
+                    if label.len() == 4 {
+                        label = format!("{} ({})", tempest_monitor::macos_helper::decode_smc_label(&label), label);
+                    }
+                    
+                    if extensive {
+                        report.push_str(&format!("  - {}: {:.1} °C [Raw: {}]\n", label, sensor.temperature().unwrap_or(0.0), raw_label));
+                    } else {
+                        report.push_str(&format!("  - {}: {:.1} °C\n", label, sensor.temperature().unwrap_or(0.0)));
+                    }
+                }
+                if total_sensors > sensor_limit {
+                    report.push_str("  ... [TRUNCATED] Critical thermal sensors prioritized above.\n");
+                }
             } else {
-                report.push_str(&format!("  - {}: {:.1} °C\n", label, component.temperature().unwrap_or(0.0)));
+                 report.push_str("  - [NONE DETECTED]\n");
             }
-        }
 
         // Platform-specific GPU Telemetry (from tempest-monitor crate)
         #[cfg(target_os = "macos")]

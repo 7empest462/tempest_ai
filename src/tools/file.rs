@@ -38,6 +38,26 @@ pub struct SearchFilesArgs {
     pub path: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateDirectoryArgs {
+    /// Path to the directory to create
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteFileArgs {
+    /// Path to the file or empty directory to delete
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RenameFileArgs {
+    /// Original path
+    pub old_path: String,
+    /// New path
+    pub new_path: String,
+}
+
 pub struct ReadFileTool;
 
 #[async_trait]
@@ -581,5 +601,113 @@ impl AgentTool for ExtractAndWriteTool {
         }
         
         Err(miette!("RECOVERY FAILED: Could not find suitable content in history to extract for {}.", path_owned))
+    }
+}
+
+pub struct CreateDirectoryTool;
+
+#[async_trait]
+impl AgentTool for CreateDirectoryTool {
+    fn name(&self) -> &'static str { "create_directory" }
+    fn description(&self) -> &'static str { "Creates a new directory and any necessary parent directories. Use this when the user asks to make a new folder." }
+    fn is_modifying(&self) -> bool { true }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<CreateDirectoryArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: CreateDirectoryArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
+        
+        tokio::task::spawn_blocking(move || {
+            fs::create_dir_all(&path_owned).map_err(|e| FileError::Io { path: path_owned, source: e })
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+        
+        Ok(format!("Successfully created directory: {}", typed_args.path))
+    }
+}
+
+pub struct DeleteFileTool;
+
+#[async_trait]
+impl AgentTool for DeleteFileTool {
+    fn name(&self) -> &'static str { "delete_file" }
+    fn description(&self) -> &'static str { "Deletes a file or an empty directory. Use with caution." }
+    fn is_modifying(&self) -> bool { true }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<DeleteFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: DeleteFileArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
+        
+        tokio::task::spawn_blocking(move || {
+            let metadata = fs::metadata(&path_owned).map_err(|e| FileError::Io { path: path_owned.clone(), source: e })?;
+            if metadata.is_dir() {
+                fs::remove_dir(&path_owned).map_err(|e| FileError::Io { path: path_owned, source: e })
+            } else {
+                fs::remove_file(&path_owned).map_err(|e| FileError::Io { path: path_owned, source: e })
+            }
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+        
+        Ok(format!("Successfully deleted: {}", typed_args.path))
+    }
+}
+
+pub struct RenameFileTool;
+
+#[async_trait]
+impl AgentTool for RenameFileTool {
+    fn name(&self) -> &'static str { "rename_file" }
+    fn description(&self) -> &'static str { "Renames or moves a file or directory to a new location." }
+    fn is_modifying(&self) -> bool { true }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<RenameFileArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: RenameFileArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let old_path = shellexpand::tilde(&typed_args.old_path).to_string();
+        let new_path = shellexpand::tilde(&typed_args.new_path).to_string();
+        
+        tokio::task::spawn_blocking(move || {
+            fs::rename(&old_path, &new_path).map_err(|e| FileError::Io { path: old_path, source: e })
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+        
+        Ok(format!("Successfully renamed {} to {}", typed_args.old_path, typed_args.new_path))
     }
 }

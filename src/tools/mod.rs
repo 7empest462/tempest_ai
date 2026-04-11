@@ -22,6 +22,7 @@ pub struct ToolContext {
     #[allow(dead_code)] pub recent_tool_calls: Arc<dashmap::DashMap<String, String>>,
     #[allow(dead_code)] pub brain_path: std::path::PathBuf,
     pub is_root: Arc<AtomicBool>,
+    pub all_tools: Vec<ToolInfo>,
 }
 
 use ollama_rs::generation::tools::ToolInfo;
