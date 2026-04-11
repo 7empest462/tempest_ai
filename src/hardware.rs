@@ -275,6 +275,13 @@ impl AgentTool for TelemetryChartTool {
 
 #[cfg(target_os = "linux")]
 pub fn get_linux_gpu_usage() -> i32 {
+    // 0. Specialized SteamOS / AMD Stream
+    if is_steamos() {
+        if let Some(usage) = get_amdgpu_metrics_usage() {
+            return usage;
+        }
+    }
+
     // 1. Try Nvidia NVML (Gold standard for Nvidia)
     if let Ok(nvml) = nvml_wrapper::Nvml::init() {
         if let Ok(device) = nvml.device_by_index(0) {
@@ -299,13 +306,13 @@ pub fn get_linux_gpu_usage() -> i32 {
             for p in &[&device_path, &base] {
                 if let Ok(content) = std::fs::read_to_string(p.join("gpu_busy_percent")) {
                     if let Ok(val) = content.trim().parse::<i32>() {
-                        return val;
+                        if val > 0 { return val; }
                     }
                 }
             }
 
             // Frequency-based estimation (Common on Intel)
-            // Try both the root card path and the gt/gt0 paths
+            // ...
             let freq_paths = [
                 (base.join("gt_cur_freq_mhz"), base.join("gt_max_freq_mhz"), base.join("gt_min_freq_mhz")),
                 (base.join("gt/gt0/rps_cur_freq_mhz"), base.join("gt/gt0/rps_max_freq_mhz"), base.join("gt/gt0/rps_min_freq_mhz")),
@@ -329,14 +336,11 @@ pub fn get_linux_gpu_usage() -> i32 {
                                 
                                 if time_diff > 500 { // Only update if we have a reasonable sample (>0.5s)
                                     map.insert(name.clone(), (residency, now));
-                                    // Utilization = 1.0 - (Idle Time / Total Time)
-                                    // RC6 is idle time.
                                     let idle_frac = (res_diff as f64 / time_diff as f64).clamp(0.0, 1.0);
                                     let usage = (1.0 - idle_frac) * 100.0;
                                     return usage.clamp(0.0, 100.0) as i32;
                                 }
                             } else {
-                                // First sample
                                 map.insert(name.clone(), (residency, now));
                             }
                         }
@@ -358,9 +362,6 @@ pub fn get_linux_gpu_usage() -> i32 {
                         let usage = ((c_v - n_v) / (m_v - n_v)) * 100.0;
                         let val = usage.clamp(0.0, 100.0) as i32;
                         if val > 0 { return val; }
-                    } else if m_v > 0.0 && c_v > 0.0 {
-                        // If max == min, but both are non-zero, it has a fixed clock.
-                        // We check runtime status later as a fallback.
                     }
                 }
             }
@@ -368,8 +369,6 @@ pub fn get_linux_gpu_usage() -> i32 {
             // Runtime Status Fallback
             if let Ok(status) = std::fs::read_to_string(device_path.join("power/runtime_status")) {
                 if status.trim() == "active" {
-                    // If we can't get a real percentage but it's "active", return a small non-zero value
-                    // to indicate it's not totally dormant.
                     return 2; 
                 }
             }
@@ -378,6 +377,80 @@ pub fn get_linux_gpu_usage() -> i32 {
 
     0
 }
+
+pub fn is_steamos() -> bool {
+    // Definitive SteamOS check
+    if std::path::Path::new("/etc/steamos-release").exists() {
+        return true;
+    }
+    
+    std::fs::read_to_string("/etc/os-release")
+        .map(|s| {
+            let s_low = s.to_lowercase();
+            s_low.contains("id=steamos") || s_low.contains("id=\"steamos\"") || 
+            (s_low.contains("id_like=arch") && s_low.contains("steamos"))
+        })
+        .unwrap_or(false)
+}
+
+fn get_amdgpu_metrics_usage() -> Option<i32> {
+    // Scan all DRM cards (card0, card1, etc.)
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("card") || name.len() < 5 || name.contains('-') {
+                continue;
+            }
+
+            let path = entry.path().join("device/gpu_metrics");
+            if let Ok(data) = std::fs::read(&path) {
+                if data.len() < 4 { continue; }
+
+                let format_rev = data[2];
+                let content_rev = data[3];
+
+                // Primary offsets based on revision
+                let primary_offset = match (format_rev, content_rev) {
+                    (1, 0) | (1, 1) => 14,
+                    (1, 2) | (1, 3) => 14,
+                    (2, 0) | (2, 1) | (2, 2) => 24,
+                    (2, 3) | (2, 4) => 28,
+                    _ => 28,
+                };
+
+                // Try primary offset first
+                if data.len() >= primary_offset + 2 {
+                    let val = u16::from_le_bytes([data[primary_offset], data[primary_offset + 1]]);
+                    // 0xFFFF indicates unsupported, but 0 is a valid (idle) outcome
+                    if val != 0xFFFF && val <= 100 {
+                        return Some(val as i32);
+                    }
+                }
+
+                // SUBTLE-FALLBACK: Brute force search common RDNA2 offsets (24, 28, 30, 32)
+                // if the primary one failed or was zero.
+                for &off in &[24, 28, 30, 32, 14, 16] {
+                    if data.len() >= off + 2 {
+                        let val = u16::from_le_bytes([data[off], data[off + 1]]);
+                        if val > 0 && val <= 100 {
+                            return Some(val as i32);
+                        }
+                    }
+                }
+
+                // FINAL FALLBACK: sysfs busy percent on this specific card
+                let busy_path = entry.path().join("device/gpu_busy_percent");
+                if let Ok(content) = std::fs::read_to_string(busy_path) {
+                    if let Ok(val) = content.trim().parse::<i32>() {
+                        if val > 0 { return Some(val); }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]

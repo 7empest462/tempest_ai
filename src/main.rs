@@ -314,7 +314,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             }
             let ollama_mb = ollama_mem_bytes / 1024 / 1024;
 
-            let gpu_load = {
+            let (gpu_load, gpu_tag) = {
                 #[cfg(target_os = "macos")]
                 {
                     let mut current_load = 0;
@@ -330,15 +330,18 @@ You are running on a real machine with real consequences. Be precise, safe, and 
                             }
                         }
                     }
-                    current_load
+                    (current_load, "[AGX]")
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    crate::hardware::get_linux_gpu_usage()
+                    let load = crate::hardware::get_linux_gpu_usage();
+                    let is_v = crate::hardware::is_steamos();
+                    let tag = if is_v { "!!AMD!!" } else { "!!DRM!!" };
+                    (load, tag)
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 {
-                    0
+                    (0, "[UNK]")
                 }
             };
             
@@ -382,13 +385,12 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             let hours = uptime / 3600;
             let minutes = (uptime % 3600) / 60;
             let secs = uptime % 60;
-            
             let proc_count = sys.processes().len();
             
             let update_str = format!(
-                "🔥 CPU LOAD      : {:.1}% ({} Cores)\n\n🚀 MEMORY ALLOC  : {}/{} MB ({:.1}%)\n\n🤖 AI RAM USE    : {} MB (Ollama)\n\n🎨 GPU LOAD      : {}% (Graphics)\n\n💾 SWAP CACHE    : {}/{} MB ({:.1}%)\n\n----------------------------------\n\n🌐 TRUNK [en0]   : {} B ▼ | {} B ▲\n\n🌡️ AVG THERMALS  : {:.1} °C (Max: {:.1} °C)\n\n⚙️ ACTIVE PROCS  : {}\n\n⏱️ CORE UPTIME   : {}h {}m {}s\n\n----------------------------------\n\n[ Live Topology Sweep: Active ]",
-                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ollama_mb, gpu_load, used_swap, total_swap, swap_perc,
-                total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
+                "🔥 CPU LOAD      : {:.1}% ({} Cores)\n\n🚀 MEMORY ALLOC  : {}/{} MB ({:.1}%)\n\n🤖 AI RAM USE    : {} MB (Ollama)\n\n🎨 GPU LOAD {:<7}: {}% (Graphics)\n\n💾 SWAP CACHE    : {}/{} MB ({:.1}%)\n\n----------------------------------\n\n🌐 TRUNK [en0]   : {} B ▼ | {} B ▲\n\n🌡️ AVG THERMALS  : {:.1} °C (Max: {:.1} °C)\n\n⚙️ ACTIVE PROCS  : {}\n\n⏱️ CORE UPTIME   : {}h {}m {}s\n\n🩺 STEAMOS CHECK : {}\n\n----------------------------------",
+                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ollama_mb, gpu_tag, gpu_load, used_swap, total_swap, swap_perc,
+                total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs, if crate::hardware::is_steamos() { "MATCHED" } else { "FAILED" }
             );
             
             let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
