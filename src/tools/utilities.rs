@@ -245,3 +245,44 @@ impl AgentTool for ChmodTool {
         }
     }
 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CalculatorArgs {
+    #[schemars(
+        description = "The mathematical expression to calculate. General formatting guidelines:\n- Use `*` for multiplication\n- Use `^` for exponents\n- Be sure to use parentheses for more complicated expressions"
+    )]
+    pub expression: String,
+}
+
+pub struct CalculatorTool;
+
+#[async_trait]
+impl AgentTool for CalculatorTool {
+    fn name(&self) -> &'static str { "calculator" }
+    
+    fn description(&self) -> &'static str { "Evaluates an arbitrary mathematical expression natively within the agent. Can only evaluate one expression at a time." }
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<CalculatorArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: CalculatorArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        
+        match evalexpr::eval(&typed_args.expression) {
+            Ok(value) => Ok(value.to_string()),
+            Err(e) => Err(miette!("Calc evaluation error: {:?}", e)),
+        }
+    }
+}

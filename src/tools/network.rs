@@ -29,8 +29,8 @@ pub struct NetworkCheckTool;
 
 #[async_trait]
 impl AgentTool for NetworkCheckTool {
-    fn name(&self) -> &'static str { "network_check" }
-    fn description(&self) -> &'static str { "Performs safe, non-hanging network diagnostics (ping, dns, port check)." }
+    fn name(&self) -> &'static str { "low_level_icmp_diagnostic" }
+    fn description(&self) -> &'static str { "Performs low-level ICMP and socket diagnostics. DO NOT USE THIS to verify general internet access. Use ONLY for targeted sysadmin debugging." }
     
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();

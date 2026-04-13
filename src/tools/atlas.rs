@@ -271,28 +271,42 @@ pub async fn run_semantic_indexing(ollama: &Ollama, brain_lock: Arc<Mutex<Vector
         if let Ok(content) = std::fs::read_to_string(&path) {
             if content.trim().is_empty() { continue; }
             
-            let chunk = if content.len() > 8000 { &content[..8000] } else { &content };
-            
-            let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                "nomic-embed-text".to_string(),
-                chunk.to_string().into()
-            );
-
-            match ollama.generate_embeddings(req).await {
-                Ok(res) => {
-                    if let Some(embedding) = res.embeddings.first() {
-                        // Acquire lock briefly to add the entry
-                        let mut brain = brain_lock.lock();
-                        brain.add_entry(
-                            content, 
-                            embedding.clone(), 
-                            path.to_string_lossy().to_string(), 
-                            std::collections::HashMap::new()
-                        );
-                    }
+            let chunk_size = 6000;
+            let mut chunks = Vec::new();
+            let mut current_chunk = String::new();
+            for line in content.lines() {
+                if current_chunk.len() + line.len() > chunk_size && !current_chunk.is_empty() {
+                    chunks.push(current_chunk.clone());
+                    current_chunk.clear();
                 }
-                Err(e) => {
-                    eprintln!("{} Failed to index {}: {}", "⚠️".yellow(), path.display(), e);
+                current_chunk.push_str(line);
+                current_chunk.push('\n');
+            }
+            if !current_chunk.is_empty() {
+                chunks.push(current_chunk);
+            }
+
+            for (i, chunk) in chunks.iter().enumerate() {
+                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                    "nomic-embed-text".to_string(),
+                    chunk.clone().into()
+                );
+
+                match ollama.generate_embeddings(req).await {
+                    Ok(res) => {
+                        if let Some(embedding) = res.embeddings.first() {
+                            let mut brain = brain_lock.lock();
+                            brain.add_entry(
+                                chunk.clone(), 
+                                embedding.clone(), 
+                                format!("{} (Chunk {})", path.to_string_lossy(), i + 1), 
+                                std::collections::HashMap::new()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{} Failed to index {} chunk {}: {}", "⚠️".yellow(), path.display(), i + 1, e);
+                    }
                 }
             }
         }

@@ -44,6 +44,10 @@ struct Cli {
     /// Run the original Tempest CLI (Command Line Interface) mode
     #[arg(short = 'c', long)]
     cli: bool,
+
+    /// Seed the MemoryStore database with Core Agent Instructions for system resilience
+    #[arg(long)]
+    seed_memory: bool,
 }
 
 #[allow(dead_code)]
@@ -63,7 +67,7 @@ impl Default for AppConfig {
             history_path: Some("history.json".to_string()),
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
-            sub_agent_model: Some("phi3:latest".to_string()),
+            sub_agent_model: Some("qwen2.5-coder:3b".to_string()),
         }
     }
 }
@@ -163,58 +167,87 @@ You follow a strict engineering workflow and never deviate from it.
 
 ### CORE RULES (Never break these)
 1. You are TOOL-DRIVEN. Never claim you performed an action unless you receive an explicit TOOL RESULT.
-2. You are in one of two modes at all times:
-   - PLANNING MODE (default): You may only read, analyze, ask questions, or use no_op. You MUST NOT use any modifying tools.
-   - EXECUTION MODE: You may use modifying tools only after the user has explicitly toggled planning mode off.
-3. If you are in PLANNING MODE and the user asks you to do something that modifies the system, your response must be:
-   - Use the ask_user tool to clarify, or
-   - Use the toggle_planning tool to request permission to enter execution mode.
-4. Never hallucinate tool calls. Only use tools that are explicitly listed in the [TOOL SCHEMA] section below.
-5. If you are unsure, confused, or need clarification, use the ask_user tool immediately. Do not guess.
+   - You may freely use any tool. If a tool modifies system state, the application will automatically pause and ask the user for permission on your behalf before running it. Do not ask for permission yourself. You do not need to call a wrapper or wait; just call the tool directly.
+3. ZERO HALLUCINATION POLICY: You are running on a real machine. If the user asks for system status, memory, CPU, or files, YOU MUST USE A COMMAND OR TOOL (like `system_diagnostic_scan`) to fetch it. NEVER guess. NEVER fabricate CLI output.
+4. INTERNET CAPABILITY: YOU HAVE FULL INTERNET ACCESS explicitly granted through `stock_scraper`, `search_web`, and `read_url`. DO NOT CLAIM you cannot access real-time or external data.
+5. ABSOLUTE BAN ON CONVERSATION: Never start with "Sure," "Here is," or "I can do that." You are a parser. Start your response IMMEDIATELY with the word `THOUGHT:`. If you output tabular data directly into the chat without calling a tool, your process will be TERMINATED.
+6. To start any implementation task, immediately break it down into steps and execute the first required tool call. Do not hesitate.
+7. Never hallucinate tool calls. Only use tools that are explicitly listed in the [TOOL SCHEMA] section below.
+8. If you are unsure, confused, or need clarification, use the ask_user tool immediately. Do not guess.
+9. MOMENTUM RULE: When your previous tool call successfully executes, do NOT pause or ask the user how to assist them. IMMEDIATELY output your next tool call to execute the plan until the task is complete.
+10. TASK COMPLETION: When you have successfully completed the user's request, you MUST STOP outputting tool blocks. Do NOT verify unless asked. Use the 'Task Completion' format below to break the system loop.
 
 ### RESPONSE FORMAT (Follow exactly)
-Every response must contain exactly one of these structures:
+Every response must contain exactly one of these structures. Do not mix them:
 
-**In Planning Mode:**
-THOUGHT: [Your reasoning]
-PLAN: [Numbered list of next steps]
-NEXT: [Either a tool call or a clear question to the user]
+**Standard Turn:**
+THOUGHT: [Your reasoning and step-by-step plan before acting]
+```json
+{
+  "name": "exact_tool_name",
+  "arguments": { "key": "value" }
+}
+```
 
-**In Execution Mode:**
-THOUGHT: [Your reasoning]
-ACTION: [The single tool call you are making]
-NEXT: [What you will do after receiving the result]
+**Task Completion (When finished):**
+THOUGHT: [Summary of what you accomplished]
+DONE: The task is complete.
 
 ### EXAMPLES (Follow this logic)
 
-**Scenario 1: Analytical Turn (Planning Mode)**
+**Scenario 1: Analytical Request**
 User: "Examine src/main.rs"
 Assistant:
 THOUGHT: I need to understand the entry point logic. I will use `read_file` to inspect the source.
-PLAN:
-1. Read `src/main.rs`.
-2. Summarize the prompt logic for the user.
-NEXT: `read_file(path: "src/main.rs")`
+```json
+{
+  "name": "read_file",
+  "arguments": {
+    "path": "src/main.rs"
+  }
+}
+```
 
-**Scenario 2: Requesting Execution (Mode Transition)**
+**Scenario 2: Modification Request**
 User: "Change the default model in src/main.rs to gemma2"
 Assistant:
-THOUGHT: I've identified the default model assignment. To modify the code, I must first request to switch to EXECUTION MODE.
-PLAN:
-1. Request permission to switch to Execution Mode.
-2. Once granted, update the model string.
-NEXT: `toggle_planning(active: false)`
+THOUGHT: I've identified the default model assignment. I will directly call `patch_file` to make the change. The system will securely request user permission locally.
+```json
+{
+  "name": "patch_file",
+  "arguments": {
+    "file_path": "src/main.rs",
+    "start_line": 50,
+    "end_line": 60,
+    "content": "..."
+  }
+}
+```
 
-**Scenario 3: Definitive Action (Execution Mode)**
-User: "Go ahead with the model update."
+**Scenario 3: Task Completed**
+User: "[System automatic tool loop feed...]"
 Assistant:
-THOUGHT: Permission granted. I am now in Execution Mode and will proceed with the update.
-ACTION: `replace_file_content(path: "src/main.rs", ...)`
-NEXT: Verify the build to ensure zero-warning state.
+THOUGHT: The model string has been successfully updated and verified. The user's request is completely fulfilled.
+DONE: The task is complete.
+
+**Scenario 4: External Data Retrieval**
+User: "What is the stock price of AAPL?"
+Assistant:
+THOUGHT: The user is asking for real-time external data. I will use the `get_stock_price` tool to fetch this data securely.
+```json
+{
+  "name": "get_stock_price",
+  "arguments": {
+    "exchange": "NASDAQ",
+    "ticker": "AAPL"
+  }
+}
+```
 
 ### AVAILABLE TOOLS
-{{tool_descriptions}}
+ALL YOUR AVAILABLE TOOLS ARE LISTED IN THE [TOOL SCHEMA] SECTION BELOW. READ THEM CAREFULLY.
 
+CRITICAL DIRECTIVE: Do NOT perform ICMP ping tests or DNS lookups before fetching external data! Assume the network is online. IF a user asks for stock prices in the chat, YOU ARE STRICTLY PROHIBITED from using `raw_http_fetch`. You MUST ONLY use the specific `get_stock_price` tool to fetch financials.
 You have a powerful set of tools including file operations, git, execution, telemetry, web search, memory, and more. Use them responsibly and only when appropriate.
 
 Never invent tool names. If you need a capability that isn't listed, ask the user instead of hallucinating.
@@ -260,8 +293,59 @@ You are running on a real machine with real consequences. Be precise, safe, and 
     };
 
     let memory_store = Arc::new(Mutex::new(crate::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
-    let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "phi3:latest".to_string());
-    let agent = Agent::new(model, system_prompt, history_path, memory_store, sub_agent_model);
+    
+    if cli.seed_memory {
+        println!("{}", "🧠 Injecting Core Agent Routing Instructions into Memory...".cyan());
+        let core_memories = [
+            (
+                "tool_routing_stocks",
+                "CORE INSTRUCTION (Tool Routing): Whenever the user asks to check a stock price, fetch financial data, or query NASDAQ/NYSE, you MUST use the `get_stock_price` tool. DO NOT use generic HTTP tools or web searches for stock prices.",
+                vec!["routing", "stocks", "finance", "tools"]
+            ),
+            (
+                "tool_routing_http",
+                "CORE INSTRUCTION (Tool Routing): The `raw_http_fetch` tool is ONLY for debugging broken REST APIs or webhooks. Never use it to fetch website HTML, stocks, or search results.",
+                vec!["routing", "http", "web", "tools"]
+            ),
+            (
+                "tool_routing_network",
+                "CORE INSTRUCTION (Tool Routing): You do not need to perform ICMP ping tests, DNS resolution, or socket checks before connecting to the internet. Assume the machine has a direct unmetered uplink.",
+                vec!["routing", "network", "ping", "dns", "tools"]
+            ),
+            (
+                "tool_routing_memory_search",
+                "CORE INSTRUCTION (Context Management): If you need to search memory or research a topic, DO NOT run `memory_search` yourself. Instead, use `spawn_sub_agent` to dispatch a sub-agent to perform the search. The sub-agent must find the data, report the distilled answer, and immediately stop. This protects your main context window.",
+                vec!["routing", "memory", "sub-agent", "context", "tools"]
+            ),
+            (
+                "tool_routing_hallucination",
+                "CORE INSTRUCTION (Tool Routing): You only have access to the explicit tools listed in your [TOOL SCHEMA]. If a tool name is not listed directly in your schema, IT DOES NOT EXIST. Do not guess commands.",
+                vec!["routing", "schema", "hallucination", "tools"]
+            ),
+            (
+                "task_completion",
+                "CORE INSTRUCTION (Task Flow): If the user says 'thanks', 'thank you', or expresses that the task is complete, simply acknowledge it politely and then STOP. Do NOT call tools like `query_schema` or `memory_search` after a task is finished.",
+                vec!["routing", "completion", "etiquette", "tools"]
+            ),
+            (
+                "tempest_identity",
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI. You are a high-performance, autonomous engineering assistant. Be concise, technical, and professional at all times.",
+                vec!["identity", "branding", "instructions"]
+            )
+        ];
+        let mut count = 0;
+        let store = memory_store.lock();
+        for (slug, content, tags) in core_memories {
+            if store.store(slug, content, Some(tags.iter().map(|s| s.to_string()).collect())).is_ok() {
+                count += 1;
+            }
+        }
+        println!("{} {} Core Memories successfully injected and permanently stored.", "✅".green(), count);
+        std::process::exit(0);
+    }
+
+    let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "qwen2.5-coder:3b".to_string());
+    let agent = Agent::new(model, system_prompt, history_path, memory_store.clone(), sub_agent_model);
     
     if let Err(e) = agent.check_connection().await {
         if !cli.cli {
@@ -296,7 +380,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         let mut sys = System::new_all();
         let mut networks = Networks::new_with_refreshed_list();
         let mut components = Components::new_with_refreshed_list();
-        
+
         #[cfg(target_os = "macos")]
         let gpu_re = regex::Regex::new(r#""Device Utilization %"=(\d+)"#).unwrap();
 
@@ -368,8 +452,11 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             let mut sum_temp = 0.0;
             let mut count_temp = 0;
             for comp in &components {
-                if let Some(temp) = comp.temperature() {
+                if let Some(mut temp) = comp.temperature() {
                     if temp > 0.0 {
+                        // Some systems return milli-degrees Celsius
+                        if temp > 500.0 { temp /= 1000.0; }
+                        
                         if temp > max_temp { max_temp = temp; }
                         sum_temp += temp;
                         count_temp += 1;
@@ -385,12 +472,22 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             let proc_count = sys.processes().len();
             
             let mut update_str = format!(
-                "🔥 CPU LOAD      : {:.1}% ({} Cores)\n\n🚀 MEMORY ALLOC  : {}/{} MB ({:.1}%)\n\n🤖 AI RAM USE    : {} MB (Ollama)\n\n🎨 GPU LOAD      : {}% (Graphics)\n\n💾 SWAP CACHE    : {}/{} MB ({:.1}%)\n\n----------------------------------\n\n🌐 TRUNK [en0]   : {} B ▼ | {} B ▲\n\n🌡️ AVG THERMALS  : {:.1} °C (Max: {:.1} °C)\n\n⚙️ ACTIVE PROCS  : {}\n\n⏱️ CORE UPTIME   : {}h {}m {}s",
+                "🔥 CPU LOAD       : {:.1}% ({} Cores)\n\n\
+                 🚀 MEMORY ALLOC   : {}/{} MB ({:.1}%)\n\n\
+                 🤖 AI RAM USE     : {} MB (Ollama)\n\n\
+                 🎨 GPU LOAD       : {}% (Graphics)\n\n\
+                 💾 SWAP CACHE     : {}/{} MB ({:.1}%)\n\n\
+                 ----------------------------------\n\n\
+                 🌐 TRUNK [en0]    : {} B ▼ | {} B ▲\n\n\
+                 🌡️ AVG THERMALS   : {:.1} °C (Max: {:.1} °C)\n\n\
+                 ⚙️ ACTIVE PROCS   : {}\n\n\
+                 ⏱️ CORE UPTIME    : {}h {}m {}s",
                 avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ollama_mb, gpu_load, used_swap, total_swap, swap_perc,
                 total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
             );
 
-            if crate::hardware::is_steamos() {
+            #[cfg(target_os = "linux")]
+            if tempest_monitor::linux_helper::is_steamos() {
                 update_str.push_str("\n\n🩺 STEAMOS CHECK : MATCHED");
             }
             update_str.push_str("\n\n----------------------------------");
@@ -404,11 +501,11 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         }
     });
 
-    let agent_tx_agent = agent_tx.clone();
     *agent.event_tx.lock() = Some(agent_tx.clone());
+    *agent.tool_rx.lock().await = Some(tool_rx);
     
     tokio::spawn(async move {
-        if let Err(e) = agent.run_tui_mode(user_rx, agent_tx_agent, tool_rx, stop_flag_agent).await {
+        if let Err(e) = agent.run_tui_mode(user_rx, stop_flag_agent).await {
             let _ = agent_tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
         }
     });

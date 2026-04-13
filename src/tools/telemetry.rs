@@ -137,23 +137,39 @@ impl AgentTool for SystemTelemetryTool {
         // Platform-specific GPU Telemetry (from tempest-monitor crate)
         #[cfg(target_os = "macos")]
         {
-            let (usage, gpu_mw, cpu_mw) = get_macos_gpu_info();
+            let tel = get_macos_gpu_info(false);
             report.push_str(&format!(
-                "- GPU (Native):\n  - Usage: {:.1}%\n  - GPU Power: {} mW\n  - CPU Power: {} mW\n",
-                usage, 
-                gpu_mw.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
-                cpu_mw.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())
+                "- GPU (Native): {}\n  - Usage: {:.1}%\n  - GPU Power: {} mW\n  - Package Power: {} mW\n",
+                tel.model,
+                tel.usage_pct, 
+                tel.power_mw.map(|v: f64| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                tel.package_power_mw.map(|v: f64| v.to_string()).unwrap_or_else(|| "-".to_string())
             ));
         }
 
         #[cfg(target_os = "linux")]
         {
-            let gpu_info = tempest_monitor::linux_helper::get_nvidia_gpu_info();
-            if !gpu_info.is_empty() {
-                report.push_str("- NVIDIA GPUs:\n");
-                for gpu in gpu_info {
+            let tel = tempest_monitor::linux_helper::collect_gpu_telemetry();
+            report.push_str(&format!("- GPU (Unified): {} [Driver: {}]\n", tel.model, tel.driver));
+            report.push_str(&format!("  - Load: {:.1}%\n", tel.usage_pct));
+            
+            if let Some(t) = tel.temp_c {
+                report.push_str(&format!("  - Temp: {} °C\n", t));
+            }
+            if let Some(clk) = tel.clock_mhz {
+                report.push_str(&format!("  - Clock: {} MHz\n", clk));
+            }
+            if let (Some(used), Some(total)) = (tel.vram_used, tel.vram_total) {
+                let u_gb = used as f64 / 1024.0 / 1024.0 / 1024.0;
+                let t_gb = total as f64 / 1024.0 / 1024.0 / 1024.0;
+                report.push_str(&format!("  - VRAM: {:.2} GB / {:.2} GB ({:.1}%)\n", u_gb, t_gb, (u_gb / t_gb * 100.0)));
+            }
+
+            if !tel.nvidia_info.is_empty() {
+                report.push_str("  - NVIDIA Cluster Details:\n");
+                for gpu in tel.nvidia_info {
                     report.push_str(&format!(
-                        "  - {}: Temp {} °C, Memory {:.1}%, Power {} mW\n",
+                        "    - {}: Temp {} °C, Memory {:.1}%, Power {} mW\n",
                         gpu.name, gpu.temperature, gpu.memory_used_pct, gpu.power_usage_mw
                     ));
                 }

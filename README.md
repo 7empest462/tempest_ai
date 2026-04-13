@@ -10,6 +10,7 @@ Tempest AI is a high-performance, Rust-based autonomous agent designed to be you
 ### ⚡ 1. Native Tool-Calling Architecture
 Tempest is powered by the **`ollama-rs` 0.3.4** typed tool-calling framework. 
 - **Strongly Typed**: Every tool is defined using `schemars` JSON schemas, eliminating brittle regex-based Markdown parsing.
+- **Schema Emancipation**: The agent is hardened against hallucinated network reconnaissance and is optimized to route directly to native tools like `get_stock_price`.
 - **Improved Autonomy**: The LLM receives exact structural requirements for every function, leading to a 90% reduction in malformed tool calls.
 - **Multi-Turn Chaining**: Supports multiple sequential tool executions in a single reasoning step.
 
@@ -19,7 +20,7 @@ Tempest features a persistent SQLite-backed **Conceptual Brain** with `#tagging`
 - **Fuzzy Recall**: Retrieve memories via topic names or associated tags, ensuring the agent "remembers" the right context at the right time.
 
 ### 🌡️ 3. Hardware-Aware Sentience
-Tempest is the first local agent that is truly "Sentient" of its host. It injects real-time **CPU, GPU, RAM, and Thermal telemetry** into its reasoning loop.
+Tempest is the first local agent that is truly "Sentient" of its host. Rather than passively bloating the context window, the Agent authentically reaches out and pulls real-time **CPU, GPU, RAM, and Thermal telemetry** into its reasoning loop on-demand using its native `system_diagnostic_scan` tool.
 - **Load-Adaptive**: The agent can autonomously slow down or pivot tasks if it detects system memory is critically low or thermals are spiking.
 - **Cross-Platform**: Full telemetry support for macOS (Apple Silicon) and Linux (sysfs/hwmon).
 
@@ -99,8 +100,9 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 - **Intelligence**: `advanced_system_oracle`, `telemetry_chart`.
 
 ### 🌐 Network & Web Suite
-- **Connectivity**: `network_check`, `network_sniffer`.
-- **Web**: `search_web`, `read_url`, `http_request`, `download_file`.
+- **Connectivity**: `low_level_icmp_diagnostic`, `network_sniffer`.
+- **Web**: `search_web`, `read_url`, `raw_http_fetch`, `download_file`.
+- **Finance**: `get_stock_price`.
 
 ### ⚙️ Agent Ops & Utilities
 - **Meta**: `spawn_sub_agent`, `toggle_planning`, `request_privileges`, `update_task_context`, `ask_user`.
@@ -108,9 +110,10 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 
 ---
 
-## 🛡️ Guardrails & Safety
+### 🛡️ Guardrails & Safety
 - **Planning Mode**: Tempest starts every session in a locked state. It can research and plan, but MUST physically call the **`toggle_planning`** tool to unlock system-modifying actions.
-- **Loop Interception**: A "Sentinel" layer detects duplicate tool sequences and "hallucinated loops," forcing the agent to self-correct before wasting tokens.
+- **Turn Watchdog**: A "Sentinel" layer detects when the agent tries to finish turn silently after a tool call. It automatically intercedes with a reprimand to force a final summary.
+- **Tool Repair Layer**: An internal fuzzy-mapper that heals minor tool hallucinations (e.g., `stock_price` -> `get_stock_price`) and arg-name errors on the fly.
 
 ---
 
@@ -123,8 +126,8 @@ git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo
 ## ⚙️ Configuration
 Tempest looks for its config at `~/.config/tempest_ai/config.toml`.
 ```toml
-model = "ministral-3:8b"
-sub_agent_model = "qwen3.5:2b"
+model = "qwen2.5-coder:7b"
+sub_agent_model = "qwen2.5-coder:3b"
 history_path = "~/.tempest_history"
 encrypt_history = true
 ```

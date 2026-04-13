@@ -42,9 +42,13 @@ impl AgentTool for AskUserTool {
         // 🚀 TUI HANDOFF
         if context.tx.send(crate::tui::AgentEvent::RequestInput(self.name().to_string(), question.to_string())).await.is_ok() {
             let mut rx_lock = context.tool_rx.lock().await;
-            match rx_lock.recv().await {
-                Some(crate::tui::ToolResponse::Text(ans)) => return Ok(format!("User responded: {}", ans)),
-                _ => return Err(miette!("User cancelled input.")),
+            if let Some(rx) = rx_lock.as_mut() {
+                match rx.recv().await {
+                    Some(crate::tui::ToolResponse::Text(ans)) => return Ok(format!("User responded: {}", ans)),
+                    _ => return Err(miette!("User cancelled input.")),
+                }
+            } else {
+                return Err(miette!("No live TUI input channel configured."));
             }
         }
 
@@ -102,6 +106,9 @@ impl AgentTool for SpawnSubAgentTool {
         let task = typed_args.task;
         let model = typed_args.model.unwrap_or_else(|| context.sub_agent_model.clone());
         
+        // Notify HUD
+        let _ = context.tx.send(crate::tui::AgentEvent::SubagentStatus(Some(format!("Calling {} for assist:\n{}", model, task)))).await;
+
         let sub_history = vec![
             ChatMessage::new(MessageRole::System, "You are a specialized Disciplined Sub-Agent. \
                  Perform the focused mission described below. \
@@ -112,48 +119,19 @@ impl AgentTool for SpawnSubAgentTool {
         ];
         
         let req = ChatMessageRequest::new(model, sub_history);
-        match context.ollama.send_chat_messages(req).await {
+        let response = context.ollama.send_chat_messages(req).await;
+        
+        // Clear HUD
+        let _ = context.tx.send(crate::tui::AgentEvent::SubagentStatus(None)).await;
+
+        match response {
             Ok(res) => Ok(format!("[SUB-AGENT REPORT]: {}", res.message.content)),
             Err(e) => Err(miette!("Sub-agent error: {}", e)),
         }
     }
 }
 
-pub struct TogglePlanningTool;
 
-#[async_trait]
-impl AgentTool for TogglePlanningTool {
-    fn name(&self) -> &'static str { "toggle_planning" }
-    fn description(&self) -> &'static str { "The Master Switch. Sets/Toggles between PLANNING and EXECUTION mode. You MUST set this to 'active: false' to enter EXECUTION mode before any state-modifying tools (write_file, run_command, etc.) will work." }
-    fn tool_info(&self) -> ToolInfo {
-        let mut settings = schemars::generate::SchemaSettings::draft07();
-        settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<TogglePlanningArgs>();
-        
-        ToolInfo {
-            tool_type: ToolType::Function,
-            function: ToolFunctionInfo {
-                name: self.name().to_string(),
-                description: self.description().to_string(),
-                parameters: payload.into(),
-            }
-        }
-    }
-
-    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: TogglePlanningArgs = serde_json::from_value(args.clone()).unwrap_or(TogglePlanningArgs { active: None });
-        let mut planning_lock = context.planning_mode.lock();
-        
-        if let Some(active) = typed_args.active {
-            *planning_lock = active;
-        } else {
-            *planning_lock = !*planning_lock;
-        }
-        
-        let mode = if *planning_lock { "PLANNING" } else { "EXECUTION" };
-        Ok(format!("Agent is now in {} mode.", mode))
-    }
-}
 
 pub struct UpdateTaskContextTool;
 
@@ -185,11 +163,7 @@ impl AgentTool for UpdateTaskContextTool {
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub struct TogglePlanningArgs {
-    /// Explicitly set the mode. true for PLANNING, false for EXECUTION. If omitted, toggles current state.
-    pub active: Option<bool>,
-}
+
 
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdateTaskContextArgs {

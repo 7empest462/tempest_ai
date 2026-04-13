@@ -186,8 +186,8 @@ pub struct HttpRequestTool;
 
 #[async_trait]
 impl AgentTool for HttpRequestTool {
-    fn name(&self) -> &'static str { "http_request" }
-    fn description(&self) -> &'static str { "Makes an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) with optional headers and body. Use this to interact with REST APIs, webhooks, or any HTTP endpoint. Returns status code, headers, and response body." }
+    fn name(&self) -> &'static str { "raw_http_fetch" }
+    fn description(&self) -> &'static str { "Makes an arbitrary HTTP request. Use this ONLY as a last resort for debugging REST APIs or webhooks. DO NOT use this for gathering standard web data, stocks, or searches." }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -211,6 +211,7 @@ impl AgentTool for HttpRequestTool {
 
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
+            .timeout(std::time::Duration::from_secs(10))
             .build().into_diagnostic()?;
 
         let mut request = match method.as_str() {
@@ -299,5 +300,82 @@ impl AgentTool for DownloadFileTool {
         }
         std::fs::write(&path, &bytes).into_diagnostic()?;
         Ok(format!("✅ Downloaded {} bytes from {} → {}", bytes.len(), url, path))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct StockScraperArgs {
+    #[schemars(description = "The stock exchange market identifier code (MIC) (e.g. 'NASDAQ', 'NYSE')")]
+    pub exchange: String,
+    #[schemars(description = "The ticker symbol of the stock (e.g. 'AAPL', 'TSLA')")]
+    pub ticker: String,
+}
+
+pub struct StockScraperTool;
+
+#[async_trait]
+impl AgentTool for StockScraperTool {
+    fn name(&self) -> &'static str { "get_stock_price" }
+    
+    fn description(&self) -> &'static str { "CRITICAL TOOL: Fetches real-time stock prices, tickers, and financial data. ALWAYS use this tool when the user asks for the price of a stock (e.g. AAPL, TSLA, MSFT) rather than trying to query a database." }
+    
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<StockScraperArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: StockScraperArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        
+        let target_url = format!(
+            "https://www.google.com/finance/quote/{}:{}?hl=en",
+            typed_args.ticker, typed_args.exchange
+        );
+        
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .timeout(std::time::Duration::from_secs(10))
+            .build().into_diagnostic()?;
+            
+        let response = client.get(&target_url).send().await.into_diagnostic()?;
+        if !response.status().is_success() {
+            return Err(miette!("HTTP Request failed with status: {}", response.status()));
+        }
+        
+        let content = response.text().await.into_diagnostic()?;
+        let document = scraper::Html::parse_document(&content);
+        
+        // Use Google Finance's specific div classes (these may change over time, matching ollama-rs implementation)
+        let items_selector = scraper::Selector::parse("div.gyFHrc").map_err(|e| miette!("Selector error: {:?}", e))?;
+        let desc_selector = scraper::Selector::parse("div.mfs7Fc").map_err(|e| miette!("Selector error: {:?}", e))?;
+        let value_selector = scraper::Selector::parse("div.P6K39c").map_err(|e| miette!("Selector error: {:?}", e))?;
+
+        let mut results = Vec::new();
+
+        for item in document.select(&items_selector) {
+            if let Some(item_description) = item.select(&desc_selector).next() {
+                if let Some(item_value) = item.select(&value_selector).next() {
+                    let desc = item_description.text().collect::<Vec<_>>().join("");
+                    let val = item_value.text().collect::<Vec<_>>().join("");
+                    results.push(format!("{}: {}", desc, val));
+                }
+            }
+        }
+
+        if results.is_empty() {
+            Ok(format!("Could not extract stock metrics for {}:{}. The DOM structure may have changed or the ticker is invalid.", typed_args.exchange, typed_args.ticker))
+        } else {
+            Ok(format!("Stock Information for {}:\n{}", typed_args.ticker, results.join("\n")))
+        }
     }
 }

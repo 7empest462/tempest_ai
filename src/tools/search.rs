@@ -112,7 +112,6 @@ pub struct IndexFileSemanticallyTool;
 impl AgentTool for IndexFileSemanticallyTool {
     fn name(&self) -> &'static str { "index_file_semantically" }
     fn description(&self) -> &'static str { "Manually parses and indexes a local file into your conceptual search index. Use this to 'train' yourself on new codebase logic." }
-    fn is_modifying(&self) -> bool { true }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -134,24 +133,46 @@ impl AgentTool for IndexFileSemanticallyTool {
 
         let content = std::fs::read_to_string(&path).into_diagnostic()?;
         
-        let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-            "nomic-embed-text".to_string(),
-            content.clone().into()
-        );
+        let chunk_size = 6000;
+        let mut chunks = Vec::new();
+        let mut current_chunk = String::new();
+        for line in content.lines() {
+            if current_chunk.len() + line.len() > chunk_size && !current_chunk.is_empty() {
+                chunks.push(current_chunk.clone());
+                current_chunk.clear();
+            }
+            current_chunk.push_str(line);
+            current_chunk.push('\n');
+        }
+        if !current_chunk.is_empty() {
+            chunks.push(current_chunk);
+        }
 
-        match context.ollama.generate_embeddings(req).await {
-            Ok(res) => {
-                if let Some(embedding) = res.embeddings.first() {
-                    let mut brain = context.vector_brain.lock();
-                    brain.add_entry(content.clone(), embedding.clone(), path.clone(), std::collections::HashMap::new());
-                    let _ = brain.save_to_disk(context.brain_path);
-                    Ok(format!("✅ Successfully indexed file: {} ({} bytes)", path, content.len()))
-                } else {
-                    Ok("No embeddings generated for file content.".to_string())
+        let mut success_count = 0;
+        for (i, chunk) in chunks.iter().enumerate() {
+            let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                "nomic-embed-text".to_string(),
+                chunk.clone().into()
+            );
+
+            match context.ollama.generate_embeddings(req).await {
+                Ok(res) => {
+                    if let Some(embedding) = res.embeddings.first() {
+                        let mut brain = context.vector_brain.lock();
+                        brain.add_entry(chunk.clone(), embedding.clone(), format!("{} (Chunk {})", path, i + 1), std::collections::HashMap::new());
+                        success_count += 1;
+                    }
+                }
+                Err(e) => {
+                    return Err(miette!("Embedding index error on chunk {}: {}", i + 1, e));
                 }
             }
-            Err(e) => Err(miette!("Embedding index error: {}", e)),
         }
+        
+        let brain = context.vector_brain.lock();
+        let _ = brain.save_to_disk(context.brain_path);
+        
+        Ok(format!("✅ Successfully indexed file: {} ({} bytes across {} chunks)", path, content.len(), success_count))
     }
 }
 

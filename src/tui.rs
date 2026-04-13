@@ -24,6 +24,7 @@ pub enum AgentEvent {
         response_tx: tokio::sync::mpsc::Sender<ToolResponse>,
     },
     StreamToken(String),
+    SubagentStatus(Option<String>),
 }
 
 pub enum ToolResponse {
@@ -50,6 +51,7 @@ pub struct App {
     pub input_response_buffer: String,
     pub pending_confirmation: Option<(String, String)>,
     pub pending_privilege_request: Option<(String, tokio::sync::mpsc::Sender<ToolResponse>)>,
+    pub subagent_notification: Option<String>,
 }
 
 impl App {
@@ -74,6 +76,7 @@ impl App {
             input_response_buffer: String::new(),
             pending_confirmation: None,
             pending_privilege_request: None,
+            subagent_notification: None,
         }
     }
 }
@@ -222,6 +225,9 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                     } else {
                         app.current_stream.push_str(&token);
                     }
+                }
+                AgentEvent::SubagentStatus(msg) => {
+                    app.subagent_notification = msg;
                 }
             }
         }
@@ -382,6 +388,14 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
             Span::styled(thinking, Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)),
         ]));
+    }
+
+    if let Some(msg) = &app.subagent_notification {
+        status_lines.push(Line::from(""));
+        status_lines.push(Line::from(Span::styled("🤖 SUBAGENT ACTIVE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        for line in msg.split('\n') {
+            status_lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(Color::White))));
+        }
     }
 
     let status_block = Paragraph::new(status_lines)
