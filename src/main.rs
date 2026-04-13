@@ -472,16 +472,25 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             let proc_count = sys.processes().len();
             
             let mut update_str = format!(
-                "🔥 CPU LOAD       : {:.1}% ({} Cores)\n\n\
-                 🚀 MEMORY ALLOC   : {}/{} MB ({:.1}%)\n\n\
-                 🤖 AI RAM USE     : {} MB (Ollama)\n\n\
-                 🎨 GPU LOAD       : {}% (Graphics)\n\n\
-                 💾 SWAP CACHE     : {}/{} MB ({:.1}%)\n\n\
-                 ----------------------------------\n\n\
-                 🌐 TRUNK [en0]    : {} B ▼ | {} B ▲\n\n\
-                 🌡️ AVG THERMALS   : {:.1} °C (Max: {:.1} °C)\n\n\
-                 ⚙️ ACTIVE PROCS   : {}\n\n\
-                 ⏱️ CORE UPTIME    : {}h {}m {}s",
+"🔥 CPU LOAD       : {:.1}% ({} Cores)
+
+🚀 MEMORY ALLOC   : {}/{} MB ({:.1}%)
+
+🤖 AI RAM USE     : {} MB (Ollama)
+
+🎨 GPU LOAD       : {}% (Graphics)
+
+💾 SWAP CACHE     : {}/{} MB ({:.1}%)
+
+----------------------------------
+
+🌐 TRUNK [en0]    : {} B ▼ | {} B ▲
+
+🌡️ AVG THERMALS   : {:.1} °C (Max: {:.1} °C)
+
+⚙️ ACTIVE PROCS   : {}
+
+⏱️ CORE UPTIME    : {}h {}m {}s",
                 avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ollama_mb, gpu_load, used_swap, total_swap, swap_perc,
                 total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
             );
