@@ -278,10 +278,6 @@ pub fn get_linux_gpu_usage() -> i32 {
     tempest_monitor::linux_helper::get_linux_gpu_load()
 }
 
-#[cfg(target_os = "linux")]
-static INTEL_GPU_STATE: Mutex<Option<HashMap<String, (u64, Instant)>>> = Mutex::new(None);
-
-
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 pub fn get_linux_gpu_usage() -> i32 { 0 }
