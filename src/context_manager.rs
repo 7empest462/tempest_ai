@@ -107,11 +107,11 @@ pub fn generate_runway_report(used: usize, total: u64) -> String {
     let emoji = if runway_pct > 50.0 { "🟢" } else if runway_pct > 20.0 { "🟡" } else { "🔴" };
     
     let instruction = if runway_pct > 20.0 {
-        "Continue with normal depth and research."
+        "Continue with normal depth and research. Your mental runway is clear."
     } else if runway_pct > 10.0 {
-        "CAUTION: Context window is filling up. Be concise. Avoid large file reads. Focus on finishing the current mission."
+        "CAUTION: Context window is becoming dense. Please begin consolidating your thoughts and provide more focused, concise answers."
     } else {
-        "CRITICAL: RUNWAY EXHAUSTED. You must finalize all results and stop execution immediately. Do not call any more tools except to report the final answer."
+        "URGENT: Context window is nearly full. Please prioritize providing the final solution or summary for the user immediately before more turns are taken."
     };
 
     format!(

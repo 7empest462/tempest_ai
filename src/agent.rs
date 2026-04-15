@@ -264,7 +264,8 @@ impl Agent {
                 let ctx_limit = self.calculate_optimal_ctx();
                 let needs_compact = {
                     let h_lock = self.history.lock();
-                    crate::context_manager::needs_compaction(&h_lock, ctx_limit)
+                    // Trigger compaction earlier (at 60% instead of 75%) to avoid runway panic
+                    crate::context_manager::needs_compaction(&h_lock, (ctx_limit as f64 * 0.8) as u64)
                 };
 
                 if needs_compact {
@@ -514,6 +515,7 @@ impl Agent {
             "recall" | "recall_knowledge" | "memory" | "brain" => "recall_brain".to_string(),
             "distill" | "save_knowledge" | "save_brain" => "distill_knowledge".to_string(),
             "shell" | "exec" | "command" => "run_command".to_string(),
+            "notify" | "alert" | "status" => "no_op".to_string(),
             _ => tool_name,
         };
             
