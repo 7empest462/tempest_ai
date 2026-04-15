@@ -259,6 +259,39 @@ impl Agent {
                 }
                 break;
             }
+            // --- CONTEXT WINDOW MANAGEMENT ---
+            {
+                let ctx_limit = self.calculate_optimal_ctx();
+                let needs_compact = {
+                    let h_lock = self.history.lock();
+                    crate::context_manager::needs_compaction(&h_lock, ctx_limit)
+                };
+
+                if needs_compact {
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("📦 Compacting context window...".to_string()));
+                    }
+
+                    // Clone history and release lock before async call
+                    let history_to_compact = self.history.lock().clone();
+                    
+                    // Release happens implicitly here since we don't hold the guard across await
+                    let new_history = crate::context_manager::compact_history(
+                        &self.ollama, 
+                        &self.sub_agent_model, 
+                        history_to_compact, 
+                        ctx_limit
+                    ).await?;
+
+                    // Re-lock and update
+                    {
+                        let mut h_lock = self.history.lock();
+                        *h_lock = new_history;
+                    }
+                    let _ = self.save_history();
+                }
+            }
 
             // --- STAGE 1: PLANNING ---
             let planner_output = self.planner_turn().await?;
@@ -472,6 +505,7 @@ impl Agent {
         };
             
         let mut args = tool_req.get("arguments")
+            .or_else(|| tool_req.get("args"))
             .or_else(|| tool_req.get("params"))
             .or_else(|| tool_req.get("parameters"))
             .cloned()
@@ -483,6 +517,19 @@ impl Agent {
                 if obj.contains_key("symbol") && !obj.contains_key("ticker") {
                     if let Some(sym) = obj.remove("symbol") {
                         obj.insert("ticker".to_string(), sym);
+                    }
+                }
+            }
+        }
+
+        if tool_name == "run_command" {
+            if let Some(obj) = args.as_object_mut() {
+                if obj.contains_key("command") && obj.contains_key("options") {
+                    let cmd = obj.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                    let opts = obj.get("options").and_then(|v| v.as_str()).unwrap_or("");
+                    if !opts.is_empty() {
+                        obj.insert("command".to_string(), serde_json::json!(format!("{} {}", cmd, opts)));
+                        obj.remove("options");
                     }
                 }
             }
