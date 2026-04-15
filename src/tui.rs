@@ -25,6 +25,7 @@ pub enum AgentEvent {
     },
     StreamToken(String),
     SubagentStatus(Option<String>),
+    ContextStatus { used: usize, total: u64 },
 }
 
 pub enum ToolResponse {
@@ -52,6 +53,8 @@ pub struct App {
     pub pending_confirmation: Option<(String, String)>,
     pub pending_privilege_request: Option<(String, tokio::sync::mpsc::Sender<ToolResponse>)>,
     pub subagent_notification: Option<String>,
+    pub context_used: usize,
+    pub context_total: u64,
 }
 
 impl App {
@@ -77,6 +80,8 @@ impl App {
             pending_confirmation: None,
             pending_privilege_request: None,
             subagent_notification: None,
+            context_used: 0,
+            context_total: 0,
         }
     }
 }
@@ -228,6 +233,10 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                 }
                 AgentEvent::SubagentStatus(msg) => {
                     app.subagent_notification = msg;
+                }
+                AgentEvent::ContextStatus { used, total } => {
+                    app.context_used = used;
+                    app.context_total = total;
                 }
             }
         }
@@ -396,6 +405,27 @@ fn ui(f: &mut Frame, app: &mut App) {
         for line in msg.split('\n') {
             status_lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(Color::White))));
         }
+    }
+
+    // --- CONTEXT WINDOW TRACKER ---
+    if app.context_total > 0 {
+        status_lines.push(Line::from(""));
+        status_lines.push(Line::from(Span::styled("🧠 CONTEXT WINDOW", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
+        
+        let pct = (app.context_used as f64 / app.context_total as f64).min(1.0);
+        let bar_width = 20;
+        let filled = (pct * bar_width as f64) as usize;
+        let empty = bar_width - filled;
+        
+        let bar_color = if pct > 0.9 { Color::Red } else if pct > 0.75 { Color::Yellow } else { Color::Green };
+        
+        status_lines.push(Line::from(vec![
+            Span::styled("[", Style::default().fg(Color::Gray)),
+            Span::styled("|".repeat(filled), Style::default().fg(bar_color)),
+            Span::styled(".".repeat(empty), Style::default().fg(Color::DarkGray)),
+            Span::styled("]", Style::default().fg(Color::Gray)),
+            Span::raw(format!(" {} / {}k", app.context_used, app.context_total / 1024)),
+        ]));
     }
 
     let status_block = Paragraph::new(status_lines)

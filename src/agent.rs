@@ -382,6 +382,12 @@ impl Agent {
         // --- PHASE 3: TOKEN BUDGET AWARENESS ---
         let ctx_limit = self.calculate_optimal_ctx();
         let used = crate::context_manager::estimate_tokens(&history_snapshot);
+        
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(crate::tui::AgentEvent::ContextStatus { used, total: ctx_limit }).await;
+        }
+
         let runway_report = crate::context_manager::generate_runway_report(used, ctx_limit);
         history_snapshot.push(ChatMessage::new(MessageRole::System, runway_report));
 
