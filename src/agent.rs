@@ -377,7 +377,14 @@ impl Agent {
             .temperature(if *self.planning_mode.lock() { 0.05 } else { 0.30 });
 
         let mut history_snapshot = self.history.lock().clone();
-        let pos = history_snapshot.len().saturating_sub(1);
+
+        // --- PHASE 3: TOKEN BUDGET AWARENESS ---
+        let ctx_limit = self.calculate_optimal_ctx();
+        let used = crate::context_manager::estimate_tokens(&history_snapshot);
+        let runway_report = crate::context_manager::generate_runway_report(used, ctx_limit);
+        history_snapshot.push(ChatMessage::new(MessageRole::System, runway_report));
+
+        let pos = history_snapshot.len().saturating_sub(2); // Insert before the directive
         history_snapshot.insert(pos, ChatMessage::new(
             MessageRole::System,
             "CRITICAL: You are an autonomous agent. DO NOT ask the user how you can help. You MUST begin exactly with THOUGHT:, and you MUST output your next tool call as pure JSON enclosed in a ```json block. Do NOT use bullet points or conversational preamble.".to_string()
@@ -499,8 +506,14 @@ impl Agent {
             .to_string();
 
         // 🧠 FUZZY TOOL REPAIR
-        let tool_name = match tool_name.as_str() {
-            "stock_price" | "get_stock" | "check_stock" => "get_stock_price".to_string(),
+        let tool_name = match tool_name.to_lowercase().as_str() {
+            "ask" | "ask_user_input" | "prompt_user" | "user_input" => "ask_user".to_string(),
+            "stock_price" | "get_stock" | "check_stock" | "stock" => "get_stock_price".to_string(),
+            "search" | "google_search" | "web_search" => "search_web".to_string(),
+            "read" | "fetch_url" | "web_read" => "read_url".to_string(),
+            "recall" | "recall_knowledge" | "memory" | "brain" => "recall_brain".to_string(),
+            "distill" | "save_knowledge" | "save_brain" => "distill_knowledge".to_string(),
+            "shell" | "exec" | "command" => "run_command".to_string(),
             _ => tool_name,
         };
             
@@ -576,24 +589,50 @@ impl Agent {
                     return (tool_name.clone(), format!("User REJECTED execution of {}. Formulate a new plan using non-modifying tools.", tool_name), false);
                 }
             }
-            let start = std::time::Instant::now();
-            metrics::gauge!("tool.semaphore_available_permits").set(self.concurrency_semaphore.available_permits() as f64);
             
-            let _permit = self.concurrency_semaphore.acquire().await.ok();
-            let context = self.get_tool_context();
-            
-            let result = match tool.execute(&args, context).await {
-                Ok(res) => (tool_name.to_string(), res, true),
-                Err(e) => (tool_name.to_string(), format!("Error: {}", e), false),
-            };
+            let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
+            let max_attempts = 3;
 
-            let duration = start.elapsed();
-            metrics::histogram!("tool.execution_ms", "tool" => tool_name.clone()).record(duration.as_millis() as f64);
-            
-            // Update concurrent tracking
-            self.recent_tool_calls.insert(tool_name.to_string(), result.1.chars().take(100).collect());
-            
-            result
+            for attempt in 1..=max_attempts {
+                let start = std::time::Instant::now();
+                metrics::gauge!("tool.semaphore_available_permits").set(self.concurrency_semaphore.available_permits() as f64);
+                
+                let _permit = self.concurrency_semaphore.acquire().await.ok();
+                let context = self.get_tool_context();
+                
+                match tool.execute(&args, context).await {
+                    Ok(res) => {
+                        let duration = start.elapsed();
+                        metrics::histogram!("tool.execution_ms", "tool" => tool_name.clone()).record(duration.as_millis() as f64);
+                        
+                        let result = (tool_name.to_string(), res, true);
+                        self.recent_tool_calls.insert(tool_name.to_string(), result.1.chars().take(100).collect());
+                        return result;
+                    }
+                    Err(e) => {
+                        let err_msg = format!("{}", e);
+                        let classification = crate::error_classifier::classify_error(&tool_name, &err_msg);
+
+                        if classification == crate::error_classifier::ErrorClass::Retryable && attempt < max_attempts {
+                            let wait_secs = 2u64.pow(attempt as u32 - 1);
+                            let tx_opt = self.event_tx.lock().clone();
+                            if let Some(tx) = tx_opt {
+                                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                    format!("🔄 Retrying {} ({}/{}) - Wait {}s: {}", tool_name, attempt, max_attempts, wait_secs, err_msg)
+                                ));
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                            last_result = (tool_name.clone(), format!("Error (Failed after {} attempts): {}", attempt, err_msg), false);
+                            continue;
+                        } else {
+                            last_result = (tool_name.to_string(), format!("Error: {}", err_msg), false);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            last_result
         } else {
             (tool_name.to_string(), format!("Tool '{}' not found. CRITICAL RULE: You MUST NEVER invent tools! Read the [TOOL SCHEMA]. For external data or stocks, use 'get_stock_price' or 'read_url'. For memory/research, use 'spawn_sub_agent' to preserve context and stop immediately when done.", tool_name), false)
         }

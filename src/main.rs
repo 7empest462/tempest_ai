@@ -9,6 +9,8 @@ mod daemon;
 mod tui;
 mod vector_brain;
 mod skills;
+mod context_manager;
+mod error_classifier;
 
 use agent::Agent;
 use clap::Parser;
