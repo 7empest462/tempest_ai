@@ -35,6 +35,10 @@ impl VectorBrain {
         self.entries.push(entry);
     }
 
+    pub fn remove_entries_by_source_prefix(&mut self, prefix: &str) {
+        self.entries.retain(|e| !e.source.starts_with(prefix));
+    }
+
     pub fn cosine_similarity(v1: &[f32], v2: &[f32]) -> f32 {
         if v1.len() != v2.len() || v1.is_empty() {
             return 0.0;

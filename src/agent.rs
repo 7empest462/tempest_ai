@@ -52,7 +52,9 @@ pub struct Agent {
     pub concurrency_semaphore: Arc<tokio::sync::Semaphore>,
     pub event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
     pub tool_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>>>>,
-
+    pub rules: crate::rules::RuleEngine,
+    pub recent_failures: Arc<DashMap<String, usize>>,
+    pub sentinel: crate::sentinel::SentinelManager,
 }
 
 impl Agent {
@@ -148,12 +150,14 @@ impl Agent {
             sub_agent_model,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: Arc::new(ThemeSet::load_defaults()),
+            rules: crate::rules::RuleEngine::new(),
+            recent_failures: Arc::new(DashMap::new()),
             telemetry: Arc::new(Mutex::new(String::new())),
             is_root: Arc::new(AtomicBool::new(nix::unistd::getuid().is_root())),
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(5)),
             event_tx: Arc::new(Mutex::new(None)),
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
-
+            sentinel: crate::sentinel::SentinelManager::new(32768),
         }
     }
 
@@ -213,7 +217,7 @@ impl Agent {
         let _ = std::fs::remove_file(&self.history_path);
     }
 
-    pub async fn run(&self, initial_user_prompt: String) -> Result<()> {
+    pub async fn run(&self, initial_user_prompt: String, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
         if initial_user_prompt.trim() == "/clear" {
             self.clear_history();
             return Ok(());
@@ -225,9 +229,19 @@ impl Agent {
             println!("{}", "=".repeat(60).blue());
         }
 
+        let active_rules = self.rules.get_active_rules(&[]); // Empty for now, will refine
+        
         {
             let mut h_lock = self.history.lock();
             let mut full_system_prompt = self.system_prompt.clone();
+            
+            if !active_rules.is_empty() {
+                full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
+                for rule in active_rules {
+                    full_system_prompt.push_str(&format!("### Rule: {}\n{}\n\n", rule.name, rule.content));
+                }
+            }
+
             full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
             if let Ok(schema_json) = serde_json::to_string_pretty(&self.tool_registry) {
                 full_system_prompt.push_str(&schema_json);
@@ -252,6 +266,14 @@ impl Agent {
         let mut reprimand_issued = false;
 
         loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🛑 INTERRUPTED: Turn cancelled by user.".to_string())).await;
+                    let _ = tx.send(crate::tui::AgentEvent::Thinking(None)).await;
+                }
+                break;
+            }
             iteration_count += 1;
             if iteration_count > max_iterations {
                 if self.event_tx.lock().is_none() {
@@ -259,43 +281,47 @@ impl Agent {
                 }
                 break;
             }
-            // --- CONTEXT WINDOW MANAGEMENT ---
-            {
-                let ctx_limit = self.calculate_optimal_ctx();
-                let needs_compact = {
-                    let h_lock = self.history.lock();
-                    // Trigger compaction earlier (at 60% instead of 75%) to avoid runway panic
-                    crate::context_manager::needs_compaction(&h_lock, (ctx_limit as f64 * 0.8) as u64)
-                };
 
-                if needs_compact {
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("📦 Compacting context window...".to_string()));
-                    }
+            // --- STAGE 1: SENTINEL FLEET CHECK ---
+            let ctx_limit = self.calculate_optimal_ctx();
+            let action_opt = {
+                self.sentinel.analyze_state(&self.history.lock())
+            };
 
-                    // Clone history and release lock before async call
-                    let history_to_compact = self.history.lock().clone();
+            if let Some(action) = action_opt {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    // Update the HUD
+                    let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
+                        active: action.active_sentinels.clone(), 
+                        log: action.message.clone() 
+                    });
                     
-                    // Release happens implicitly here since we don't hold the guard across await
+                    if !action.message.is_empty() {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(action.message.clone()));
+                    }
+                }
+
+                if action.needs_compaction {
+                    let history_to_compact = self.history.lock().clone();
                     let new_history = crate::context_manager::compact_history(
                         &self.ollama, 
                         &self.sub_agent_model, 
                         history_to_compact, 
                         ctx_limit
                     ).await?;
-
-                    // Re-lock and update
-                    {
-                        let mut h_lock = self.history.lock();
-                        *h_lock = new_history;
-                    }
+                    *self.history.lock() = new_history;
                     let _ = self.save_history();
+                }
+
+                if action.needs_privilege {
+                    let mut h_lock = self.history.lock();
+                    h_lock.push(ChatMessage::new(MessageRole::System, "⚠️ [SENTINEL]: You are attempting to access a protected area. If this is required, you MUST use 'request_privileges' or prefix the command with sudo.".to_string()));
                 }
             }
 
             // --- STAGE 1: PLANNING ---
-            let planner_output = self.planner_turn().await?;
+            let planner_output = self.planner_turn(stop.clone()).await?;
             
             // --- STAGE 2: EXTRACTION ---
             let mut all_tool_calls = Vec::new();
@@ -355,23 +381,62 @@ impl Agent {
             let results = self.executor_dispatch(all_tool_calls).await?;
 
             // --- STAGE 4: COLLECTION ---
+            let mut detected_loop_key = None;
             {
                 let mut h_lock = self.history.lock();
                 for (tool_name, result, is_success) in results {
                     let formatted_res = if is_success { 
+                        // Reset failure counters on any success
+                        self.recent_failures.remove(&tool_name);
+                        self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
                         format!("SYSTEM NOTIFICATION: TOOL RESULT for {}:\n{}\n\nCRITICAL: Analyze this result and formulate your final output to the user clearly. You MUST respond.", tool_name, result) 
                     } else { 
+                        // Broad matching: If it's a "Not Found" error, we group it
+                        let fail_key = if result.contains("os error 2") || result.contains("No such file") || result.contains("No files found") {
+                            "GENERIC_FILE_NOT_FOUND".to_string()
+                        } else {
+                            format!("{}:{}", tool_name, result.chars().take(50).collect::<String>())
+                        };
+
+                        let count = *self.recent_failures.entry(fail_key.clone()).and_modify(|c| *c += 1).or_insert(1);
+                        
+                        if count >= 3 {
+                            detected_loop_key = Some(fail_key);
+                        }
+
                         format!("SYSTEM NOTIFICATION: TOOL ERROR for {}:\n{}\n\nCRITICAL: This tool failed. Analyze the error and determine your next step. You MUST respond.", tool_name, result) 
                     };
                     h_lock.push(ChatMessage::new(MessageRole::User, formatted_res));
                 }
             }
+
+            if let Some(key) = detected_loop_key {
+                let mut h_lock = self.history.lock();
+                let directive = format!(
+                    "\n\n⚠️ [SENTINEL REORIENTATION DIRECTIVE]:\nYou have encountered a pattern of missing resources: '{}'.\nYour current strategy is LOOPING and HALLUCINATING files that do NOT exist.\n1. STOP this path immediately.\n2. I am forcing a 'list_dir' for you below. Study it carefully.\n3. Do NOT attempt to access any file not explicitly listed in the output below.\n4. Acknowledge this directive and apologize for the hallucination loop.",
+                    key
+                );
+                h_lock.push(ChatMessage::new(MessageRole::System, directive));
+                
+                // --- AUTO-RESYNC: Run an ls and inject it immediately ---
+                if let Ok(entries) = std::fs::read_dir(".") {
+                    let mut files = vec![];
+                    for e in entries.flatten() {
+                        files.push(e.file_name().to_string_lossy().to_string());
+                    }
+                    let resync = format!("SENTINEL FORCED SYNC (Current Directory Contents):\n- {}", files.join("\n- "));
+                    h_lock.push(ChatMessage::new(MessageRole::User, resync));
+                }
+
+                self.recent_failures.clear(); // Reset after intervention
+            }
+            
             let _ = self.save_history();
         }
         Ok(())
     }
 
-    async fn planner_turn(&self) -> Result<PlannerOutput> {
+    async fn planner_turn(&self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<PlannerOutput> {
         let options = ModelOptions::default()
             .num_ctx(self.calculate_optimal_ctx())
             .num_predict(4096)
@@ -413,6 +478,13 @@ impl Agent {
         let mut last_segments: Vec<String> = Vec::new();
 
         while let Some(res) = stream.next().await {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🛑 INTERRUPTED: Prompt stream halted.".to_string())).await;
+                }
+                break;
+            }
             if let Ok(chunk) = res {
                 let text = chunk.message.content.clone();
                 
@@ -565,14 +637,21 @@ impl Agent {
                 if context.tx.send(crate::tui::AgentEvent::RequestInput("System".to_string(), prompt.clone())).await.is_ok() {
                     let mut rx_lock = context.tool_rx.lock().await;
                     if let Some(rx) = rx_lock.as_mut() {
-                        if let Some(crate::tui::ToolResponse::Text(ans)) = rx.recv().await {
-                            let ans_lower = ans.trim().to_lowercase();
-                            if ans_lower == "y" || ans_lower == "yes" || ans_lower.is_empty() {
+                        match rx.recv().await {
+                            Some(crate::tui::ToolResponse::Text(ans)) if {
+                                let ans_lower = ans.trim().to_lowercase();
+                                ans_lower == "y" || ans_lower == "yes" || ans_lower.is_empty()
+                            } => {
                                 approved = true;
-                            } else if ans_lower == "a" || ans_lower == "all" {
+                            }
+                            Some(crate::tui::ToolResponse::Text(ans)) if {
+                                let ans_lower = ans.trim().to_lowercase();
+                                ans_lower == "a" || ans_lower == "all"
+                            } => {
                                 approved = true;
                                 *self.planning_mode.lock() = false;
                             }
+                            _ => {}
                         }
                     }
                 } else {
@@ -691,15 +770,17 @@ impl Agent {
     }
 
     pub async fn run_tui_mode(&self, mut user_rx: tokio::sync::mpsc::Receiver<String>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) || true { // We want the TUI to stay alive even if stop was true
              if let Ok(user_msg) = user_rx.try_recv() {
                  // Run one full turn
-                 if let Err(e) = self.run(user_msg).await {
+                 if let Err(e) = self.run(user_msg, stop.clone()).await {
                      let tx_opt = self.event_tx.lock().clone();
                      if let Some(tx) = tx_opt {
                          let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Error: {}", e))).await;
                      }
                  }
+                 // Auto-reset stop flag after a turn finishes/is interrupted
+                 stop.store(false, std::sync::atomic::Ordering::Relaxed);
              }
              tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }

@@ -265,11 +265,10 @@ impl AgentTool for TelemetryChartTool {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub fn get_linux_gpu_usage() -> i32 {
-    tempest_monitor::linux_helper::get_linux_gpu_load()
-}
-
-#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
-pub fn get_linux_gpu_usage() -> i32 { 0 }
+pub fn get_linux_gpu_usage() -> i32 {
+    cfg_select! {
+        target_os = "linux" => tempest_monitor::linux_helper::get_linux_gpu_load(),
+        _ => 0,
+    }
+}

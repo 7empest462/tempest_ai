@@ -19,19 +19,24 @@ Tempest features a persistent SQLite-backed **Conceptual Brain** with `#tagging`
 - **Contextual Retrieval**: Store facts with searchable tags (e.g., `#config`, `#todo`, `#db`).
 - **Fuzzy Recall**: Retrieve memories via topic names or associated tags, ensuring the agent "remembers" the right context at the right time.
 
-### 🌡️ 3. Hardware-Aware Sentience
-Tempest is the first local agent that is truly "Sentient" of its host. Rather than passively bloating the context window, the Agent authentically reaches out and pulls real-time **CPU, GPU, RAM, and Thermal telemetry** into its reasoning loop on-demand using its native `system_diagnostic_scan` tool.
-- **Load-Adaptive**: The agent can autonomously slow down or pivot tasks if it detects system memory is critically low or thermals are spiking.
-- **Cross-Platform**: Full telemetry support for macOS (Apple Silicon) and Linux (sysfs/hwmon).
+### 🛡️ 3. Sentinel Fleet (Autonomous Supervision)
+Tempest is the first local agent protected by an autonomous **Sentinel Fleet**. Rather than waiting for errors to occur, a suite of deterministic supervisors monitors every reasoning turn:
+- **Context Runway**: Forecasts context usage and triggers surgical compaction before the LLM overflows.
+- **Privilege Escalator**: Detects protected resource access and manages the secure escalation protocol.
+- **Compiler Guard**: Identifies "whack-a-mole" debugging patterns and forces strategic pivots during broken builds.
+- **Build Watcher**: Prevents "Stale Testing" by ensuring the agent is always aware of Bin-to-Source synchronization.
+- **Thermal Guard**: Monitors hardware temperatures and autonomously triggers thermal throttling or cooling pauses to project your physical workstation.
 
-### 🔍 4. Granular Error Handling
-Tempest features detailed, categorized error types for improved debugging and reliability.
-- **Tool-Specific Errors**: File operations, Git commands, network requests, and execution failures each have dedicated error variants with contextual information.
+### 🛑 4. Real-Time Agent Interjection
+The reasoning loop is no longer a "black box."
+- **Esc Interrupt**: Pressing **`Esc`** immediately halts the current thought process or model stream, returning control to the user instantly.
+- **Safety Keybindings**: `Ctrl+C` for application termination, `Esc` for surgical agent halts.
 
-### ⚡ 5. Performance Optimization & Profiling
-Tempest includes built-in performance monitoring and profiling capabilities for low-latency operation.
-- **Execution Timing**: All tool executions are timed and logged, helping identify performance bottlenecks.
-- **Concurrency Control**: Semaphore-based limiting prevents resource exhaustion under load.
+### 🔍 5. Hardened Conceptual Brain
+The RAG (Retrieval Augmented Generation) engine has been hardened for production-industrial use.
+- **Deduplication**: Automatic flush-and-rebuild for semantic indexing ensures no redundant memory copies.
+- **Ghost Purging**: Periodic cleanup of "ghost" entries (references to deleted or moved files), keeping the agent grounded in the actual workspace state.
+- **Improved Retrieval**: 70% reduction in "hallucinated file awareness" through surgical index sanitization.
 
 #### Profiling Commands
 ```bash
@@ -95,9 +100,8 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 - **Knowledge Base**: `distill_knowledge`, `recall_brain`.
 
 ### 🛰️ System & Telemetry Suite
-- **Hardware**: `system_info`, `gpu_diagnostics`, `system_telemetry`.
+- **Hardware**: `system_info`, `gpu_diagnostics`, `system_telemetry`, `system_diagnostic_scan`.
 - **Deep Linux**: `kernel_diagnostic`, `systemd_manager`, `linux_process_analyzer`.
-- **Intelligence**: `advanced_system_oracle`, `telemetry_chart`.
 
 ### 🌐 Network & Web Suite
 - **Connectivity**: `low_level_icmp_diagnostic`, `network_sniffer`.

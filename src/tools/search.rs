@@ -149,6 +149,11 @@ impl AgentTool for IndexFileSemanticallyTool {
         }
 
         let mut success_count = 0;
+        {
+            let mut brain = context.vector_brain.lock();
+            brain.remove_entries_by_source_prefix(&path);
+        }
+        
         for (i, chunk) in chunks.iter().enumerate() {
             let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
                 "nomic-embed-text".to_string(),

@@ -11,6 +11,8 @@ mod vector_brain;
 mod skills;
 mod context_manager;
 mod error_classifier;
+mod rules;
+pub mod sentinel;
 
 use agent::Agent;
 use clap::Parser;
@@ -83,8 +85,8 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     
     if let Ok(sudo_user) = std::env::var("SUDO_USER") {
         if !sudo_user.is_empty() && sudo_user != "root" {
-            #[cfg(unix)]
-            {
+        cfg_select! {
+            unix => {
                 let prefixes = ["/home", "/Users"];
                 for prefix in prefixes {
                     let p = std::path::PathBuf::from(prefix)
@@ -94,7 +96,9 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
                         .join("config.toml");
                     paths_to_try.push(p);
                 }
-            }
+            },
+            _ => {}
+        }
         }
     }
 
@@ -179,6 +183,8 @@ You follow a strict engineering workflow and never deviate from it.
 9. MOMENTUM RULE: When your previous tool call successfully executes, do NOT pause or ask the user how to assist them. IMMEDIATELY output your next tool call to execute the plan until the task is complete.
 10. TASK COMPLETION: Once you have verified your work and confirmed it matches the user's spec, use the 'Task Completion' format below to break the system loop.
 11. MANDATORY VERIFICATION: You MUST verify any script, configuration, or code you create by running it (e.g., via `run_command` or `run_tests`). Do not claim a task is complete until you have seen the output confirm success. If a test fails, you must attempt a fix and re-verify.
+12. DISCREPANCY REFLECTION: If tool results contradict each other (e.g. `list_dir` shows files that `search_files` missed), you MUST assume your formulated tool query was wrong and try a different approach before reporting to the user.
+13. INITIATIVE REQUIREMENT: Do NOT use `notify` or `ask_user` as a way to avoid taking the next logical step in a plan. If you find files, analyze them. If you see a bug, patch it.
 
 ### RESPONSE FORMAT (Follow exactly)
 Every response must contain exactly one of these structures. Do not mix them:
@@ -457,8 +463,11 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             for comp in &components {
                 if let Some(mut temp) = comp.temperature() {
                     if temp > 0.0 {
-                        // Some systems return milli-degrees Celsius
+                        // Some systems return milli-degrees Celsius (e.g. 45000)
                         if temp > 500.0 { temp /= 1000.0; }
+                        
+                        // Safety cap for invalid sensors
+                        if temp > 150.0 { continue; }
                         
                         if temp > max_temp { max_temp = temp; }
                         sum_temp += temp;
@@ -522,7 +531,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         }
     });
 
-    if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx).await {
+    if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag).await {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
     
@@ -532,6 +541,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 async fn run_cli_mode(agent: Agent) -> Result<()> {
     use rustyline::DefaultEditor;
     let mut rl = DefaultEditor::new().into_diagnostic()?;
+    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     
     println!("{}", "=".repeat(60).blue());
     println!("{} {} Mode: ON", "🚀".green(), "Tempest Command".bold());
@@ -553,7 +563,7 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                     continue;
                 }
                 
-                if let Err(e) = agent.run(p.to_string()).await {
+                if let Err(e) = agent.run(p.to_string(), stop_flag.clone()).await {
                     println!("{} {}", "❌ Error:".red().bold(), e);
                 }
             }

@@ -221,9 +221,19 @@ impl AgentTool for SearchFilesTool {
         // Move blocking filesystem traversal to a dedicated thread pool
         tokio::task::spawn_blocking(move || {
             let mut matches = Vec::new();
+            
+            // Simple glob to regex conversion:
+            // escape special chars, then replace '*' with '.*' and '?' with '.'
+            let regex_pattern = pattern
+                .replace(".", "\\.")
+                .replace("*", ".*")
+                .replace("?", ".");
+            let regex_str = format!("(?i)^{}$", regex_pattern);
+            let re = regex::Regex::new(&regex_str).map_err(|e| miette!("Invalid search pattern: {}", e))?;
+
             for entry in WalkDir::new(&path_owned).into_iter().filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy();
-                if name.contains(&pattern) {
+                if re.is_match(&name) {
                     matches.push(entry.path().display().to_string());
                 }
                 if matches.len() > 100 { break; }

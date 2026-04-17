@@ -26,6 +26,7 @@ pub enum AgentEvent {
     StreamToken(String),
     SubagentStatus(Option<String>),
     ContextStatus { used: usize, total: u64 },
+    SentinelUpdate { active: Vec<String>, log: String },
 }
 
 pub enum ToolResponse {
@@ -55,6 +56,8 @@ pub struct App {
     pub subagent_notification: Option<String>,
     pub context_used: usize,
     pub context_total: u64,
+    pub active_sentinels: Vec<String>,
+    pub sentinel_log: Vec<String>,
 }
 
 impl App {
@@ -64,7 +67,7 @@ impl App {
             messages: vec![
                 "Welcome to Tempest AI TUI.".to_string(),
                 "Type your request below and press Enter.".to_string(),
-                "Press Esc to exit.".to_string(),
+                "Press Esc to stop agent, Ctrl+C to exit.".to_string(),
             ],
             current_stream: String::new(),
             active_tool: None,
@@ -82,11 +85,18 @@ impl App {
             subagent_notification: None,
             context_used: 0,
             context_total: 0,
+            active_sentinels: Vec::new(),
+            sentinel_log: Vec::new(),
         }
     }
 }
 
-pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user_tx: tokio::sync::mpsc::Sender<String>, tool_tx: tokio::sync::mpsc::Sender<ToolResponse>) -> Result<()> {
+pub async fn run_tui(
+    mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, 
+    user_tx: tokio::sync::mpsc::Sender<String>, 
+    tool_tx: tokio::sync::mpsc::Sender<ToolResponse>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     enable_raw_mode().into_diagnostic()?;
     stdout().execute(EnterAlternateScreen).into_diagnostic()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).into_diagnostic()?;
@@ -195,7 +205,14 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                             app.auto_scroll = true;
                         }
                         KeyCode::Esc => {
-                            app.should_quit = true;
+                            if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
+                                stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                app.messages.push("⚠️ [INTERRUPTED]: Stopping agent...".to_string());
+                            } else {
+                                // In IDLE mode, Esc can clear input or do nothing. 
+                                // Let's have it clear input for better UX.
+                                app.input_buffer.clear();
+                            }
                         }
                         _ => {}
                     }
@@ -237,6 +254,15 @@ pub async fn run_tui(mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, user
                 AgentEvent::ContextStatus { used, total } => {
                     app.context_used = used;
                     app.context_total = total;
+                }
+                AgentEvent::SentinelUpdate { active, log } => {
+                    app.active_sentinels = active;
+                    if !log.is_empty() {
+                        app.sentinel_log.push(log);
+                        if app.sentinel_log.len() > 10 {
+                            app.sentinel_log.remove(0);
+                        }
+                    }
                 }
             }
         }
@@ -396,6 +422,33 @@ fn ui(f: &mut Frame, app: &mut App) {
         status_lines.push(Line::from(vec![
             Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
             Span::styled(thinking, Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)),
+        ]));
+    }
+
+    // --- SENTINEL FLEET HUD (Compact) ---
+    if !app.active_sentinels.is_empty() {
+        let mut spans = vec![
+            Span::styled("🛡️ FLEET: ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+        ];
+        
+        for sentinel in &app.active_sentinels {
+            let tag = match sentinel.as_str() {
+                "Context Runway" => "[C]",
+                "Privilege Escalator" => "[P]",
+                "Compiler Guard" => "[G]",
+                "Build Watcher" => "[B]",
+                "Thermal Guard" => "[T]",
+                _ => "[?]",
+            };
+            spans.push(Span::styled(format!("{} ", tag), Style::default().fg(Color::Cyan)));
+        }
+        status_lines.push(Line::from(spans));
+    }
+
+    for log in &app.sentinel_log {
+        status_lines.push(Line::from(vec![
+            Span::styled(" ⤷ ", Style::default().fg(Color::Gray)),
+            Span::styled(log, Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
         ]));
     }
 
