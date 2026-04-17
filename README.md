@@ -123,6 +123,9 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 
 ## 🚀 Quick Start (One-Liner)
 
+> [!IMPORTANT]
+> **Requirements**: Rust **1.95+** is required to support the modern async features and tool-calling schemas.
+
 ```bash
 git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo build --release && sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
 ```
