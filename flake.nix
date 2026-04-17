@@ -30,12 +30,12 @@
           zlib
           expat
           # X11 libs for arboard (clipboard)
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXinerama
-          xorg.libXi
-          xorg.libXrandr
-          xorg.libXfixes
+          libx11
+          libxcursor
+          libxinerama
+          libxi
+          libxrandr
+          libxfixes
           # Intel GPU / OpenGL libs
           libGL
           libglvnd

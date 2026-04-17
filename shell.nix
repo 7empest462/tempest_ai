@@ -23,12 +23,12 @@ pkgs.mkShell {
     dbus
     zlib
     expat
-    xorg.libX11
-    xorg.libXcursor
-    xorg.libXinerama
-    xorg.libXi
-    xorg.libXrandr
-    xorg.libXfixes
+    libx11
+    libxcursor
+    libxinerama
+    libxi
+    libxrandr
+    libxfixes
     libGL
     libglvnd
   ];
