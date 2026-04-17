@@ -1,0 +1,39 @@
+# Legacy Nix Shell (Backward compatibility for non-Flake users)
+let
+  rustOverlay = builtins.fetchTarball "https://github.com/oxalica/rust-overlay/archive/master.tar.gz";
+  pkgs = import <nixpkgs> {
+    overlays = [ (import rustOverlay) ];
+  };
+  rustVersion = "1.95.0";
+  rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
+    extensions = [ "rust-src" "rust-analyzer" ];
+  };
+in
+pkgs.mkShell {
+  nativeBuildInputs = [
+    rustToolchain
+    pkgs.pkg-config
+    pkgs.cmake
+  ];
+  buildInputs = with pkgs; [
+    openssl
+    libpcap
+    fontconfig
+    freetype
+    dbus
+    zlib
+    expat
+    xorg.libX11
+    xorg.libXcursor
+    xorg.libXinerama
+    xorg.libXi
+    xorg.libXrandr
+    xorg.libXfixes
+    libGL
+    libglvnd
+  ];
+  shellHook = ''
+    export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+    echo "🌪️ Legacy Nix Shell Initialized (Rust ${rustVersion})"
+  '';
+}

@@ -130,6 +130,16 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo build --release && sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
 ```
 
+### ❄️ Nix Development (Linux/macOS)
+If you have Nix installed, you can skip manual toolchain setup:
+```bash
+# Enter the modern flake shell (pins Rust 1.95 + all native libraries)
+nix develop
+
+# Legacy nix shell fallback
+nix-shell
+```
+
 ## ⚙️ Configuration
 Tempest looks for its config at `~/.config/tempest_ai/config.toml`.
 ```toml
