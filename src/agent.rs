@@ -3,6 +3,8 @@ use colored::*;
 use ollama_rs::{
     generation::{
         chat::{request::ChatMessageRequest, ChatMessage, MessageRole},
+        completion::request::GenerationRequest,
+        parameters::{KeepAlive, TimeUnit},
     },
     models::ModelOptions,
     Ollama,
@@ -860,15 +862,20 @@ impl Agent {
             .num_ctx(1)
             .num_predict(1);
 
-        let request = ChatMessageRequest::new(
+        // ZERO-PULSE: Use GenerationRequest with an empty prompt.
+        // This is the fastest way to signal an unload in Ollama without triggering 'Thinking'.
+        let request = GenerationRequest::new(
             self.model.clone(),
-            vec![ChatMessage::new(MessageRole::User, "UNLOAD".to_string())]
+            "".to_string(), // Empty prompt = official Unload signal
         )
         .options(options)
-        .keep_alive(ollama_rs::generation::parameters::KeepAlive::UnloadOnCompletion);
+        .keep_alive(KeepAlive::Until { time: 0, unit: TimeUnit::Seconds });
 
-        // Silent fire-and-forget unload request
-        let _ = self.ollama.send_chat_messages(request).await;
+        // Fire-and-forget with a short timeout to prevent shutdown hangs
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_millis(200),
+            self.ollama.generate(request)
+        ).await;
     }
 }
 
