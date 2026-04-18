@@ -38,6 +38,12 @@ pub enum ToolResponse {
     Error(String),
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum FocusedPane {
+    Chat,
+    Reasoning,
+}
+
 pub struct App {
     pub input_buffer: String,
     pub messages: Vec<String>,
@@ -61,6 +67,7 @@ pub struct App {
     pub context_total: u64,
     pub active_sentinels: Vec<String>,
     pub sentinel_log: Vec<String>,
+    pub focused_pane: FocusedPane,
 }
 
 impl App {
@@ -92,6 +99,7 @@ impl App {
             context_total: 0,
             active_sentinels: Vec::new(),
             sentinel_log: Vec::new(),
+            focused_pane: FocusedPane::Chat,
         }
     }
 }
@@ -104,6 +112,7 @@ pub async fn run_tui(
 ) -> Result<()> {
     enable_raw_mode().into_diagnostic()?;
     stdout().execute(EnterAlternateScreen).into_diagnostic()?;
+    stdout().execute(crossterm::event::EnableMouseCapture).into_diagnostic()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).into_diagnostic()?;
 
     let mut app = App::new();
@@ -118,7 +127,52 @@ pub async fn run_tui(
             .unwrap_or(Duration::from_secs(0));
 
         if event::poll(timeout).into_diagnostic()? {
-            if let Event::Key(key) = event::read().into_diagnostic()? {
+            let ev = event::read().into_diagnostic()?;
+            
+            // --- 🖱️ MOUSE HIT-TESTING ---
+            if let Event::Mouse(mev) = &ev {
+                if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = mev.kind {
+                    let size = terminal.size().into_diagnostic()?;
+                    let horizontal_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(size.into());
+
+                    if horizontal_chunks[0].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                        app.focused_pane = FocusedPane::Chat;
+                    } else if horizontal_chunks[1].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                        app.focused_pane = FocusedPane::Reasoning;
+                    }
+                }
+                
+                // MOUSE WHEEL SCROLLING
+                if app.focused_pane == FocusedPane::Chat {
+                    match mev.kind {
+                        crossterm::event::MouseEventKind::ScrollUp => {
+                            let cur = app.list_state.selected().unwrap_or(0);
+                            app.list_state.select(Some(cur.saturating_sub(1)));
+                            app.auto_scroll = false;
+                        }
+                        crossterm::event::MouseEventKind::ScrollDown => {
+                            let cur = app.list_state.selected().unwrap_or(0);
+                            app.list_state.select(Some(cur + 1));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match mev.kind {
+                        crossterm::event::MouseEventKind::ScrollUp => {
+                            app.reasoning_scroll = app.reasoning_scroll.saturating_sub(1);
+                        }
+                        crossterm::event::MouseEventKind::ScrollDown => {
+                            app.reasoning_scroll = app.reasoning_scroll.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if let Event::Key(key) = ev {
                 if let Some((_tool, _question)) = &app.pending_input {
                     match key.code {
                         KeyCode::Enter => {
@@ -184,23 +238,45 @@ pub async fn run_tui(
                                 app.auto_scroll = true;
                             }
                         }
+                        KeyCode::Tab => {
+                            app.focused_pane = match app.focused_pane {
+                                FocusedPane::Chat => FocusedPane::Reasoning,
+                                FocusedPane::Reasoning => FocusedPane::Chat,
+                            };
+                        }
                         KeyCode::Up => {
-                            let cur = app.list_state.selected().unwrap_or(0);
-                            app.list_state.select(Some(cur.saturating_sub(1)));
-                            app.auto_scroll = false;
+                            if app.focused_pane == FocusedPane::Chat {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur.saturating_sub(1)));
+                                app.auto_scroll = false;
+                            } else {
+                                app.reasoning_scroll = app.reasoning_scroll.saturating_sub(1);
+                            }
                         }
                         KeyCode::Down => {
-                            let cur = app.list_state.selected().unwrap_or(0);
-                            app.list_state.select(Some(cur + 1));
+                            if app.focused_pane == FocusedPane::Chat {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur + 1));
+                            } else {
+                                app.reasoning_scroll = app.reasoning_scroll.saturating_add(1);
+                            }
                         }
                         KeyCode::PageUp => {
-                            let cur = app.list_state.selected().unwrap_or(0);
-                            app.list_state.select(Some(cur.saturating_sub(15)));
-                            app.auto_scroll = false;
+                            if app.focused_pane == FocusedPane::Chat {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur.saturating_sub(15)));
+                                app.auto_scroll = false;
+                            } else {
+                                app.reasoning_scroll = app.reasoning_scroll.saturating_sub(15);
+                            }
                         }
                         KeyCode::PageDown => {
-                            let cur = app.list_state.selected().unwrap_or(0);
-                            app.list_state.select(Some(cur + 15));
+                            if app.focused_pane == FocusedPane::Chat {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur + 15));
+                            } else {
+                                app.reasoning_scroll = app.reasoning_scroll.saturating_add(15);
+                            }
                         }
                         KeyCode::Home => {
                             app.list_state.select(Some(0));
@@ -292,6 +368,7 @@ pub async fn run_tui(
 
     disable_raw_mode().into_diagnostic()?;
     stdout().execute(LeaveAlternateScreen).into_diagnostic()?;
+    stdout().execute(crossterm::event::DisableMouseCapture).into_diagnostic()?;
     Ok(())
 }
 
@@ -408,9 +485,15 @@ fn ui(f: &mut Frame, app: &mut App) {
         push_wrapped(&format!("Tempest: {}", app.current_stream), &mut list_items, false, true);
     }
 
+    let core_border_color = if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray };
+    let core_title = if app.focused_pane == FocusedPane::Chat { " 🦾 TEMPEST CORE SESSION [FOCUS] " } else { " 🦾 TEMPEST CORE SESSION " };
+    
     let item_count = list_items.len();
     let list = List::new(list_items)
-        .block(Block::default().borders(Borders::ALL).title(" 🦾 TEMPEST CORE SESSION "))
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(core_title)
+            .border_style(Style::default().fg(core_border_color)))
         .style(Style::default().fg(Color::White));
 
     if app.auto_scroll && item_count > 0 {
@@ -519,11 +602,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // --- REASONING TRACE PANE (Right Panel) ---
     if !app.reasoning_buffer.is_empty() {
+        let reasoning_border_color = if app.focused_pane == FocusedPane::Reasoning { Color::Yellow } else { Color::Magenta };
+        let reasoning_title = if app.focused_pane == FocusedPane::Reasoning { " 🧠 THOUGHT PROCESS [FOCUS] " } else { " 🧠 THOUGHT PROCESS (Reasoning Trace) " };
+
         let reasoning_para = Paragraph::new(app.reasoning_buffer.clone())
             .block(Block::default()
-                .title(Span::styled(" 🧠 THOUGHT PROCESS (Reasoning Trace) ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(reasoning_title, Style::default().fg(reasoning_border_color).add_modifier(Modifier::BOLD)))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta)))
+                .border_style(Style::default().fg(reasoning_border_color)))
             .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
             .wrap(ratatui::widgets::Wrap { trim: true })
             .scroll((app.reasoning_scroll, 0));
