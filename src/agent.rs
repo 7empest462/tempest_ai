@@ -177,7 +177,7 @@ impl Agent {
         } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
             4096
         } else if model.contains("14b") || model.contains("7b") || model.contains("8b") || model.contains("9b") {
-            32768
+            16384
         } else {
              16384
         }
@@ -492,19 +492,18 @@ impl Agent {
                 
                 // --- 🛡️ REPETITION SENTINEL ---
                 let trimmed = text.trim();
-                if !trimmed.is_empty() {
+                if !trimmed.is_empty() && trimmed.len() > 3 {
                     last_segments.push(trimmed.to_string());
-                    if last_segments.len() > 10 { last_segments.remove(0); }
+                    if last_segments.len() > 15 { last_segments.remove(0); }
                     
-                    // Simple logic: if the same segment appears 5 times in the last 10, it's likely a loop
-                    if last_segments.iter().filter(|&s| s == trimmed).count() >= 5 {
-                        let warning = "\n\n⚠️ [REPETITION SENTINEL TRIGGERED]: Context overload or model instability detected. Breaking loop to preserve reasoning.";
+                    // Trigger only if 80% of recent segments are identical (higher threshold for reasoning)
+                    if last_segments.iter().filter(|&s| s == trimmed).count() >= 8 {
+                        let warning = "\n\n⚠️ [REPETITION SENTINEL]: Breaking loop to prevent hallucination plateau.";
                         full_content.push_str(warning);
                         
                         let tx_opt = self.event_tx.lock().clone();
                         if let Some(tx) = tx_opt {
                             let _ = tx.send(crate::tui::AgentEvent::StreamToken(warning.to_string())).await;
-                            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("Loop detected and broken.".to_string())).await;
                         }
                         break; 
                     }
@@ -590,6 +589,14 @@ impl Agent {
                 if let Some(tx) = tx_opt {
                     let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
                 }
+            } else if let Err(_) = res {
+                let error_msg = "\n\n❌ [OLLAMA STREAM ERROR]: The model inference stream was interrupted or timed out. Check Ollama server status.".to_string();
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(error_msg.clone())).await;
+                    let _ = tx.send(crate::tui::AgentEvent::StreamToken(error_msg)).await;
+                }
+                break;
             }
         }
         let tx_opt = self.event_tx.lock().clone();
