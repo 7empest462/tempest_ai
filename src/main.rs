@@ -128,10 +128,7 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     AppConfig::default()
 }
 
-use ollama_rs::{
-    generation::completion::request::GenerationRequest,
-    generation::parameters::{KeepAlive, TimeUnit},
-};
+use ollama_rs::Ollama;
 
 use std::net::SocketAddr;
 use metrics_exporter_prometheus::PrometheusBuilder;
