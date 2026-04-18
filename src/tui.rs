@@ -24,6 +24,7 @@ pub enum AgentEvent {
         response_tx: tokio::sync::mpsc::Sender<ToolResponse>,
     },
     StreamToken(String),
+    ReasoningToken(String),
     SubagentStatus(Option<String>),
     ContextStatus { used: usize, total: u64 },
     SentinelUpdate { active: Vec<String>, log: String },
@@ -46,6 +47,7 @@ pub struct App {
     pub should_quit: bool,
     pub agent_mode: String,
     pub thinking_msg: Option<String>,
+    pub reasoning_buffer: String,
     pub list_state: ratatui::widgets::ListState,
     pub auto_scroll: bool,
     pub animation_tick: u32,
@@ -75,6 +77,7 @@ impl App {
             should_quit: false,
             agent_mode: "IDLE".to_string(),
             thinking_msg: None,
+            reasoning_buffer: String::new(),
             list_state: ratatui::widgets::ListState::default(),
             auto_scroll: true,
             animation_tick: 0,
@@ -248,6 +251,9 @@ pub async fn run_tui(
                         app.current_stream.push_str(&token);
                     }
                 }
+                AgentEvent::ReasoningToken(token) => {
+                    app.reasoning_buffer.push_str(&token);
+                }
                 AgentEvent::SubagentStatus(msg) => {
                     app.subagent_notification = msg;
                 }
@@ -287,10 +293,28 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(8), // Header/Logo area
-            Constraint::Min(3),    // Chat Area
+            Constraint::Min(3),    // Main Content Area
             Constraint::Length(3), // Input Box
         ].as_ref())
         .split(f.area());
+
+    // Main Content Area: Split horizontally if there's reasoning content
+    let main_chunks = if !app.reasoning_buffer.is_empty() {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50), // Chat
+                Constraint::Percentage(50), // Reasoning
+            ].as_ref())
+            .split(chunks[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(100),
+            ].as_ref())
+            .split(chunks[1])
+    };
 
     // Header area for Logo
     let logo = vec![
@@ -307,7 +331,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::NONE));
     f.render_widget(header_block, chunks[0]);
 
-    let main_area = chunks[1];
+    let main_area = main_chunks[0]; // All chat/telemetry happens in the left panel
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -485,6 +509,18 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title(status_title))
         .style(Style::default().fg(Color::Gray));
     f.render_widget(status_block, top_chunks[1]);
+
+    // --- REASONING TRACE PANE (Right Panel) ---
+    if !app.reasoning_buffer.is_empty() {
+        let reasoning_para = Paragraph::new(app.reasoning_buffer.clone())
+            .block(Block::default()
+                .title(Span::styled(" 🧠 THOUGHT PROCESS (Reasoning Trace) ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta)))
+            .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(reasoning_para, main_chunks[1]);
+    }
 
     let mut input_title = " 🗨️ INPUT ".to_string();
     let mut input_text = app.input_buffer.clone();

@@ -472,8 +472,10 @@ impl Agent {
         
         let mut stream = self.ollama.send_chat_messages_stream(request).await.into_diagnostic()?;
         let mut full_content = String::new();
+        let mut reasoning_content = String::new();
         let mut native_tool_calls = Vec::new();
         let mut first_token = true;
+        let mut is_thinking = false;
 
         let mut last_segments: Vec<String> = Vec::new();
 
@@ -508,6 +510,59 @@ impl Agent {
                     }
                 }
                 // --- END SENTINEL ---
+
+                // --- 🧠 REASONING EXTRACTION (Field or Tags) ---
+                // 1. Check for dedicated reasoning field (Ollama API 0.5.7+)
+                let val = serde_json::to_value(&chunk.message).unwrap_or(serde_json::Value::Null);
+                if let Some(reasoning) = val.get("reasoning").and_then(|v| v.as_str()) {
+                    if !reasoning.is_empty() {
+                        reasoning_content.push_str(reasoning);
+                        let tx_opt = self.event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(reasoning.to_string())).await;
+                        }
+                    }
+                }
+
+                // 2. Tag-based detection
+                if text.contains("<think>") {
+                    is_thinking = true;
+                    if let Some(idx) = text.find("<think>") {
+                        let after = &text[idx + 7..];
+                        if !after.is_empty() {
+                            reasoning_content.push_str(after);
+                            let tx_opt = self.event_tx.lock().clone();
+                            if let Some(tx) = tx_opt {
+                                let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(after.to_string())).await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                
+                if text.contains("</think>") {
+                    is_thinking = false;
+                    if let Some(idx) = text.find("</think>") {
+                        let before = &text[..idx];
+                        if !before.is_empty() {
+                            reasoning_content.push_str(before);
+                            let tx_opt = self.event_tx.lock().clone();
+                            if let Some(tx) = tx_opt {
+                                let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(before.to_string())).await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if is_thinking {
+                    reasoning_content.push_str(&text);
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(text.clone())).await;
+                    }
+                    continue;
+                }
 
                 if !chunk.message.tool_calls.is_empty() {
                     native_tool_calls.extend(chunk.message.tool_calls.clone());

@@ -19,9 +19,10 @@ Tempest features a persistent SQLite-backed **Conceptual Brain** with `#tagging`
 - **Contextual Retrieval**: Store facts with searchable tags (e.g., `#config`, `#todo`, `#db`).
 - **Fuzzy Recall**: Retrieve memories via topic names or associated tags, ensuring the agent "remembers" the right context at the right time.
 
-### 🛡️ 3. Sentinel Fleet (Autonomous Supervision)
-Tempest is the first local agent protected by an autonomous **Sentinel Fleet**. Rather than waiting for errors to occur, a suite of deterministic supervisors monitors every reasoning turn:
-- **Context Runway**: Forecasts context usage and triggers surgical compaction before the LLM overflows.
+### 🌪️ The Sentinel Fleet & Sentient Telemetry
+Tempest is protected by five autonomous supervisors and a real-time reasoning engine:
+- **Reasoning Trace (Chain of Thought)**: Native support for models like DeepSeek-R1. View the agent's internal monologue in a dedicated side-pane before it executes any tools.
+- **Context Runway**: Predictive token management that prevents context overflow before it happens.
 - **Privilege Escalator**: Detects protected resource access and manages the secure escalation protocol.
 - **Compiler Guard**: Identifies "whack-a-mole" debugging patterns and forces strategic pivots during broken builds.
 - **Build Watcher**: Prevents "Stale Testing" by ensuring the agent is always aware of Bin-to-Source synchronization.
