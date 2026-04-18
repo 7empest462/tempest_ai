@@ -14,6 +14,10 @@ pkgs.mkShell {
     rustToolchain
     pkgs.pkg-config
     pkgs.cmake
+    pkgs.gcc
+    pkgs.gnumake
+    pkgs.git
+    pkgs.llvmPackages.libclang
   ];
   buildInputs = with pkgs; [
     openssl
