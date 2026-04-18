@@ -174,9 +174,9 @@ impl Agent {
         let model = self.model.to_lowercase();
         if model.contains("20b") || model.contains("27b") || model.contains("30b") || model.contains("deepseek-r1:32b") {
             2048
-        } else if model.contains("14b") || model.contains("13b") || model.contains("16b") || model.contains("12b") {
+        } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
             4096
-        } else if model.contains("7b") || model.contains("8b") || model.contains("9b") {
+        } else if model.contains("14b") || model.contains("7b") || model.contains("8b") || model.contains("9b") {
             32768
         } else {
              16384
@@ -512,9 +512,14 @@ impl Agent {
                 // --- END SENTINEL ---
 
                 // --- 🧠 REASONING EXTRACTION (Field or Tags) ---
-                // 1. Check for dedicated reasoning field (Ollama API 0.5.7+)
+                // 1. Check for dedicated reasoning fields (Native Ollama or OpenAI-compatible)
                 let val = serde_json::to_value(&chunk.message).unwrap_or(serde_json::Value::Null);
-                if let Some(reasoning) = val.get("reasoning").and_then(|v| v.as_str()) {
+                let reasoning_field = val.get("thinking")
+                    .or_else(|| val.get("reasoning"))
+                    .or_else(|| val.get("reasoning_content"))
+                    .and_then(|v| v.as_str());
+
+                if let Some(reasoning) = reasoning_field {
                     if !reasoning.is_empty() {
                         reasoning_content.push_str(reasoning);
                         let tx_opt = self.event_tx.lock().clone();
