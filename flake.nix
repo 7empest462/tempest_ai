@@ -45,6 +45,8 @@
           rustToolchain
           pkg-config
           cmake
+          gcc
+          gnumake
           git
           # Needed for bindgen (used by some Rust crates)
           llvmPackages.libclang
