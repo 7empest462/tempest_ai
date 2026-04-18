@@ -157,7 +157,7 @@ impl Agent {
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(5)),
             event_tx: Arc::new(Mutex::new(None)),
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
-            sentinel: crate::sentinel::SentinelManager::new(32768),
+            sentinel: crate::sentinel::SentinelManager::new(),
         }
     }
 
@@ -285,7 +285,7 @@ impl Agent {
             // --- STAGE 1: SENTINEL FLEET CHECK ---
             let ctx_limit = self.calculate_optimal_ctx();
             let action_opt = {
-                self.sentinel.analyze_state(&self.history.lock())
+                self.sentinel.analyze_state(&self.history.lock(), ctx_limit)
             };
 
             if let Some(action) = action_opt {

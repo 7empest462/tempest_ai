@@ -22,7 +22,6 @@ pub struct SentinelState {
 }
 
 pub struct SentinelManager {
-    pub ctx_limit: u64,
     pub state: Mutex<SentinelState>,
 }
 
@@ -30,7 +29,6 @@ impl Clone for SentinelManager {
     fn clone(&self) -> Self {
         let state = self.state.lock().unwrap();
         Self {
-            ctx_limit: self.ctx_limit,
             state: Mutex::new(SentinelState {
                 last_error_count: state.last_error_count,
                 stagnation_counter: state.stagnation_counter,
@@ -41,9 +39,8 @@ impl Clone for SentinelManager {
 }
 
 impl SentinelManager {
-    pub fn new(ctx_limit: u64) -> Self {
+    pub fn new() -> Self {
         Self { 
-            ctx_limit,
             state: Mutex::new(SentinelState {
                 last_error_count: None,
                 stagnation_counter: 0,
@@ -53,7 +50,7 @@ impl SentinelManager {
     }
 
     /// Analyzes the current state and returns an optional action if a sentinel triggers.
-    pub fn analyze_state(&self, messages: &[ChatMessage]) -> Option<SentinelAction> {
+    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64) -> Option<SentinelAction> {
         let mut action = SentinelAction {
             message: String::new(),
             needs_compaction: false,
@@ -69,7 +66,7 @@ impl SentinelManager {
         let mut triggered = false;
 
         // 1. Context Runway Check
-        if context_manager::needs_compaction(messages, self.ctx_limit) {
+        if context_manager::needs_compaction(messages, ctx_limit) {
             action.message.push_str("⚠️ [SENTINEL - CONTEXT RUNWAY]: History is >85% full. Automatic compaction recommended.\n");
             action.needs_compaction = true;
             triggered = true;
