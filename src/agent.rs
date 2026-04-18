@@ -853,6 +853,23 @@ impl Agent {
         }
         Ok(())
     }
+
+    /// Explicitly unload the model from Ollama's memory (GPU) by sending a request with keep_alive: 0.
+    pub async fn shutdown(&self) {
+        let options = ModelOptions::default()
+            .num_ctx(1)
+            .num_predict(1);
+
+        let request = ChatMessageRequest::new(
+            self.model.clone(),
+            vec![ChatMessage::new(MessageRole::User, "UNLOAD".to_string())]
+        )
+        .options(options)
+        .keep_alive(ollama_rs::generation::parameters::KeepAlive::UnloadOnCompletion);
+
+        // Silent fire-and-forget unload request
+        let _ = self.ollama.send_chat_messages(request).await;
+    }
 }
 
 #[cfg(test)]

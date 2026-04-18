@@ -525,8 +525,9 @@ You are running on a real machine with real consequences. Be precise, safe, and 
     *agent.event_tx.lock() = Some(agent_tx.clone());
     *agent.tool_rx.lock().await = Some(tool_rx);
     
+    let agent_tui = agent.clone();
     tokio::spawn(async move {
-        if let Err(e) = agent.run_tui_mode(user_rx, stop_flag_agent).await {
+        if let Err(e) = agent_tui.run_tui_mode(user_rx, stop_flag_agent).await {
             let _ = agent_tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
         }
     });
@@ -534,6 +535,9 @@ You are running on a real machine with real consequences. Be precise, safe, and 
     if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag).await {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
+    
+    // KILL SWITCH: Signal Ollama to unload the model from VRAM immediately on exit
+    agent.shutdown().await;
     
     Ok(())
 }
