@@ -48,6 +48,7 @@ pub struct App {
     pub agent_mode: String,
     pub thinking_msg: Option<String>,
     pub reasoning_buffer: String,
+    pub reasoning_scroll: u16,
     pub list_state: ratatui::widgets::ListState,
     pub auto_scroll: bool,
     pub animation_tick: u32,
@@ -78,6 +79,7 @@ impl App {
             agent_mode: "IDLE".to_string(),
             thinking_msg: None,
             reasoning_buffer: String::new(),
+            reasoning_scroll: 0,
             list_state: ratatui::widgets::ListState::default(),
             auto_scroll: true,
             animation_tick: 0,
@@ -253,6 +255,11 @@ pub async fn run_tui(
                 }
                 AgentEvent::ReasoningToken(token) => {
                     app.reasoning_buffer.push_str(&token);
+                    // Basic heuristic for line counting to auto-scroll
+                    let lines = app.reasoning_buffer.split('\n').count();
+                    if lines > 20 {
+                         app.reasoning_scroll = (lines as u16).saturating_sub(15);
+                    }
                 }
                 AgentEvent::SubagentStatus(msg) => {
                     app.subagent_notification = msg;
@@ -518,7 +525,8 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Magenta)))
             .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
-            .wrap(ratatui::widgets::Wrap { trim: true });
+            .wrap(ratatui::widgets::Wrap { trim: true })
+            .scroll((app.reasoning_scroll, 0));
         f.render_widget(reasoning_para, main_chunks[1]);
     }
 

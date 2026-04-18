@@ -13,7 +13,9 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
         // Add overhead for role name and structure
         total_chars += 20; 
     }
-    total_chars / 4
+    // DeepSeek and thinking models use more tokens for logic/symbols
+    // 3 chars/token is a safer heuristic than 4
+    total_chars / 3
 }
 
 /// Returns true if the estimated token count exceeds the threshold (75% of limit).
