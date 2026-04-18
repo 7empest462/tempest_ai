@@ -71,7 +71,7 @@ impl Default for AppConfig {
             history_path: Some("history.json".to_string()),
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
-            sub_agent_model: Some("qwen2.5-coder:3b".to_string()),
+            sub_agent_model: Some("llama3.2:1b".to_string()),
         }
     }
 }
@@ -127,6 +127,11 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     }
     AppConfig::default()
 }
+
+use ollama_rs::{
+    generation::completion::request::GenerationRequest,
+    generation::parameters::{KeepAlive, TimeUnit},
+};
 
 use std::net::SocketAddr;
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -353,7 +358,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         std::process::exit(0);
     }
 
-    let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "qwen2.5-coder:3b".to_string());
+    let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "llama3.2:1b".to_string());
     let agent = Agent::new(model, system_prompt, history_path, memory_store.clone(), sub_agent_model);
     
     if let Err(e) = agent.check_connection().await {

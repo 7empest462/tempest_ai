@@ -306,14 +306,27 @@ impl Agent {
 
                 if action.needs_compaction {
                     let history_to_compact = self.history.lock().clone();
+                    let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
+                    
                     let new_history = crate::context_manager::compact_history(
                         &self.ollama, 
                         &self.sub_agent_model, 
                         history_to_compact, 
                         ctx_limit
                     ).await?;
+                    
+                    let after_count = crate::context_manager::estimate_tokens(&new_history);
+                    
                     *self.history.lock() = new_history;
                     let _ = self.save_history();
+
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                            "🌪️ [CONTEXT COMPACTION]: Successfully condensed history ({} -> {} tokens)",
+                            before_count, after_count
+                        )));
+                    }
                 }
 
                 if action.needs_privilege {

@@ -3,9 +3,9 @@ use ollama_rs::{
     models::ModelOptions,
     Ollama,
 };
-use miette::{Result, IntoDiagnostic};
+use miette::Result;
 
-/// Estimates the number of tokens in a list of messages using a heuristic (char count / 4).
+/// Estimates the number of tokens in a list of messages using a heuristic (char count / 3).
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     let mut total_chars = 0;
     for msg in messages {
@@ -30,16 +30,18 @@ pub async fn compact_history(
     ollama: &Ollama,
     sub_model: &str,
     mut messages: Vec<ChatMessage>,
-    ctx_limit: u64,
+    _ctx_limit: u64,
 ) -> Result<Vec<ChatMessage>> {
-    if messages.len() <= 10 {
-        return Ok(messages); // Too few messages to meaningfully compact
+    let _initial_count = estimate_tokens(&messages);
+
+    if messages.len() <= 6 {
+        return Ok(messages); 
     }
 
     // Zone Protection:
     // Index 0: System Prompt + Schema (PROTECTED)
     // Last 6 messages: Active working context (PROTECTED)
-    let tail_size = 6;
+    let tail_size = 6.min(messages.len() - 1);
     let head_size = 1;
     
     let compaction_target_range = head_size..(messages.len() - tail_size);
@@ -58,42 +60,56 @@ pub async fn compact_history(
     }
 
     let summary_prompt = format!(
-        "CRITICAL: You are a summarization engine for an autonomous agent. 
-Summarize the following conversation history into a concise, high-density briefing.
+        "### TASK: CONTEXT DENSITY COMPACTION
+You are a high-speed context compressor. Summarize the following session history.
 
-INSTRUCTIONS:
-1. Preserve all tool names called and their outcomes.
-2. Preserve all specific file paths, PIDs, or technical IDs mentioned.
-3. Preserve the core problem the user is trying to solve.
-4. BE CONCISE. Use bullet points for technical facts.
-5. Output ONLY the summary. Do not use preamble like 'Here is the summary'.
+### RULES:
+1. OUTPUT DENSITY: Achieve a 5x compression ratio or higher.
+2. TECHNICAL PRESERVATION: Retain all tool calls, file paths, PIDs, and error codes.
+3. NO LOGORRHEA: Do NOT use phrases like 'The user and assistant discussed...'. 
+4. NO VERBATIM: Do not repeat long blocks of text. Distill them into bulleted technical facts.
+5. NO PREAMBLE: Start immediately with the summary.
 
-CONVERSATION TO SUMMARIZE:
----
+### CONVERSATION STREAM:
 {}
----",
+",
         summary_context
     );
 
     let options = ModelOptions::default()
-        .num_ctx(ctx_limit) 
-        .temperature(0.1);
+        .num_ctx(4096) // Summarization doesn't need full context
+        .temperature(0.01);
 
     let request = ChatMessageRequest::new(
         sub_model.to_string(),
         vec![ChatMessage::new(MessageRole::User, summary_prompt)],
     ).options(options);
 
-    let response = ollama.send_chat_messages(request).await.into_diagnostic()?;
-    let summary_text = response.message.content;
+    // If we are at critical capacity, try to summarize, but fallback to Hard-Prune if it fails or is too slow
+    let summary_result = tokio::time::timeout(
+        tokio::time::Duration::from_secs(15),
+        ollama.send_chat_messages(request)
+    ).await;
 
-    // Replace the range with a single summary message
-    let summary_message = ChatMessage::new(
-        MessageRole::System,
-        format!("[CONTEXT SUMMARY - COMPACTED]:\n{}", summary_text)
-    );
-
-    messages.splice(compaction_target_range, std::iter::once(summary_message));
+    match summary_result {
+        Ok(Ok(response)) => {
+            let summary_text = response.message.content;
+            let summary_message = ChatMessage::new(
+                MessageRole::System,
+                format!("[CONTEXT SUMMARY - COMPACTED]:\n{}", summary_text)
+            );
+            messages.splice(compaction_target_range, std::iter::once(summary_message));
+        },
+        _ => {
+            // HARD PRUNE FALLBACK: If summarizing fails or hangs, just drop the chunk to save the system
+            messages.drain(compaction_target_range);
+            let panic_message = ChatMessage::new(
+                MessageRole::System,
+                "⚠️ [CRITICAL OVERLOAD]: Summarization failed. Old history has been hard-pruned to restore system stability.".to_string()
+            );
+            messages.insert(1, panic_message);
+        }
+    }
 
     Ok(messages)
 }
