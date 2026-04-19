@@ -58,6 +58,7 @@ pub struct Agent {
     pub recent_failures: Arc<DashMap<String, usize>>,
     pub sentinel: crate::sentinel::SentinelManager,
     pub plan_approved: Arc<Mutex<bool>>,
+    pub tool_stats: Arc<DashMap<String, (usize, usize)>>,
 }
 
 impl Agent {
@@ -162,6 +163,7 @@ impl Agent {
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
             sentinel: crate::sentinel::SentinelManager::new(),
             plan_approved: Arc::new(Mutex::new(false)),
+            tool_stats: Arc::new(DashMap::new()),
         }
     }
 
@@ -200,9 +202,25 @@ impl Agent {
         let mode_str = if is_planning { "PLANNING MODE (Read-only research & architecture)" } else { "EXECUTION MODE (Implementation & actions)" };
         let approval_str = if is_approved { "APPROVED (Plan has been vetted by user)" } else { "DRAFT (Plan not yet approved. Modifying tools are BLOCKED)" };
 
+        // --- 🧠 COMPETENCY REPORTING ---
+        let mut competency_warnings = Vec::new();
+        for item in self.tool_stats.iter() {
+            let (name, (s, f)) = (item.key(), item.value());
+            let total = s + f;
+            if total >= 3 && *f > *s {
+                competency_warnings.push(format!("- {}: High failure rate ({}/{} failed). REASON: Likely incorrect arguments or path assumptions. BE MORE PRECISE.", name, f, total));
+            }
+        }
+
+        let competency_str = if competency_warnings.is_empty() {
+            "".to_string()
+        } else {
+            format!("\n### COMPETENCY WARNINGS ###\n{}\n", competency_warnings.join("\n"))
+        };
+
         let state_msg = format!(
-            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- PLAN STATUS: {}\n- DIRECTIVE: Do NOT attempt modifying tool calls if Plan Status is 'DRAFT'. Summarize your plan and use 'ask_user' instead.",
-            mode_str, approval_str
+            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- PLAN STATUS: {}\n- DIRECTIVE: Do NOT attempt modifying tool calls if Plan Status is 'DRAFT'. Summarize your plan and use 'ask_user' instead.{}\n- ADVISORY: If you see high failure rates, stop and verify your assumptions using read_file or list_dir before retrying.",
+            mode_str, approval_str, competency_str
         );
 
         let mut h_lock = self.history.lock();
@@ -746,7 +764,10 @@ impl Agent {
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
             // --- 🛡️ NEW SAFETY GATE: Block modifying tools if plan is not approved ---
             if tool.is_modifying() && !*self.plan_approved.lock() {
-                return (tool_name, "BLOCKED: Plan not yet approved. You MUST provide an Implementation Plan and request feedback from the user via 'ask_user' before running this tool.".to_string(), true);
+                return (tool_name.clone(), format!(
+                    "BLOCKED: Plan not yet approved. You MUST provide an architectural summary starting with the header '# PROPOSED PLAN' and request feedback from the user via 'ask_user' before running '{}'.", 
+                    tool_name
+                ), true);
             }
 
             let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
@@ -766,11 +787,24 @@ impl Agent {
                         
                         let result = (tool_name.to_string(), res, true);
                         self.recent_tool_calls.insert(tool_name.to_string(), result.1.chars().take(100).collect());
+                        
+                        // Increment success stats
+                        self.tool_stats.entry(tool_name.to_string())
+                            .and_modify(|(s, _)| *s += 1)
+                            .or_insert((1, 0));
+                            
                         return result;
                     }
                     Err(e) => {
                         let err_msg = format!("{}", e);
+                        
+                        // Increment failure stats on final attempt or if non-retryable
                         let classification = crate::error_classifier::classify_error(&tool_name, &err_msg);
+                        if classification != crate::error_classifier::ErrorClass::Retryable || attempt == max_attempts {
+                            self.tool_stats.entry(tool_name.to_string())
+                                .and_modify(|(_, f)| *f += 1)
+                                .or_insert((0, 1));
+                        }
 
                         if classification == crate::error_classifier::ErrorClass::Retryable && attempt < max_attempts {
                             let wait_secs = 2u64.pow(attempt as u32 - 1);
@@ -793,7 +827,14 @@ impl Agent {
 
             last_result
         } else {
-            (tool_name.to_string(), format!("Tool '{}' not found. CRITICAL RULE: You MUST NEVER invent tools!", tool_name), false)
+            (
+                tool_name.to_string(), 
+                format!(
+                    "SYSTEM ADVISORY: Tool '{}' not found in registry. You likely hallucinated a capability. VALID ALTERNATIVES: 'read_file', 'grep_search', 'run_command', 'ask_user'. Verify the [TOOL SCHEMA] and try again.", 
+                    tool_name
+                ), 
+                false
+            )
         }
     }
 
