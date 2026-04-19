@@ -1,94 +1,74 @@
 # 🌪️ Tempest AI (Project Smart-Brain)
 **The Hardware-Aware, Native-Schema Autonomous Engineer.**
 
-Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat aliases, Tempest is a **Stateful Intelligence** that monitors your hardware, manages a persistent conceptual brain via native tool-calling schemas, and operates with a disciplined Planning/Execution lifecycle.
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat aliases, Tempest is a **Stateful Intelligence** that operates with a hardened "Frontal Lobe" architecture—enforcing programmatic boundaries, real-time situational awareness, and a disciplined Planning/Execution lifecycle.
+
+---
+
+## 🧠 The "Frontal Lobe" Architecture
+Tempest has been hardened with a sophisticated agency management layer that prevents hallucinations and unauthorized executions.
+
+### 🛡️ 1. Programmatic Safety Gates
+All system-modifying actions (File I/O, Command Execution, Git Commits) are strictly blocked at the hardware level until an explicit **Implementation Plan** has been approved by the user. 
+- **Modifying Layer Protection**: Tools like `write_file` or `run_command` return a `BLOCKED` status in draft mode.
+- **Planning Mandate**: The agent is programmatically forced to provide a `# PROPOSED PLAN` summary before it can trigger the `ask_user` tool for execution approval.
+
+### 🛰️ 2. State-Injected Turns
+Tempest is never "lost" in a long thread. Every reasoning turn begins with a high-priority **Situational Report** injected directly into the context:
+- **Mode Awareness**: Explicitly informs the model if it is in Planning (Read-only) or Execution mode.
+- **Approval Tracking**: Injects the current verification status of the proposed plan.
+
+### 🧪 3. Competency HUD & Tool Stats
+The agent monitors its own hardware and software "Win/Loss" record. 
+- **Performance Tracking**: Successful vs. failed tool calls are tallied in a thread-safe registry.
+- **Self-Reflective Warnings**: If a tool fails repeatedly, the system injects a **Competency Warning** at the start of the next turn, forcing the model to stop, analyze the failures, and verify its assumptions.
+
+### 🌡️ 4. Dynamic Temperature Governance
+Tempest dynamically shifts its internal reasoning "thermal" state:
+- **Planning Mode (0.1 Temp)**: Locked for maximum logical rigor and architectural discipline.
+- **Execution Mode (0.4 Temp)**: Optimized for creative problem-solving and implementation agility.
 
 ---
 
 ## 🚀 "Native-Engine" Capabilities
 
 ### ⚡ 1. Native Tool-Calling Architecture
-Tempest is powered by the **`ollama-rs` 0.3.4** typed tool-calling framework. 
+Tempest is powered by the **`ollama-rs` 0.3.5** typed tool-calling framework. 
 - **Strongly Typed**: Every tool is defined using `schemars` JSON schemas, eliminating brittle regex-based Markdown parsing.
-- **Schema Emancipation**: The agent is hardened against hallucinated network reconnaissance and is optimized to route directly to native tools like `get_stock_price`.
-- **Improved Autonomy**: The LLM receives exact structural requirements for every function, leading to a 90% reduction in malformed tool calls.
+- **Architectural Fallbacks**: Hallucinated tool calls are intercepted and replaced with **Corrective Advisories**, guiding the model back to the valid Tool Schema.
 - **Multi-Turn Chaining**: Supports multiple sequential tool executions in a single reasoning step.
 
-### 🧠 2. Categorized Long-Term Memory
-Tempest features a persistent SQLite-backed **Conceptual Brain** with `#tagging` support.
-- **Contextual Retrieval**: Store facts with searchable tags (e.g., `#config`, `#todo`, `#db`).
-- **Fuzzy Recall**: Retrieve memories via topic names or associated tags, ensuring the agent "remembers" the right context at the right time.
+### 🧠 2. Categorized Long-Term Memory & Dual-Model Compaction
+Tempest features a persistent SQLite-backed **Conceptual Brain** and a background-managed context window.
+- **Micro-Model Compaction**: Background summarization is offloaded to a secondary model (e.g., `llama3.2:1b`), preserving context window for the primary reasoning model.
+- **Hard-Prune Recovery**: Aggressive context management ensures the agent stays within 16k tokens, maintaining zero-latency responsiveness during massive refactors.
 
 ### 🌪️ The Sentinel Fleet & Sentient Telemetry
-Tempest is protected by five autonomous supervisors and a real-time reasoning engine:
-- **Reasoning Trace (Chain of Thought)**: Native support for models like DeepSeek-R1. View the agent's internal monologue in a dedicated side-pane before it executes any tools.
+Tempest is protected by autonomous supervisors and real-time reasoning engine:
+- **Reasoning Trace (Chain of Thought)**: View the agent's internal monologue in a dedicated side-pane.
 - **Context Runway**: Predictive token management that prevents context overflow before it happens.
-- **Privilege Escalator**: Detects protected resource access and manages the secure escalation protocol.
-- **Compiler Guard**: Identifies "whack-a-mole" debugging patterns and forces strategic pivots during broken builds.
-- **Build Watcher**: Prevents "Stale Testing" by ensuring the agent is always aware of Bin-to-Source synchronization.
-- **Thermal Guard**: Monitors hardware temperatures and autonomously triggers thermal throttling or cooling pauses to project your physical workstation.
-
-### 🛑 4. Real-Time Agent Interjection
-The reasoning loop is no longer a "black box."
-- **Esc Interrupt**: Pressing **`Esc`** immediately halts the current thought process or model stream, returning control to the user instantly.
-- **Safety Keybindings**: `Ctrl+C` for application termination, `Esc` for surgical agent halts.
-
-### 🔍 5. Hardened Conceptual Brain
-The RAG (Retrieval Augmented Generation) engine has been hardened for production-industrial use.
-- **Deduplication**: Automatic flush-and-rebuild for semantic indexing ensures no redundant memory copies.
-- **Ghost Purging**: Periodic cleanup of "ghost" entries (references to deleted or moved files), keeping the agent grounded in the actual workspace state.
-- **Improved Retrieval**: 70% reduction in "hallucinated file awareness" through surgical index sanitization.
-
-#### Profiling Commands
-```bash
-# Run benchmarks
-cargo bench
-
-# Profile with flamegraph
-cargo flamegraph --bench tool_performance
-
-# Runtime introspection with tokio-console
-RUSTFLAGS="--cfg tokio_unstable" cargo run --features tokio-console
-
-# Then connect with: tokio-console
-```
-
-### 🛡️ 6. "Principal Engineer" Privilege Protocol
-Tempest features a secure, user-approved protocol for session-based privilege escalation.
-- **Secure Sudo-Bridge**: The agent uses the `request_privileges` tool to proactively ask for root access via a high-fidelity TUI prompt.
-- **Non-blocking Elevation**: Commands are wrapped in `sudo -n` (non-interactive mode), ensuring the agent never hangs waiting for a ghost password challenge.
-- **Transparent Logic**: Users confirm escalation rationale before the agent gains root-level sensor and actuator access.
-
-### ⚡ 7. High-Performance Async Hardening
-The agent core has been hardened for zero-latency autonomous development.
-- **Non-Blocking I/O**: All blocking filesystem operations (`read_file`, `write_file`, `patch_file`, `append_file`, `find_replace`) are offloaded to dedicated `spawn_blocking` thread pools.
-- **Responsive Reasoning**: Ensuring the reasoning engine remains 100% responsive even during massive repository refactors or heavy system I/O.
+- **Thermal Guard**: Monitors hardware temperatures and autonomously triggers throttling or cooling pauses to protect your workstation.
 
 ---
 
 ## ⚡ The High-Fidelity TUI Experience
-
-Tempest AI features a professional, industrial Terminal User Interface designed for high-stakes engineering. This "Principal Engineer" dashboard provides real-time situational awareness and fluid interaction.
+Tempest AI features a professional, industrial Terminal User Interface designed for high-stakes engineering.
 
 ![Tempest AI High-Fidelity TUI Interface](docs/tui_hero.png)
 
 ### 🛠️ Visual Dashboard Features:
 - **Industrial Branding**: Centered high-fidelity ASCII logo with 🌪️ AI Core accents.
-- **Real-Time Telemetry**: Live tracking of **CPU, RAM, GPU, and Thermals** directly in the sidebar.
-- **Synchronized Reasoning**: Dynamic ASCII spinners that activate when the agent is in a "Thinking" state.
-- **Secure Escalation Prompts**: Dedicated UI blocks for user confirmation of privilege requests.
-- **Fluid Token Streaming**: Messages stream into the chat area token-by-token for a responsive, high-speed experience.
+- **Real-Time Telemetry**: Live tracking of **CPU, RAM, GPU, and Thermals** in the sidebar.
+- **Synchronized Reasoning**: Dynamic ASCII spinners that activate when the agent is "Thinking."
+- **Fluid Token Streaming**: Messages stream into the chat area token-by-token for a high-speed experience.
 
 ---
 
 ## 🛠️ The Tempest Toolbox (50+ Native Tools)
 
-Tempest comes equipped with a vast array of specialized sensors and actuators, organized into functional suites:
-
 ### 📂 File & Workflow Suite
 - **Navigation**: `project_atlas`, `tree`, `list_dir`, `search_files`.
-- **Manipulation**: `read_file`, `write_file`, `patch_file`, `append_file`, `find_replace`.
-- **Logic**: `diff_files`, `edit_file_with_diff`.
+- **Manipulation**: `read_file`, `write_file`, `patch_file`, `append_file`, `find_replace`, `create_directory`, `delete_file`.
 
 ### 💻 Development Suite
 - **Build & Test**: `build_project`, `run_tests`, `run_command`.
@@ -97,57 +77,23 @@ Tempest comes equipped with a vast array of specialized sensors and actuators, o
 
 ### 🧠 Knowledge & RAG Suite
 - **Semantic RAG**: `index_file_semantically`, `semantic_search`.
-- **Memory**: `store_memory`, `recall_memory` (with tagging).
+- **Memory**: `store_memory`, `recall_memory`.
 - **Knowledge Base**: `distill_knowledge`, `recall_brain`.
-
-### 🛰️ System & Telemetry Suite
-- **Hardware**: `system_info`, `gpu_diagnostics`, `system_telemetry`, `system_diagnostic_scan`.
-- **Deep Linux**: `kernel_diagnostic`, `systemd_manager`, `linux_process_analyzer`.
-
-### 🌐 Network & Web Suite
-- **Connectivity**: `low_level_icmp_diagnostic`, `network_sniffer`.
-- **Web**: `search_web`, `read_url`, `raw_http_fetch`, `download_file`.
-- **Finance**: `get_stock_price`.
-
-### ⚙️ Agent Ops & Utilities
-- **Meta**: `spawn_sub_agent`, `toggle_planning`, `request_privileges`, `update_task_context`, `ask_user`.
-- **Utils**: `clipboard`, `notify`, `env_var`, `chmod`.
-
----
-
-### 🛡️ Guardrails & Safety
-- **Planning Mode**: Tempest starts every session in a locked state. It can research and plan, but MUST physically call the **`toggle_planning`** tool to unlock system-modifying actions.
-- **Turn Watchdog**: A "Sentinel" layer detects when the agent tries to finish turn silently after a tool call. It automatically intercedes with a reprimand to force a final summary.
-- **Tool Repair Layer**: An internal fuzzy-mapper that heals minor tool hallucinations (e.g., `stock_price` -> `get_stock_price`) and arg-name errors on the fly.
 
 ---
 
 ## 🚀 Quick Start (One-Liner)
 
 > [!IMPORTANT]
-> **Requirements**: Rust **1.95+** is required to support the modern async features and tool-calling schemas.
+> **Requirements**: Rust **1.95+** is required. Ollama must be running locally.
 
 ```bash
 git clone https://github.com/7empest462/tempest_ai.git && cd tempest_ai && cargo build --release && sudo cp target/release/tempest_ai /usr/local/bin/tempest_ai
 ```
 
 ### ❄️ Nix Development (Linux/macOS)
-If you have Nix installed, you can skip manual toolchain setup:
 ```bash
-# Enter the modern flake shell (pins Rust 1.95 + all native libraries)
-nix develop
-
-# Legacy nix shell fallback
-nix-shell
-```
-
-## ⚙️ Configuration
-Tempest looks for its config at `~/.config/tempest_ai/config.toml`.
-```toml
-model = "qwen2.5-coder:7b"
-sub_agent_model = "qwen2.5-coder:3b"
-history_path = "~/.tempest_history"
-encrypt_history = true
+nix develop  # Pins Rust 1.95 + all native libraries
 ```
 
 ---
