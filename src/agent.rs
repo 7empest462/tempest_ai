@@ -57,6 +57,7 @@ pub struct Agent {
     pub rules: crate::rules::RuleEngine,
     pub recent_failures: Arc<DashMap<String, usize>>,
     pub sentinel: crate::sentinel::SentinelManager,
+    pub plan_approved: Arc<Mutex<bool>>,
 }
 
 impl Agent {
@@ -160,6 +161,7 @@ impl Agent {
             event_tx: Arc::new(Mutex::new(None)),
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
             sentinel: crate::sentinel::SentinelManager::new(),
+            plan_approved: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -188,6 +190,25 @@ impl Agent {
     pub async fn check_connection(&self) -> Result<()> {
         self.ollama.list_local_models().await.into_diagnostic()?;
         Ok(())
+    }
+
+    /// Injects a high-priority state message into the context to ensure the model knows its current boundaries.
+    fn inject_state_context(&self) {
+        let is_planning = *self.planning_mode.lock();
+        let is_approved = *self.plan_approved.lock();
+        
+        let mode_str = if is_planning { "PLANNING MODE (Read-only research & architecture)" } else { "EXECUTION MODE (Implementation & actions)" };
+        let approval_str = if is_approved { "APPROVED (Plan has been vetted by user)" } else { "DRAFT (Plan not yet approved. Modifying tools are BLOCKED)" };
+
+        let state_msg = format!(
+            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- PLAN STATUS: {}\n- DIRECTIVE: Do NOT attempt modifying tool calls if Plan Status is 'DRAFT'. Summarize your plan and use 'ask_user' instead.",
+            mode_str, approval_str
+        );
+
+        let mut h_lock = self.history.lock();
+        // Remove old state message if it exists to keep context clean
+        h_lock.retain(|m| !m.content.starts_with("### TEMPEST INTERNAL STATE ###"));
+        h_lock.push(ChatMessage::new(MessageRole::System, state_msg));
     }
 
     pub fn load_history(&self) -> Result<()> {
@@ -268,6 +289,9 @@ impl Agent {
         let mut reprimand_issued = false;
 
         loop {
+            // --- STAGE 0: STATE INJECTION ---
+            self.inject_state_context();
+
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let tx_opt = self.event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -395,7 +419,7 @@ impl Agent {
             // --- STAGE 3: EXECUTION ---
             let results = self.executor_dispatch(all_tool_calls).await?;
 
-            // --- STAGE 4: COLLECTION ---
+            // --- STAGE 4: COLLECTION & STRUCTURED FEEDBACK ---
             let mut detected_loop_key = None;
             {
                 let mut h_lock = self.history.lock();
@@ -404,7 +428,12 @@ impl Agent {
                         // Reset failure counters on any success
                         self.recent_failures.remove(&tool_name);
                         self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
-                        format!("SYSTEM NOTIFICATION: TOOL RESULT for {}:\n{}\n\nCRITICAL: Analyze this result and formulate your final output to the user clearly. You MUST respond.", tool_name, result) 
+                        
+                        if result.starts_with("BLOCKED:") {
+                            format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result)
+                        } else {
+                            format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result)
+                        }
                     } else { 
                         // Broad matching: If it's a "Not Found" error, we group it
                         let fail_key = if result.contains("os error 2") || result.contains("No such file") || result.contains("No files found") {
@@ -419,7 +448,7 @@ impl Agent {
                             detected_loop_key = Some(fail_key);
                         }
 
-                        format!("SYSTEM NOTIFICATION: TOOL ERROR for {}:\n{}\n\nCRITICAL: This tool failed. Analyze the error and determine your next step. You MUST respond.", tool_name, result) 
+                        format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result) 
                     };
                     h_lock.push(ChatMessage::new(MessageRole::User, formatted_res));
                 }
@@ -452,10 +481,14 @@ impl Agent {
     }
 
     async fn planner_turn(&self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<PlannerOutput> {
+        let ctx_limit = self.calculate_optimal_ctx();
+        let is_planning = *self.planning_mode.lock();
+        let temp = if is_planning { 0.1 } else { 0.4 };
+
         let options = ModelOptions::default()
-            .num_ctx(self.calculate_optimal_ctx())
+            .num_ctx(ctx_limit)
             .num_predict(4096)
-            .temperature(if *self.planning_mode.lock() { 0.05 } else { 0.30 });
+            .temperature(temp);
 
         let mut history_snapshot = self.history.lock().clone();
 
@@ -711,54 +744,11 @@ impl Agent {
         }
 
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
-            if *self.planning_mode.lock() && tool.is_modifying() {
-                let context = self.get_tool_context();
-                let prompt = format!("Agent requests permission to execute '{}'. Proceed? (y/n/a)", tool_name);
-                let mut approved = false;
-                
-                if context.tx.send(crate::tui::AgentEvent::RequestInput("System".to_string(), prompt.clone())).await.is_ok() {
-                    let mut rx_lock = context.tool_rx.lock().await;
-                    if let Some(rx) = rx_lock.as_mut() {
-                        match rx.recv().await {
-                            Some(crate::tui::ToolResponse::Text(ans)) if {
-                                let ans_lower = ans.trim().to_lowercase();
-                                ans_lower == "y" || ans_lower == "yes" || ans_lower.is_empty()
-                            } => {
-                                approved = true;
-                            }
-                            Some(crate::tui::ToolResponse::Text(ans)) if {
-                                let ans_lower = ans.trim().to_lowercase();
-                                ans_lower == "a" || ans_lower == "all"
-                            } => {
-                                approved = true;
-                                *self.planning_mode.lock() = false;
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    use std::io::{self, Write};
-                    use colored::Colorize;
-                    println!("\n{} {}", "⚠️ System:".yellow().bold(), prompt.cyan());
-                    print!(">> ");
-                    let _ = io::stdout().flush();
-                    let mut input = String::new();
-                    if io::stdin().read_line(&mut input).is_ok() {
-                        let ans_lower = input.trim().to_lowercase();
-                        if ans_lower == "y" || ans_lower == "yes" || ans_lower.is_empty() {
-                            approved = true;
-                        } else if ans_lower == "a" || ans_lower == "all" {
-                            approved = true;
-                            *self.planning_mode.lock() = false;
-                        }
-                    }
-                }
-                
-                if !approved {
-                    return (tool_name.clone(), format!("User REJECTED execution of {}. Formulate a new plan using non-modifying tools.", tool_name), false);
-                }
+            // --- 🛡️ NEW SAFETY GATE: Block modifying tools if plan is not approved ---
+            if tool.is_modifying() && !*self.plan_approved.lock() {
+                return (tool_name, "BLOCKED: Plan not yet approved. You MUST provide an Implementation Plan and request feedback from the user via 'ask_user' before running this tool.".to_string(), true);
             }
-            
+
             let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
             let max_attempts = 3;
 
@@ -803,7 +793,7 @@ impl Agent {
 
             last_result
         } else {
-            (tool_name.to_string(), format!("Tool '{}' not found. CRITICAL RULE: You MUST NEVER invent tools! Read the [TOOL SCHEMA]. For external data or stocks, use 'get_stock_price' or 'read_url'. For memory/research, use 'spawn_sub_agent' to preserve context and stop immediately when done.", tool_name), false)
+            (tool_name.to_string(), format!("Tool '{}' not found. CRITICAL RULE: You MUST NEVER invent tools!", tool_name), false)
         }
     }
 
@@ -873,7 +863,7 @@ impl Agent {
     pub async fn shutdown(&self) {
         let options = ModelOptions::default()
             .num_ctx(1)
-            .num_predict(1);
+            .temperature(0.1);
 
         // ZERO-PULSE: Use GenerationRequest with an empty prompt.
         // This is the fastest way to signal an unload in Ollama without triggering 'Thinking'.
