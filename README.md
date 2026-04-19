@@ -33,7 +33,7 @@ Tempest dynamically shifts its internal reasoning "thermal" state:
 ## 🚀 "Native-Engine" Capabilities
 
 ### ⚡ 1. Native Tool-Calling Architecture
-Tempest is powered by the **`ollama-rs` 0.3.5** typed tool-calling framework. 
+Tempest is powered by the **`ollama-rs` 0.3.4** typed tool-calling framework. 
 - **Strongly Typed**: Every tool is defined using `schemars` JSON schemas, eliminating brittle regex-based Markdown parsing.
 - **Architectural Fallbacks**: Hallucinated tool calls are intercepted and replaced with **Corrective Advisories**, guiding the model back to the valid Tool Schema.
 - **Multi-Turn Chaining**: Supports multiple sequential tool executions in a single reasoning step.
