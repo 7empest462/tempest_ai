@@ -478,15 +478,21 @@ impl Agent {
             {
                 let mut h_lock = self.history.lock();
                 for (tool_name, result, is_success) in results {
-                    let formatted_res = if is_success { 
+                    let (formatted_res, hud_msg) = if is_success { 
                         // Reset failure counters on any success
                         self.recent_failures.remove(&tool_name);
                         self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
                         
                         if result.starts_with("BLOCKED:") {
-                            format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result)
+                            (
+                                format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result),
+                                format!("🚫 BLOCKED: '{}' - Plan requires approval", tool_name)
+                            )
                         } else {
-                            format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result)
+                            (
+                                format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result),
+                                format!("✅ SUCCESS: '{}' executed", tool_name)
+                            )
                         }
                     } else { 
                         // Broad matching: If it's a "Not Found" error, we group it
@@ -502,8 +508,16 @@ impl Agent {
                             detected_loop_key = Some(fail_key);
                         }
 
-                        format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result) 
+                        (
+                            format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result),
+                            format!("❌ ERROR: '{}' failed", tool_name)
+                        )
                     };
+                    
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(hud_msg));
+                    }
                     h_lock.push(ChatMessage::new(MessageRole::User, formatted_res));
                 }
             }
