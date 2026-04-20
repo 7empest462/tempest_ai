@@ -291,9 +291,6 @@ impl Agent {
                 full_system_prompt.push_str(&schema_json);
             }
             
-            // DEBUG: Measure the actual system prompt size without breaking TUI
-            let sp_len = full_system_prompt.len();
-            let _ = std::fs::write("prompt_size.txt", format!("⚙️ DEBUG: Dense System Prompt Length: {} chars (~{} tokens)", sp_len, sp_len / 3));
 
             if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
                 h_lock[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
