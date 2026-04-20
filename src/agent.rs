@@ -585,7 +585,7 @@ impl Agent {
         let pos = history_snapshot.len().saturating_sub(2); // Insert before the directive
         history_snapshot.insert(pos, ChatMessage::new(
             MessageRole::System,
-            "CRITICAL: You are an autonomous agent. DO NOT ask the user how you can help. You MUST begin exactly with THOUGHT:, and you MUST output your next tool call as pure JSON enclosed in a ```json block. Do NOT use bullet points or conversational preamble.".to_string()
+            "CRITICAL: You are an autonomous agent. DO NOT ask the user how you can help. You MUST begin exactly with THOUGHT:, and you MUST output your next tool call as pure JSON enclosed in a ```json block. NEVER output raw Markdown code blocks (e.g. ```rust) inside the chat stream. If you are writing code, you MUST inject it via the `write_to_file` tool payload. Do NOT use bullet points or conversational preamble.".to_string()
         ));
         
         let request = ChatMessageRequest::new(self.model.clone(), history_snapshot)
