@@ -292,7 +292,38 @@ impl Agent {
             } else {
                 h_lock.insert(0, ChatMessage::new(MessageRole::System, full_system_prompt));
             }
-            h_lock.push(ChatMessage::new(MessageRole::User, initial_user_prompt));
+
+            // --- 🧹 CONTEXT INERTIA BREAKER ---
+            // If the user manually inputs a new command, it means they are pivoting.
+            // We prune unresolved tool errors and hanging thoughts from the end of the history.
+            while let Some(last) = h_lock.last() {
+                if last.role == MessageRole::User && (
+                    last.content.starts_with("ERROR: Tool") || 
+                    last.content.starts_with("SYSTEM NOTIFICATION:") ||
+                    last.content.starts_with("BLOCKED:") ||
+                    last.content.contains("ACTION REQUIRED")
+                ) {
+                    h_lock.pop();
+                } else if last.role == MessageRole::Assistant && last.content.starts_with("THOUGHT:") {
+                    h_lock.pop();
+                } else {
+                    break;
+                }
+            }
+
+            // Reset failure counters to prevent legacy errors tracking into the new topic
+            self.recent_failures.clear();
+
+            let safe_prompt = if h_lock.len() > 1 {
+                format!(
+                    "### ⚠️ USER OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new request.\n\nNEW USER REQUEST:\n{}",
+                    initial_user_prompt
+                )
+            } else {
+                initial_user_prompt
+            };
+
+            h_lock.push(ChatMessage::new(MessageRole::User, safe_prompt));
         }
         let _ = self.save_history();
         
