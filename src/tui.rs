@@ -36,7 +36,6 @@ pub enum AgentEvent {
 }
 
 pub enum ToolResponse {
-    Confirm,
     Confirmed(bool),
     Text(String),
     #[allow(dead_code)]
