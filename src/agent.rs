@@ -183,7 +183,7 @@ impl Agent {
         } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
             4096
         } else if model.contains("14b") || model.contains("7b") || model.contains("8b") || model.contains("9b") {
-            32768
+            16384
         } else {
              16384
         }
