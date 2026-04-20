@@ -489,8 +489,15 @@ impl Agent {
                                 format!("🚫 BLOCKED: '{}' - Plan requires approval", tool_name)
                             )
                         } else {
+                            let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+                            let mut base_res = format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result);
+                            
+                            if is_modifying {
+                                base_res.push_str("\n\n⚠️ SYSTEM DIRECTIVE: You have just modified a physical file. Before doing ANYTHING else, you MUST rigorously test and verify your changes. If it is code, run it or its tests using 'run_command'. Do NOT assume your modifications work correctly. Verify them immediately and report the outcome.");
+                            }
+
                             (
-                                format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result),
+                                base_res,
                                 format!("✅ SUCCESS: '{}' executed", tool_name)
                             )
                         }
