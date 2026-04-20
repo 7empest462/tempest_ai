@@ -597,7 +597,8 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let status_block = Paragraph::new(status_lines)
         .block(Block::default().borders(Borders::ALL).title(status_title))
-        .style(Style::default().fg(Color::Gray));
+        .style(Style::default().fg(Color::Gray))
+        .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(status_block, top_chunks[1]);
 
     // --- REASONING TRACE PANE (Right Panel) ---
