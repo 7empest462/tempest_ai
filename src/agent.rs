@@ -814,10 +814,39 @@ impl Agent {
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
             // --- 🛡️ NEW SAFETY GATE: Block modifying tools if plan is not approved ---
             if tool.is_modifying() && !*self.plan_approved.lock() {
-                return (tool_name.clone(), format!(
-                    "BLOCKED: Plan not yet approved. You MUST provide an architectural summary starting with the header '# PROPOSED PLAN' and request feedback from the user via 'ask_user' before running '{}'.", 
-                    tool_name
-                ), true);
+                let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel(1);
+                
+                let tx_opt = self.event_tx.lock().clone();
+                let event = crate::tui::AgentEvent::RequestConfirmation {
+                    tool_name: tool_name.clone(),
+                    args: serde_json::to_string(&args).unwrap_or_default(),
+                    response_tx: resp_tx,
+                };
+                
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(event).await;
+                }
+                
+                let start_wait = std::time::Instant::now();
+                let approved = loop {
+                    if let Ok(resp) = resp_rx.try_recv() {
+                        if let crate::tui::ToolResponse::Confirmed(b) = resp {
+                            break b;
+                        }
+                    }
+                    if start_wait.elapsed().as_secs() > 7200 { // 2 hour timeout
+                        break false; 
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                };
+
+                if !approved {
+                    return (tool_name.clone(), format!(
+                        "BLOCKED: The human explicitly rejected your execution of '{}'. You are operating out-of-bounds. You MUST propose a formal plan and ask for approval before trying again.", 
+                        tool_name
+                    ), true);
+                }
+                // Overridden by human: Proceed to execute safely.
             }
 
             let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
