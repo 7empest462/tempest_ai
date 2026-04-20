@@ -182,8 +182,10 @@ impl Agent {
             2048
         } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
             4096
-        } else if model.contains("14b") || model.contains("7b") || model.contains("8b") || model.contains("9b") {
-            16384
+        } else if model.contains("14b") {
+            24576
+        } else if model.contains("7b") || model.contains("8b") || model.contains("9b") {
+            32768
         } else {
              16384
         }
@@ -288,6 +290,11 @@ impl Agent {
             if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
                 full_system_prompt.push_str(&schema_json);
             }
+            
+            // DEBUG: Measure the actual system prompt size without breaking TUI
+            let sp_len = full_system_prompt.len();
+            let _ = std::fs::write("prompt_size.txt", format!("⚙️ DEBUG: Dense System Prompt Length: {} chars (~{} tokens)", sp_len, sp_len / 3));
+
             if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
                 h_lock[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
             } else {
