@@ -183,7 +183,7 @@ impl Agent {
         } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
             4096
         } else if model.contains("14b") || model.contains("7b") || model.contains("8b") || model.contains("9b") {
-            16384
+            32768
         } else {
              16384
         }
@@ -284,7 +284,8 @@ impl Agent {
             }
 
             full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
-            if let Ok(schema_json) = serde_json::to_string_pretty(&self.tool_registry) {
+            // Use dense JSON instead of pretty to eliminate thousands of whitespace tokens
+            if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
                 full_system_prompt.push_str(&schema_json);
             }
             if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
