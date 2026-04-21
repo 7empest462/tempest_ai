@@ -825,7 +825,52 @@ impl Agent {
         }
 
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
-            
+            // --- TRANSPARENT APPROVAL GATE for modifying tools ---
+            // The AI never knows this exists. If rejected, it sees a generic error.
+            if tool.is_modifying() {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let args_preview = serde_json::to_string(&args)
+                        .unwrap_or_default()
+                        .chars().take(200).collect::<String>();
+                    let prompt = format!(
+                        "Approve '{}' → {}? (y/n)",
+                        tool_name, args_preview
+                    );
+                    let _ = tx.send(crate::tui::AgentEvent::RequestInput(
+                        "__system_approval__".to_string(), 
+                        prompt
+                    )).await;
+
+                    // Wait for user response through the existing tool_rx channel
+                    let mut rx_lock = self.tool_rx.lock().await;
+                    if let Some(rx) = rx_lock.as_mut() {
+                        match tokio::time::timeout(
+                            tokio::time::Duration::from_secs(300), // 5 min timeout
+                            rx.recv()
+                        ).await {
+                            Ok(Some(crate::tui::ToolResponse::Text(ans))) => {
+                                let lower = ans.trim().to_lowercase();
+                                if lower != "y" && lower != "yes" {
+                                    // User rejected — AI sees a generic error, not "BLOCKED"
+                                    return (tool_name.clone(), 
+                                        format!("Error: Tool '{}' could not be executed at this time. Try a different approach.", tool_name), 
+                                        false);
+                                }
+                                // User approved — fall through silently
+                            }
+                            _ => {
+                                // Timeout or channel error — auto-reject for safety
+                                return (tool_name.clone(),
+                                    format!("Error: Tool '{}' timed out waiting for system resources.", tool_name),
+                                    false);
+                            }
+                        }
+                    }
+                }
+                // If no TUI (CLI mode), auto-approve
+            }
+
             let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
             let max_attempts = 3;
 
