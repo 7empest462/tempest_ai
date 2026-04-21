@@ -57,7 +57,6 @@ pub struct Agent {
     pub rules: crate::rules::RuleEngine,
     pub recent_failures: Arc<DashMap<String, usize>>,
     pub sentinel: crate::sentinel::SentinelManager,
-    pub plan_approved: Arc<Mutex<bool>>,
     pub tool_stats: Arc<DashMap<String, (usize, usize)>>,
 }
 
@@ -162,7 +161,7 @@ impl Agent {
             event_tx: Arc::new(Mutex::new(None)),
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
             sentinel: crate::sentinel::SentinelManager::new(),
-            plan_approved: Arc::new(Mutex::new(false)),
+
             tool_stats: Arc::new(DashMap::new()),
         }
     }
@@ -199,10 +198,8 @@ impl Agent {
     /// Injects a high-priority state message into the context to ensure the model knows its current boundaries.
     fn inject_state_context(&self) {
         let is_planning = *self.planning_mode.lock();
-        let is_approved = *self.plan_approved.lock();
         
-        let mode_str = if is_planning { "PLANNING MODE (Read-only research & architecture)" } else { "EXECUTION MODE (Implementation & actions)" };
-        let approval_str = if is_approved { "APPROVED (Plan has been vetted by user)" } else { "DRAFT (Plan not yet approved. Modifying tools are BLOCKED)" };
+        let mode_str = if is_planning { "PLANNING MODE (Read-only research & architecture)" } else { "EXECUTION MODE (Full autonomy granted)" };
 
         // --- 🧠 COMPETENCY REPORTING ---
         let mut competency_warnings = Vec::new();
@@ -221,8 +218,8 @@ impl Agent {
         };
 
         let state_msg = format!(
-            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- PLAN STATUS: {}\n- DIRECTIVE: Do NOT attempt modifying tool calls if Plan Status is 'DRAFT'. Summarize your plan and use 'ask_user' instead.{}\n- ADVISORY: If you see high failure rates, stop and verify your assumptions using read_file or list_dir before retrying.",
-            mode_str, approval_str, competency_str
+            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- DIRECTIVE: You have FULL AUTONOMY to execute tools. Write code using write_file tool calls ONLY. Never dump raw code blocks into chat.{}\n- ADVISORY: If you see high failure rates, stop and verify your assumptions using read_file or list_dir before retrying.",
+            mode_str, competency_str
         );
 
         let mut h_lock = self.history.lock();
@@ -565,7 +562,7 @@ impl Agent {
 
         let options = ModelOptions::default()
             .num_ctx(ctx_limit)
-            .num_predict(4096)
+            .num_predict(8192)
             .temperature(temp);
 
         let mut history_snapshot = self.history.lock().clone();
@@ -585,7 +582,13 @@ impl Agent {
         let pos = history_snapshot.len().saturating_sub(2); // Insert before the directive
         history_snapshot.insert(pos, ChatMessage::new(
             MessageRole::System,
-            "CRITICAL: You are an autonomous agent. DO NOT ask the user how you can help. You MUST begin exactly with THOUGHT:, and you MUST output your next tool call as pure JSON enclosed in a ```json block. NEVER output raw Markdown code blocks (e.g. ```rust) inside the chat stream. If you are writing code, you MUST inject it via the `write_to_file` tool payload. Do NOT use bullet points or conversational preamble.".to_string()
+            "CRITICAL RULES REMINDER (re-read every turn):\n\
+             1. Begin with THOUGHT: always. No preamble, no 'Sure', no 'Here is'.\n\
+             2. ALL code MUST go through the `write_file` tool. NEVER output ```rust or ```python blocks into chat. That does NOT save files.\n\
+             3. Your tool call MUST be valid JSON inside a ```json block with keys 'name' and 'arguments'.\n\
+             4. After writing code, IMMEDIATELY use `run_command` to test/compile it. Do not ask the user if they want you to verify.\n\
+             5. Do NOT ask the user how you can help. Execute the next step of your plan autonomously.\n\
+             6. If you just received tool results, analyze them and take the next action. Do NOT stop to summarize unless the task is DONE.".to_string()
         ));
         
         let request = ChatMessageRequest::new(self.model.clone(), history_snapshot)
@@ -822,43 +825,7 @@ impl Agent {
         }
 
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
-            // --- 🛡️ NEW SAFETY GATE: Block modifying tools if plan is not approved ---
-            if tool.is_modifying() && !*self.plan_approved.lock() {
-                let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel(1);
-                
-                let tx_opt = self.event_tx.lock().clone();
-                let event = crate::tui::AgentEvent::RequestConfirmation {
-                    tool_name: tool_name.clone(),
-                    args: serde_json::to_string(&args).unwrap_or_default(),
-                    response_tx: resp_tx,
-                };
-                
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(event).await;
-                }
-                
-                let start_wait = std::time::Instant::now();
-                let approved = loop {
-                    if let Ok(resp) = resp_rx.try_recv() {
-                        if let crate::tui::ToolResponse::Confirmed(b) = resp {
-                            break b;
-                        }
-                    }
-                    if start_wait.elapsed().as_secs() > 7200 { // 2 hour timeout
-                        break false; 
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                };
-
-                if !approved {
-                    return (tool_name.clone(), format!(
-                        "BLOCKED: The human explicitly rejected your execution of '{}'. You are operating out-of-bounds. You MUST propose a formal plan and ask for approval before trying again.", 
-                        tool_name
-                    ), true);
-                }
-                // Overridden by human: Proceed to execute safely.
-            }
-
+            
             let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
             let max_attempts = 3;
 

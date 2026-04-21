@@ -23,11 +23,6 @@ pub enum AgentEvent {
         rationale: String,
         response_tx: tokio::sync::mpsc::Sender<ToolResponse>,
     },
-    RequestConfirmation {
-        tool_name: String,
-        args: String,
-        response_tx: tokio::sync::mpsc::Sender<ToolResponse>,
-    },
     StreamToken(String),
     ReasoningToken(String),
     SubagentStatus(Option<String>),
@@ -64,7 +59,6 @@ pub struct App {
     pub animation_tick: u32,
     pub pending_input: Option<(String, String)>,
     pub input_response_buffer: String,
-    pub pending_confirmation: Option<(String, String, tokio::sync::mpsc::Sender<ToolResponse>)>,
     pub pending_privilege_request: Option<(String, tokio::sync::mpsc::Sender<ToolResponse>)>,
     pub subagent_notification: Option<String>,
     pub context_used: usize,
@@ -96,7 +90,6 @@ impl App {
             animation_tick: 0,
             pending_input: None,
             input_response_buffer: String::new(),
-            pending_confirmation: None,
             pending_privilege_request: None,
             subagent_notification: None,
             context_used: 0,
@@ -190,20 +183,6 @@ pub async fn run_tui(
                         KeyCode::Esc => { 
                             let _ = tool_tx.send(ToolResponse::Text("Cancelled".to_string())).await; 
                             app.pending_input = None;
-                        }
-                        _ => {}
-                    }
-                } else if let Some((_tool, _args, resp_tx)) = &app.pending_confirmation {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            let tx = resp_tx.clone();
-                            tokio::spawn(async move { let _ = tx.send(ToolResponse::Confirmed(true)).await; });
-                            app.pending_confirmation = None;
-                        }
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            let tx = resp_tx.clone();
-                            tokio::spawn(async move { let _ = tx.send(ToolResponse::Confirmed(false)).await; });
-                            app.pending_confirmation = None;
                         }
                         _ => {}
                     }
@@ -325,9 +304,6 @@ pub async fn run_tui(
                 }
                 AgentEvent::RequestPrivileges { rationale, response_tx } => {
                     app.pending_privilege_request = Some((rationale, response_tx));
-                }
-                AgentEvent::RequestConfirmation { tool_name, args, response_tx } => {
-                    app.pending_confirmation = Some((tool_name, args, response_tx));
                 }
                 AgentEvent::StreamToken(token) => {
                     if token.is_empty() {
@@ -639,10 +615,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         input_title = format!(" 🔒 SECURE ESCALATION REQUIRED ");
         input_text = format!("Rationale: {} | Accept root privileges? (y/n)", rationale);
         input_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    } else if let Some((tool, args, _resp_tx)) = &app.pending_confirmation {
-        input_title = format!(" ⚠️ APPROVAL REQUIRED: {} ", tool);
-        input_text = format!("Execute: {}? (y/n) >> {}", args, " ");
-        input_style = Style::default().fg(Color::Yellow);
     }
 
     let input = Paragraph::new(input_text.clone())
