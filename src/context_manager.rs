@@ -13,15 +13,14 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
         // Add overhead for role name and structure
         total_chars += 20; 
     }
-    // DeepSeek and thinking models use more tokens for logic/symbols
-    // 3 chars/token is a safer heuristic than 4
-    total_chars / 3
+    // Standard LLM tokenizer heuristic: ~4 chars per token
+    total_chars / 4
 }
 
-/// Returns true if the estimated token count exceeds the threshold (75% of limit).
+/// Returns true if the estimated token count exceeds the threshold (85% of limit).
 pub fn needs_compaction(messages: &[ChatMessage], ctx_limit: u64) -> bool {
     let estimated = estimate_tokens(messages);
-    let threshold = (ctx_limit as f64 * 0.75) as usize;
+    let threshold = (ctx_limit as f64 * 0.85) as usize;
     estimated > threshold
 }
 
