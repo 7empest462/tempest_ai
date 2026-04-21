@@ -306,8 +306,6 @@ impl Agent {
                     last.content.contains("ACTION REQUIRED")
                 ) {
                     h_lock.pop();
-                } else if last.role == MessageRole::Assistant && last.content.starts_with("THOUGHT:") {
-                    h_lock.pop();
                 } else {
                     break;
                 }
@@ -753,19 +751,12 @@ impl Agent {
     }
 
     async fn executor_dispatch(&self, tool_calls: Vec<Value>) -> Result<Vec<(String, String, bool)>> {
-        let mut futures = Vec::new();
-        for tool_req in tool_calls {
-            let agent_worker = self.clone();
-            futures.push(tokio::spawn(async move {
-                agent_worker.process_single_tool_call(tool_req).await
-            }));
-        }
-
+        // Sequential execution: prevents approval gate deadlocks when 
+        // multiple modifying tools fire in the same turn
         let mut results = Vec::new();
-        for res in futures::future::join_all(futures).await {
-            if let Ok(tool_res) = res {
-                results.push(tool_res);
-            }
+        for tool_req in tool_calls {
+            let result = self.process_single_tool_call(tool_req).await;
+            results.push(result);
         }
         Ok(results)
     }
