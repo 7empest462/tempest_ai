@@ -26,7 +26,7 @@ pub struct RunCommandTool;
 impl AgentTool for RunCommandTool {
     fn name(&self) -> &'static str { "run_command" }
     fn description(&self) -> &'static str { "Executes a shell command. Features safety timeout and output capture." }
-    fn is_modifying(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { false } // Shell commands are execution, not file modification
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -108,7 +108,7 @@ pub struct RunTestsTool;
 impl AgentTool for RunTestsTool {
     fn name(&self) -> &'static str { "run_tests" }
     fn description(&self) -> &'static str { "Runs project tests. Detects language and runs appropriate test command (e.g., cargo test, npm test)." }
-    fn is_modifying(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { false }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -153,7 +153,7 @@ pub struct BuildProjectTool;
 impl AgentTool for BuildProjectTool {
     fn name(&self) -> &'static str { "build_project" }
     fn description(&self) -> &'static str { "Builds the current project using the detected build system." }
-    fn is_modifying(&self) -> bool { true }
+    fn is_modifying(&self) -> bool { false }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
