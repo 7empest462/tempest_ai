@@ -27,6 +27,8 @@ use crate::memory::MemoryStore;
 struct PlannerOutput {
     content: String,
     native_tool_calls: Vec<ollama_rs::generation::tools::ToolCall>,
+    /// Tool results that were already executed mid-stream (real-time approval)
+    executed_mid_stream: Vec<(String, String, bool)>,
 }
 
 #[derive(Clone)]
@@ -426,7 +428,22 @@ impl Agent {
                 }
             }
 
-            if all_tool_calls.is_empty() {
+            // Merge: mid-stream results are already done; only dispatch remaining non-modifying tools
+            let mid_stream_results = planner_output.executed_mid_stream;
+            let has_mid_stream = !mid_stream_results.is_empty();
+            
+            // Filter out tools that were already executed mid-stream (modifying ones)
+            let remaining_tool_calls: Vec<_> = if has_mid_stream {
+                all_tool_calls.into_iter().filter(|tc| {
+                    let name = tc.get("name").or_else(|| tc.get("tool"))
+                        .and_then(|v| v.as_str()).unwrap_or("unknown");
+                    !self.tools.get(name).map(|t| t.is_modifying()).unwrap_or(false)
+                }).collect()
+            } else {
+                all_tool_calls
+            };
+
+            if remaining_tool_calls.is_empty() && !has_mid_stream {
                 // --- 🛡️ WATCHDOG: Detect silent completion after tool result ---
                 let needs_reprimand = {
                     let h_lock = self.history.lock();
@@ -465,8 +482,12 @@ impl Agent {
                 break;
             }
 
-            // --- STAGE 3: EXECUTION ---
-            let results = self.executor_dispatch(all_tool_calls).await?;
+            // --- STAGE 3: EXECUTION (remaining non-modifying tools) ---
+            let mut results = mid_stream_results; // Start with already-executed mid-stream tools
+            if !remaining_tool_calls.is_empty() {
+                let dispatch_results = self.executor_dispatch(remaining_tool_calls).await?;
+                results.extend(dispatch_results);
+            }
 
             // --- STAGE 4: COLLECTION & STRUCTURED FEEDBACK ---
             let mut detected_loop_key = None;
@@ -605,6 +626,10 @@ impl Agent {
         let mut is_thinking = false;
 
         let mut last_segments: Vec<String> = Vec::new();
+        
+        // --- REAL-TIME TOOL INTERCEPTOR STATE ---
+        let mut executed_mid_stream: Vec<(String, String, bool)> = Vec::new();
+        let mut last_checked_len: usize = 0; // Track how much of full_content we've already scanned
 
         while let Some(res) = stream.next().await {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -707,6 +732,46 @@ impl Agent {
                 }
                 full_content.push_str(&text);
 
+                // --- 🔥 REAL-TIME TOOL INTERCEPTOR ---
+                // Scan for newly completed ```json...``` blocks as they stream in
+                if full_content.len() > last_checked_len && full_content[last_checked_len..].contains("```") {
+                    let block_regex = regex::Regex::new(r"```json\s*([\s\S]*?)\s*```").unwrap();
+                    let already_executed: std::collections::HashSet<String> = executed_mid_stream.iter()
+                        .map(|(_, result, _)| result.clone())
+                        .collect();
+                    
+                    for caps in block_regex.captures_iter(&full_content) {
+                        if let Some(m) = caps.get(1) {
+                            let json_text = m.as_str().trim();
+                            // Skip blocks we've already processed
+                            if already_executed.contains(json_text) { continue; }
+                            
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_text) {
+                                if let Some(obj) = val.as_object() {
+                                    if obj.contains_key("name") || obj.contains_key("tool") {
+                                        let tool_name = obj.get("name")
+                                            .or_else(|| obj.get("tool"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        
+                                        let is_modifying = self.tools.get(tool_name)
+                                            .map(|t| t.is_modifying())
+                                            .unwrap_or(false);
+                                        
+                                        if is_modifying {
+                                            // Fire approval + execute IMMEDIATELY while stream continues
+                                            let result = self.process_single_tool_call(val.clone()).await;
+                                            executed_mid_stream.push(result);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    last_checked_len = full_content.len();
+                }
+                // --- END INTERCEPTOR ---
+
                 if self.event_tx.lock().is_none() {
                     print!("{}", text);
                     let _ = std::io::stdout().flush();
@@ -747,6 +812,7 @@ impl Agent {
         Ok(PlannerOutput {
             content: full_content,
             native_tool_calls,
+            executed_mid_stream,
         })
     }
 
