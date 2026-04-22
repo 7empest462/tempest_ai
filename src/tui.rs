@@ -173,7 +173,10 @@ pub async fn run_tui(
                 if let Some((_tool, _question)) = &app.pending_input {
                     match key.code {
                         KeyCode::Enter => {
-                            let resp = app.input_response_buffer.clone();
+                            let mut resp = app.input_response_buffer.clone();
+                            if resp.is_empty() {
+                                resp = "y".to_string(); // Default to approval on Enter
+                            }
                             let _ = tool_tx.send(ToolResponse::Text(resp)).await;
                             app.pending_input = None;
                             app.input_response_buffer.clear();
@@ -181,8 +184,9 @@ pub async fn run_tui(
                         KeyCode::Char(c) => app.input_response_buffer.push(c),
                         KeyCode::Backspace => { app.input_response_buffer.pop(); }
                         KeyCode::Esc => { 
-                            let _ = tool_tx.send(ToolResponse::Text("Cancelled".to_string())).await; 
+                            let _ = tool_tx.send(ToolResponse::Text("n".to_string())).await; 
                             app.pending_input = None;
+                            app.input_response_buffer.clear();
                         }
                         _ => {}
                     }
@@ -608,9 +612,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     let mut input_style = Style::default();
 
     if let Some((tool, question)) = &app.pending_input {
-        input_title = format!(" ❓ INPUT REQUIRED for {} ", tool);
-        input_text = format!("{}: {} >> {}", "Question", question, app.input_response_buffer);
-        input_style = Style::default().fg(Color::Cyan);
+        input_title = format!(" ⚠️  APPROVAL REQUIRED for {} ", tool);
+        input_text = format!("{} >> {}", question, app.input_response_buffer);
+        input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     } else if let Some((rationale, _resp_tx)) = &app.pending_privilege_request {
         input_title = format!(" 🔒 SECURE ESCALATION REQUIRED ");
         input_text = format!("Rationale: {} | Accept root privileges? (y/n)", rationale);

@@ -751,12 +751,19 @@ impl Agent {
     }
 
     async fn executor_dispatch(&self, tool_calls: Vec<Value>) -> Result<Vec<(String, String, bool)>> {
-        // Sequential execution: prevents approval gate deadlocks when 
-        // multiple modifying tools fire in the same turn
         let mut results = Vec::new();
         for tool_req in tool_calls {
+            let tool_name = tool_req.get("name").or_else(|| tool_req.get("tool")).and_then(|v| v.as_str()).unwrap_or("unknown");
+            let is_modifying = self.tools.get(tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+            
             let result = self.process_single_tool_call(tool_req).await;
             results.push(result);
+            
+            if is_modifying {
+                // BREAK AFTER ONE MODIFYING TOOL
+                // This ensures the AI sees the result of a write/patch before continuing
+                break;
+            }
         }
         Ok(results)
     }
@@ -825,7 +832,7 @@ impl Agent {
                         .unwrap_or_default()
                         .chars().take(200).collect::<String>();
                     let prompt = format!(
-                        "Approve '{}' → {}? (y/n)",
+                        "\x07Approve '{}' → {}? (ENTER=y, ESC=n)",
                         tool_name, args_preview
                     );
                     let _ = tx.send(crate::tui::AgentEvent::RequestInput(
