@@ -141,8 +141,7 @@ impl SentinelManager {
         if triggered {
             Some(action)
         } else {
-            // Even if not triggered, return the active sentinels list
-            Some(action)
+            None
         }
     }
 }

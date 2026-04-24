@@ -65,6 +65,7 @@ mlx-rs = { version = "0.25.3", features = ["metal"] }
 mlx-macros = "0.25.3"
 mistralrs = { version = "0.8.1", features = ["metal"] }
 candle-core = { version = "0.10.2", optional = true }
+unicode-width = "0.2"
 
 [features]
 default = ["mlx"]

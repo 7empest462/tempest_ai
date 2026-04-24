@@ -241,6 +241,8 @@ impl Agent {
 
     pub async fn check_connection(&self) -> Result<()> {
         if let Ok(ollama) = self.get_ollama() {
+            // Only enforce the multi-model fleet if we are actually using Ollama.
+            // MLX uses a single loaded model and doesn't require these.
             let models = ollama.list_local_models().await.into_diagnostic()?;
             let model_names: std::collections::HashSet<String> = models.into_iter().map(|m| m.name).collect();
 
@@ -300,7 +302,13 @@ impl Agent {
 
         let old_desc = p_lock.description();
         *p_lock = new_phase.clone();
-        *self.model.lock() = new_phase.default_model();
+        
+        // --- BACKEND-AWARE MODEL ROUTING ---
+        // If we are in MLX mode, we only have one model pipeline loaded. 
+        // Overwriting the model string here would break the MLX backend.
+        if !matches!(&*self.backend, crate::inference::Backend::MLX(_)) {
+            *self.model.lock() = new_phase.default_model();
+        }
 
         // Notify TUI
         let tx_opt = self.event_tx.lock().clone();
@@ -381,70 +389,8 @@ impl Agent {
             self.clear_history();
             return Ok(());
         }
-        if self.event_tx.lock().is_none() {
-            println!("{}", "=".repeat(60).blue());
-            println!("{} {}", "🚀".green(), "Tempest AI Agent Initialized".bold());
-            println!("{} {}", "Model:".blue(), *self.model.lock());
-            println!("{}", "=".repeat(60).blue());
-        }
 
-        let active_rules = self.rules.get_active_rules(&[]); // Empty for now, will refine
-        
-        {
-            let mut h_lock = self.history.lock();
-            let mut full_system_prompt = self.system_prompt.clone();
-            
-            if !active_rules.is_empty() {
-                full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
-                for rule in active_rules {
-                    full_system_prompt.push_str(&format!("### Rule: {}\n{}\n\n", rule.name, rule.content));
-                }
-            }
-
-            full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
-            // Use dense JSON instead of pretty to eliminate thousands of whitespace tokens
-            if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
-                full_system_prompt.push_str(&schema_json);
-            }
-            
-
-            if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
-                h_lock[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
-            } else {
-                h_lock.insert(0, ChatMessage::new(MessageRole::System, full_system_prompt));
-            }
-
-            // --- 🧹 CONTEXT INERTIA BREAKER ---
-            // If the user manually inputs a new command, it means they are pivoting.
-            // We prune unresolved tool errors and hanging thoughts from the end of the history.
-            while let Some(last) = h_lock.last() {
-                if last.role == MessageRole::User && (
-                    last.content.starts_with("ERROR: Tool") || 
-                    last.content.starts_with("SYSTEM NOTIFICATION:") ||
-                    last.content.starts_with("BLOCKED:") ||
-                    last.content.contains("ACTION REQUIRED")
-                ) {
-                    h_lock.pop();
-                } else {
-                    break;
-                }
-            }
-
-            // Reset failure counters to prevent legacy errors tracking into the new topic
-            self.recent_failures.clear();
-
-            let safe_prompt = if h_lock.len() > 1 {
-                format!(
-                    "### ⚠️ USER OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new request.\n\nNEW USER REQUEST:\n{}",
-                    initial_user_prompt
-                )
-            } else {
-                initial_user_prompt
-            };
-
-            h_lock.push(ChatMessage::new(MessageRole::User, safe_prompt));
-        }
-        let _ = self.save_history();
+        self.initialize_session(&initial_user_prompt).await?;
         
         // Reset thinking just in case
         let tx_opt = self.event_tx.lock().clone();
@@ -478,54 +424,7 @@ impl Agent {
 
             // --- STAGE 1: SENTINEL FLEET CHECK ---
             let ctx_limit = self.calculate_optimal_ctx();
-            let action_opt = {
-                self.sentinel.analyze_state(&self.history.lock(), ctx_limit)
-            };
-
-            if let Some(action) = action_opt {
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
-                    // Update the HUD
-                    let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
-                        active: action.active_sentinels.clone(), 
-                        log: action.message.clone() 
-                    });
-                    
-                    if !action.message.is_empty() {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(action.message.clone()));
-                    }
-                }
-
-                if action.needs_compaction {
-                    let history_to_compact = self.history.lock().clone();
-                    let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
-                    
-                    let new_history = crate::context_manager::compact_history(
-                        self.get_ollama().unwrap_or(&Ollama::default()), 
-                        &self.sub_agent_model, 
-                        history_to_compact, 
-                        ctx_limit
-                    ).await?;
-                    
-                    let after_count = crate::context_manager::estimate_tokens(&new_history);
-                    
-                    *self.history.lock() = new_history;
-                    let _ = self.save_history();
-
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
-                            "🌪️ [CONTEXT COMPACTION]: Successfully condensed history ({} -> {} tokens)",
-                            before_count, after_count
-                        )));
-                    }
-                }
-
-                if action.needs_privilege {
-                    let mut h_lock = self.history.lock();
-                    h_lock.push(ChatMessage::new(MessageRole::System, "⚠️ [SENTINEL]: You are attempting to access a protected area. If this is required, you MUST use 'request_privileges' or prefix the command with sudo.".to_string()));
-                }
-            }
+            self.run_sentinel_stage(ctx_limit).await?;
 
             // --- STAGE 1: PLANNING ---
             self.switch_phase(AgentPhase::Planning).await?;
@@ -612,86 +511,183 @@ impl Agent {
             }
 
             // --- STAGE 4: COLLECTION & STRUCTURED FEEDBACK ---
-            self.switch_phase(AgentPhase::Testing).await?;
-            let mut detected_loop_key = None;
-            let mut feedback_to_apply = Vec::new();
-
-            for (tool_name, result, is_success) in results {
-                let (formatted_res, hud_msg) = if is_success { 
-                    // Reset failure counters on any success
-                    self.recent_failures.remove(&tool_name);
-                    self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
-                    
-                    if result.starts_with("BLOCKED:") {
-                        (
-                            format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result),
-                            format!("🚫 BLOCKED: '{}' - Plan requires approval", tool_name)
-                        )
-                    } else {
-                        let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
-                        let mut base_res = format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result);
-                        
-                        if is_modifying {
-                            base_res.push_str("\n\n⚠️ SYSTEM DIRECTIVE: You have just modified a physical file. Before doing ANYTHING else, you MUST rigorously test and verify your changes. If it is code, run it or its tests using 'run_command'. Do NOT assume your modifications work correctly. Verify them immediately and report the outcome.");
-                        }
-
-                        (
-                            base_res,
-                            format!("✅ SUCCESS: '{}' executed", tool_name)
-                        )
-                    }
-                } else { 
-                    let fail_key = if result.contains("os error 2") || result.contains("No such file") || result.contains("No files found") {
-                        "GENERIC_FILE_NOT_FOUND".to_string()
-                    } else {
-                        format!("{}:{}", tool_name, result.chars().take(50).collect::<String>())
-                    };
-
-                    let count = *self.recent_failures.entry(fail_key.clone()).and_modify(|c| *c += 1).or_insert(1);
-                    if count >= 3 {
-                        detected_loop_key = Some(fail_key);
-                    }
-
-                    (
-                        format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result),
-                        format!("❌ ERROR: '{}' failed", tool_name)
-                    )
-                };
-                
-                feedback_to_apply.push((tool_name, formatted_res, hud_msg, is_success));
-            }
-
-            for (tool_name, formatted_res, _hud_msg, is_success) in feedback_to_apply {
-                // Use the structured feedback helper for each result
-                let _ = self.send_tool_feedback(&tool_name, &formatted_res, is_success).await;
-            }
-            let _ = self.save_history();
-
-            if let Some(key) = detected_loop_key {
-                let mut h_lock = self.history.lock();
-                let directive = format!(
-                    "\n\n⚠️ [SENTINEL REORIENTATION DIRECTIVE]:\nYou have encountered a pattern of missing resources: '{}'.\nYour current strategy is LOOPING and HALLUCINATING files that do NOT exist.\n1. STOP this path immediately.\n2. I am forcing a 'list_dir' for you below. Study it carefully.\n3. Do NOT attempt to access any file not explicitly listed in the output below.\n4. Acknowledge this directive and apologize for the hallucination loop.",
-                    key
-                );
-                h_lock.push(ChatMessage::new(MessageRole::System, directive));
-                
-                // --- AUTO-RESYNC: Run an ls and inject it immediately ---
-                if let Ok(entries) = std::fs::read_dir(".") {
-                    let mut files = vec![];
-                    for e in entries.flatten() {
-                        files.push(e.file_name().to_string_lossy().to_string());
-                    }
-                    let resync = format!("SENTINEL FORCED SYNC (Current Directory Contents):\n- {}", files.join("\n- "));
-                    h_lock.push(ChatMessage::new(MessageRole::User, resync));
-                }
-
-                self.recent_failures.clear(); // Reset after intervention
-            }
-            
-            let _ = self.save_history();
+            self.process_tool_feedback_stage(results).await?;
         }
         
         // Ensure final state is persisted even if loop broke early
+        let _ = self.save_history();
+        Ok(())
+    }
+
+    async fn initialize_session(&self, initial_user_prompt: &str) -> Result<()> {
+        if self.event_tx.lock().is_none() {
+            println!("{}", "=".repeat(60).blue());
+            println!("{} {}", "🚀".green(), "Tempest AI Agent Initialized".bold());
+            println!("{} {}", "Model:".blue(), *self.model.lock());
+            println!("{}", "=".repeat(60).blue());
+        }
+
+        let active_rules = self.rules.get_active_rules(&[]);
+        
+        {
+            let mut h_lock = self.history.lock();
+            let mut full_system_prompt = self.system_prompt.clone();
+            
+            if !active_rules.is_empty() {
+                full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
+                for rule in active_rules {
+                    full_system_prompt.push_str(&format!("### Rule: {}\n{}\n\n", rule.name, rule.content));
+                }
+            }
+
+            full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
+            if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
+                full_system_prompt.push_str(&schema_json);
+            }
+
+            if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
+                h_lock[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
+            } else {
+                h_lock.insert(0, ChatMessage::new(MessageRole::System, full_system_prompt));
+            }
+
+            while let Some(last) = h_lock.last() {
+                if last.role == MessageRole::User && (
+                    last.content.starts_with("ERROR: Tool") || 
+                    last.content.starts_with("SYSTEM NOTIFICATION:") ||
+                    last.content.starts_with("BLOCKED:") ||
+                    last.content.contains("ACTION REQUIRED")
+                ) {
+                    h_lock.pop();
+                } else {
+                    break;
+                }
+            }
+
+            self.recent_failures.clear();
+
+            let safe_prompt = if h_lock.len() > 1 {
+                format!(
+                    "### ⚠️ USER OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new request.\n\nNEW USER REQUEST:\n{}",
+                    initial_user_prompt
+                )
+            } else {
+                initial_user_prompt.to_string()
+            };
+
+            h_lock.push(ChatMessage::new(MessageRole::User, safe_prompt));
+        }
+        let _ = self.save_history();
+        Ok(())
+    }
+
+    async fn run_sentinel_stage(&self, ctx_limit: u64) -> Result<()> {
+        let action_opt = self.sentinel.analyze_state(&self.history.lock(), ctx_limit);
+
+        if let Some(action) = action_opt {
+            let tx_opt = self.event_tx.lock().clone();
+            if let Some(tx) = tx_opt {
+                let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
+                    active: action.active_sentinels.clone(), 
+                    log: action.message.clone() 
+                });
+                
+                if !action.message.is_empty() {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(action.message.clone()));
+                }
+            }
+
+            if action.needs_compaction {
+                let history_to_compact = self.history.lock().clone();
+                let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
+                
+                let new_history = crate::context_manager::compact_history(
+                    self.get_ollama().unwrap_or(&Ollama::default()), 
+                    &self.sub_agent_model, 
+                    history_to_compact, 
+                    ctx_limit
+                ).await?;
+                
+                let after_count = crate::context_manager::estimate_tokens(&new_history);
+                *self.history.lock() = new_history;
+                let _ = self.save_history();
+
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                        "🌪️ [CONTEXT COMPACTION]: Successfully condensed history ({} -> {} tokens)",
+                        before_count, after_count
+                    )));
+                }
+            }
+
+            if action.needs_privilege {
+                let mut h_lock = self.history.lock();
+                h_lock.push(ChatMessage::new(MessageRole::System, "⚠️ [SENTINEL]: You are attempting to access a protected area. If this is required, you MUST use 'request_privileges' or prefix the command with sudo.".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_tool_feedback_stage(&self, results: Vec<(String, String, bool)>) -> Result<()> {
+        self.switch_phase(AgentPhase::Testing).await?;
+        let mut detected_loop_key = None;
+        let mut feedback_to_apply = Vec::new();
+
+        for (tool_name, result, is_success) in results {
+            let (formatted_res, _hud_msg, is_success) = if is_success { 
+                self.recent_failures.remove(&tool_name);
+                self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
+                
+                if result.starts_with("BLOCKED:") {
+                    (
+                        format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result),
+                        format!("🚫 BLOCKED: '{}'", tool_name),
+                        true
+                    )
+                } else {
+                    let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+                    let mut base_res = format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result);
+                    if is_modifying {
+                        base_res.push_str("\n\n⚠️ SYSTEM DIRECTIVE: You have just modified a physical file. Before doing ANYTHING else, you MUST rigorously test and verify your changes.");
+                    }
+                    (base_res, format!("✅ SUCCESS: '{}'", tool_name), true)
+                }
+            } else { 
+                let fail_key = if result.contains("os error 2") || result.contains("No such file") {
+                    "GENERIC_FILE_NOT_FOUND".to_string()
+                } else {
+                    format!("{}:{}", tool_name, result.chars().take(50).collect::<String>())
+                };
+
+                let count = *self.recent_failures.entry(fail_key.clone()).and_modify(|c| *c += 1).or_insert(1);
+                if count >= 3 {
+                    detected_loop_key = Some(fail_key);
+                }
+
+                (format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result), format!("❌ ERROR: '{}'", tool_name), false)
+            };
+            
+            feedback_to_apply.push((tool_name, formatted_res, is_success));
+        }
+
+        for (tool_name, formatted_res, is_success) in feedback_to_apply {
+            let _ = self.send_tool_feedback(&tool_name, &formatted_res, is_success).await;
+        }
+
+        if let Some(key) = detected_loop_key {
+            let mut h_lock = self.history.lock();
+            let directive = format!("\n\n⚠️ [SENTINEL REORIENTATION DIRECTIVE]: You are looping on '{}'. I am forcing a 'list_dir'.", key);
+            h_lock.push(ChatMessage::new(MessageRole::System, directive));
+            
+            if let Ok(entries) = std::fs::read_dir(".") {
+                let files: Vec<_> = entries.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+                let resync = format!("SENTINEL FORCED SYNC:\n- {}", files.join("\n- "));
+                h_lock.push(ChatMessage::new(MessageRole::User, resync));
+            }
+            self.recent_failures.clear();
+        }
+        
         let _ = self.save_history();
         Ok(())
     }
@@ -732,10 +728,32 @@ impl Agent {
              6. If you just received tool results, analyze them and take the next action. Do NOT stop to summarize unless the task is DONE.".to_string()
         ));
         
-        let executed_mid_stream: Vec<(String, String, bool)> = Vec::new();
+        let executed_mid_stream = Arc::new(Mutex::new(Vec::new()));
+        let executed_mid_stream_clone = executed_mid_stream.clone();
+        let agent_clone = self.clone();
 
-        // Transition to Execution phase for inference
-        *self.phase.lock() = AgentPhase::Execution;
+        let on_tool_call: Option<Box<dyn FnMut(ollama_rs::generation::tools::ToolCall) + Send>> = Some(Box::new(move |call| {
+            let tool_name = call.function.name.clone();
+            let args_val = serde_json::to_value(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+            
+            let req = serde_json::json!({
+                "name": tool_name,
+                "arguments": args_val,
+            });
+
+            // We use a block_on here because the stream_chat loop is async but the callback is sync.
+            // This is a trade-off for simplicity in the current architecture.
+            let handle = tokio::runtime::Handle::current();
+            let (res_name, res_content, res_success) = tokio::task::block_in_place(|| {
+                handle.block_on(agent_clone.process_single_tool_call(req))
+            });
+            
+            executed_mid_stream_clone.lock().push((res_name, res_content, res_success));
+        }));
+
+        // Transition to active state for inference (Display only)
+        // Note: Removed the hard override to AgentPhase::Execution that was here.
+        // The phase is now correctly managed by the run() loop.
 
         let model_name = self.model.lock().clone();
         let output = self.backend.stream_chat(
@@ -745,6 +763,7 @@ impl Agent {
             self.event_tx.clone(),
             stop,
             self.system_prompt.clone(),
+            on_tool_call,
         ).await?;
 
         let full_content = output.content;
@@ -771,7 +790,7 @@ impl Agent {
         Ok(PlannerOutput {
             content: full_content,
             native_tool_calls,
-            executed_mid_stream,
+            executed_mid_stream: Arc::try_unwrap(executed_mid_stream).map(|m| m.into_inner()).unwrap_or_default(),
         })
     }
 
@@ -964,12 +983,7 @@ impl Agent {
     }
 
     pub fn get_tool_context(&self) -> ToolContext {
-        let (tx, _) = tokio::sync::mpsc::channel(1); // Placeholder for non-TUI runs
-
-        let real_tx = match &*self.event_tx.lock() {
-            Some(t) => t.clone(),
-            None => tx,
-        };
+        let real_tx = self.event_tx.lock().clone();
 
         ToolContext {
             ollama: self.get_ollama().unwrap_or(&Ollama::default()).clone(),
@@ -1008,7 +1022,7 @@ impl Agent {
     }
 
     pub async fn run_tui_mode(&self, mut user_rx: tokio::sync::mpsc::Receiver<String>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) || true { // We want the TUI to stay alive even if stop was true
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
              if let Ok(user_msg) = user_rx.try_recv() {
                  // Run one full turn
                  if let Err(e) = self.run(user_msg, stop.clone()).await {
@@ -1037,8 +1051,19 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn test_agent_new() {
-        // Basic sanity check
+
+    #[tokio::test]
+    async fn test_agent_new() {
+        let agent = Agent::new(
+            "test-model".to_string(),
+            "test-sub-model".to_string(),
+            std::path::PathBuf::from("/tmp/tempest_test_brain"),
+            crate::inference::AgentMode::Ollama,
+            false,
+        ).await.unwrap();
+
+        assert_eq!(agent.sub_agent_model, "test-sub-model");
+        assert!(!agent.tool_registry.is_empty());
+        assert!(!agent.tools.is_empty());
     }
 }

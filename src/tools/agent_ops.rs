@@ -40,15 +40,17 @@ impl AgentTool for AskUserTool {
         let question = typed_args.question;
         
         // 🚀 TUI HANDOFF
-        if context.tx.send(crate::tui::AgentEvent::RequestInput(self.name().to_string(), question.to_string())).await.is_ok() {
-            let mut rx_lock = context.tool_rx.lock().await;
-            if let Some(rx) = rx_lock.as_mut() {
-                match rx.recv().await {
-                    Some(crate::tui::ToolResponse::Text(ans)) => return Ok(format!("User responded: {}", ans)),
-                    _ => return Err(miette!("User cancelled input.")),
+        if let Some(ref tx) = context.tx {
+            if tx.send(crate::tui::AgentEvent::RequestInput(self.name().to_string(), question.to_string())).await.is_ok() {
+                let mut rx_lock = context.tool_rx.lock().await;
+                if let Some(rx) = rx_lock.as_mut() {
+                    match rx.recv().await {
+                        Some(crate::tui::ToolResponse::Text(ans)) => return Ok(format!("User responded: {}", ans)),
+                        _ => return Err(miette!("User cancelled input.")),
+                    }
+                } else {
+                    return Err(miette!("No live TUI input channel configured."));
                 }
-            } else {
-                return Err(miette!("No live TUI input channel configured."));
             }
         }
 
@@ -107,7 +109,9 @@ impl AgentTool for SpawnSubAgentTool {
         let model = typed_args.model.unwrap_or_else(|| context.sub_agent_model.clone());
         
         // Notify HUD
-        let _ = context.tx.send(crate::tui::AgentEvent::SubagentStatus(Some(format!("Calling {} for assist:\n{}", model, task)))).await;
+        if let Some(ref tx) = context.tx {
+            let _ = tx.send(crate::tui::AgentEvent::SubagentStatus(Some(format!("Calling {} for assist:\n{}", model, task)))).await;
+        }
 
         let sub_history = vec![
             ChatMessage::new(MessageRole::System, "You are a specialized Disciplined Sub-Agent. \
@@ -122,7 +126,9 @@ impl AgentTool for SpawnSubAgentTool {
         let response = context.ollama.send_chat_messages(req).await;
         
         // Clear HUD
-        let _ = context.tx.send(crate::tui::AgentEvent::SubagentStatus(None)).await;
+        if let Some(ref tx) = context.tx {
+            let _ = tx.send(crate::tui::AgentEvent::SubagentStatus(None)).await;
+        }
 
         match response {
             Ok(res) => Ok(format!("[SUB-AGENT REPORT]: {}", res.message.content)),

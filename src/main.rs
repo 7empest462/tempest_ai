@@ -258,11 +258,15 @@ Never invent tool names. If you need a capability that isn't listed, use `ask_us
 You are running on a real machine with real consequences. Be precise, safe, and professional.
 "#.to_string();
 
-    // Model priority: CLI flag > env var > config file > default
-    let model = cli.model
-        .or_else(|| std::env::var("OLLAMA_MODEL").ok())
-        .or(config.model.clone())
-        .unwrap_or_else(|| "qwen2.5-coder:7b".to_string());
+    // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
+    let model = if cli.mlx {
+        cli.model.clone().unwrap_or_else(|| "Qwen2.5-Coder-7B (Native MLX)".to_string())
+    } else {
+        cli.model.clone()
+            .or_else(|| std::env::var("OLLAMA_MODEL").ok())
+            .or(config.model.clone())
+            .unwrap_or_else(|| "qwen2.5-coder:7b".to_string())
+    };
 
     let mut config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     config_dir.push("tempest_ai");
@@ -393,8 +397,6 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         let mut networks = Networks::new_with_refreshed_list();
         let mut components = Components::new_with_refreshed_list();
 
-        #[cfg(target_os = "macos")]
-
         loop {
             sys.refresh_all();
             networks.refresh(true);
@@ -427,10 +429,11 @@ You are running on a real machine with real consequences. Be precise, safe, and 
                     // We'll peek at the PerformanceStatistics from AGX specifically.
                     if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-c", "AGXAccelerator"]).output() {
                         let s = String::from_utf8_lossy(&output.stdout);
-                        let vram_re = regex::Regex::new(r#""In use system memory"=(\d+)"#).unwrap();
-                        if let Some(caps) = vram_re.captures(&s) {
+                        // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
+                        let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
+                        for caps in vram_re.captures_iter(&s) {
                             if let Some(m) = caps.get(1) {
-                                vram_mb = m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024;
+                                vram_mb += m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024;
                             }
                         }
                     }

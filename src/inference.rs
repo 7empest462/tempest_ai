@@ -10,7 +10,7 @@ use ollama_rs::{
 };
 use futures::StreamExt;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+
 #[cfg(feature = "mlx")]
 use mistralrs::{
     GgufModelBuilder, Model, TextMessages, TextMessageRole, 
@@ -42,7 +42,7 @@ impl Backend {
             AgentMode::Ollama => {
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
-                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🚀 Loading MLX Backend (optimized for M4 Neural Engine + GPU)...".to_string()))).await;
+                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🚀 Connecting to Ollama Backend...".to_string()))).await;
                 }
                 (Backend::Ollama(Ollama::default()), model)
             }
@@ -101,8 +101,9 @@ impl Backend {
         history: Vec<ChatMessage>,
         options: ModelOptions,
         event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>,
-        stop: Arc<AtomicBool>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         _system_prompt: String,
+        mut on_tool_call: Option<Box<dyn FnMut(ollama_rs::generation::tools::ToolCall) + Send>>,
     ) -> Result<InferenceOutput> {
         let mut full_content = String::new();
         let mut reasoning_content = String::new();
@@ -128,14 +129,34 @@ impl Backend {
                     
                     let text = chunk.message.content.clone();
                     
-                    // --- 🧠 REASONING EXTRACTION ---
-                    if text.contains("<think>") {
-                        is_thinking = true;
-                        continue;
-                    }
-                    if text.contains("</think>") {
-                        is_thinking = false;
-                        continue;
+                    // --- 🧠 STREAMING REASONING EXTRACTION ---
+                    // Buffer tokens to handle tags split across chunks (e.g., "<thi" + "nk>")
+                    let current_process = &text;
+                    
+                    if !is_thinking && current_process.contains("<think") || is_thinking && current_process.contains("</think") || current_process.contains("<") {
+                        // Potential tag start or continuation. 
+                        // For simplicity and speed, we check the tail of the accumulated content
+                        if !is_thinking {
+                            let test_str = format!("{}{}", full_content.chars().rev().take(10).collect::<String>().chars().rev().collect::<String>(), current_process);
+                            if test_str.contains("<think>") {
+                                is_thinking = true;
+                                // Prune the tag from the content if it leaked in
+                                if let Some(idx) = full_content.rfind("<") {
+                                    full_content.truncate(idx);
+                                }
+                                continue;
+                            }
+                        } else {
+                            let test_str = format!("{}{}", reasoning_content.chars().rev().take(10).collect::<String>().chars().rev().collect::<String>(), current_process);
+                            if test_str.contains("</think>") {
+                                is_thinking = false;
+                                // Prune the tag from the reasoning if it leaked in
+                                if let Some(idx) = reasoning_content.rfind("<") {
+                                    reasoning_content.truncate(idx);
+                                }
+                                continue;
+                            }
+                        }
                     }
 
                     if is_thinking {
@@ -158,6 +179,9 @@ impl Backend {
 
                     if !chunk.message.tool_calls.is_empty() {
                         for call in chunk.message.tool_calls {
+                            if let Some(ref mut cb) = on_tool_call {
+                                cb(call.clone());
+                            }
                             native_tool_calls.push(call);
                         }
                     }
@@ -181,6 +205,7 @@ impl Backend {
             }
             #[cfg(feature = "mlx")]
             Backend::MLX(mistralrs) => {
+                let _on_tool_call = on_tool_call; // Currently unused in MLX
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;

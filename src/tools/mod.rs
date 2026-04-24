@@ -17,7 +17,7 @@ pub struct ToolContext {
     pub task_context: Arc<Mutex<String>>,
     pub vector_brain: Arc<Mutex<crate::vector_brain::VectorBrain>>,
     #[allow(dead_code)] pub telemetry: Arc<Mutex<String>>,
-    pub tx: tokio::sync::mpsc::Sender<crate::tui::AgentEvent>,
+    pub tx: Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>,
     pub tool_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::tui::ToolResponse>>>>,
     #[allow(dead_code)] pub recent_tool_calls: Arc<dashmap::DashMap<String, String>>,
     #[allow(dead_code)] pub brain_path: std::path::PathBuf,

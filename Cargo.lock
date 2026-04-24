@@ -8857,7 +8857,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_ai"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -8921,6 +8921,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
  "urlencoding",
  "uuid 1.23.0",
  "walkdir",

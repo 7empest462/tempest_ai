@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
+use unicode_width::UnicodeWidthStr;
 use std::io::stdout;
 use std::time::{Duration, Instant};
 
@@ -224,6 +225,7 @@ pub async fn run_tui(
                         KeyCode::Char(c) => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'c' || c == 'C') {
                                 app.should_quit = true;
+                                stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                             } else {
                                 app.input_buffer.push(c);
                             }
@@ -434,26 +436,47 @@ fn ui(f: &mut Frame, app: &mut App) {
         if chat_width == 0 { return; }
         let (prefix, color) = if is_user { ("You: ", Color::Blue) } else { ("Tempest: ", Color::Cyan) };
         
-        let mut first = true;
-        let mut prefix_added = false;
+        let has_prefix = text.starts_with(prefix);
+        let content_to_wrap = if has_prefix { &text[prefix.len()..] } else { text };
         
-        for line in text.split('\n') {
-            let content = if first && text.starts_with(prefix) {
-                first = false;
-                &text[prefix.len()..]
-            } else {
-                first = false;
-                line
-            };
+        let mut first_line = true;
+        
+        for line in content_to_wrap.split('\n') {
+            let mut current = line;
+            let mut first_chunk = true;
 
-            let mut current = content;
+            if current.is_empty() && !first_line {
+                items.push(ListItem::new(Line::from("")));
+                continue;
+            }
 
-            while current.len() > chat_width {
-                let split_idx = current.char_indices().nth(chat_width).map(|(i, _)| i).unwrap_or(current.len());
+            while !current.is_empty() || (first_line && first_chunk) {
+                // Find how many chars fit in the remaining width
+                let mut width = 0;
+                let mut split_idx = 0;
+                let available_width = if first_line && first_chunk && show_header && has_prefix {
+                    chat_width.saturating_sub(UnicodeWidthStr::width(prefix))
+                } else {
+                    chat_width
+                };
+
+                for (i, c) in current.char_indices() {
+                    let c_width = UnicodeWidthStr::width(c.to_string().as_str());
+                    if width + c_width > available_width {
+                        break;
+                    }
+                    width += c_width;
+                    split_idx = i + c.len_utf8();
+                }
+
+                if split_idx == 0 && !current.is_empty() {
+                    // Force at least one character if width is too small
+                    split_idx = current.chars().next().unwrap().len_utf8();
+                }
+
                 let (chunk, rest) = current.split_at(split_idx);
                 
-                let line_content = if show_header && !prefix_added && text.starts_with(prefix) {
-                    prefix_added = true;
+                let line_content = if first_line && first_chunk && show_header && has_prefix {
                     Line::from(vec![
                         Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
                         Span::raw(chunk.to_string()),
@@ -464,18 +487,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 
                 items.push(ListItem::new(line_content));
                 current = rest;
+                first_chunk = false;
+                if current.is_empty() { break; }
             }
-            
-            let final_line = if show_header && !prefix_added && text.starts_with(prefix) {
-                prefix_added = true;
-                Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    Span::raw(current.to_string()),
-                ])
-            } else {
-                Line::from(current.to_string())
-            };
-            items.push(ListItem::new(final_line));
+            first_line = false;
         }
     };
 
@@ -641,7 +656,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // Set cursor position for typing feedback
     f.set_cursor_position((
-        chunks[2].x + (input_text.chars().count() as u16) + 1,
+        chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
         chunks[2].y + 1,
     ));
 }

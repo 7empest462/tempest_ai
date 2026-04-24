@@ -46,10 +46,14 @@ impl AgentTool for RequestPrivilegesTool {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         
         // Send request to TUI
-        context.tx.send(crate::tui::AgentEvent::RequestPrivileges {
-            rationale: typed_args.rationale.clone(),
-            response_tx: tx,
-        }).await.map_err(|e| miette!("Failed to send privilege request to TUI: {}", e))?;
+        if let Some(ref tx_sender) = context.tx {
+            tx_sender.send(crate::tui::AgentEvent::RequestPrivileges {
+                rationale: typed_args.rationale.clone(),
+                response_tx: tx,
+            }).await.map_err(|e| miette!("Failed to send privilege request to TUI: {}", e))?;
+        } else {
+            return Err(miette!("Privilege escalation is only supported in TUI mode."));
+        }
 
         // Wait for user response
         match rx.recv().await {

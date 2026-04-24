@@ -62,7 +62,9 @@ impl AgentTool for EditFileWithDiffTool {
         }
 
         // Send diff to TUI before actually writing
-        let _ = context.tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🔄 Proposed changes for {}:\n\n{}", path, diff_output))).await;
+        if let Some(ref tx) = context.tx {
+            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🔄 Proposed changes for {}:\n\n{}", path, diff_output))).await;
+        }
         
         // Actually write it
         fs::write(&path, new_content).into_diagnostic()?;
