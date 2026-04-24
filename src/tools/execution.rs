@@ -26,7 +26,7 @@ pub struct RunCommandTool;
 impl AgentTool for RunCommandTool {
     fn name(&self) -> &'static str { "run_command" }
     fn description(&self) -> &'static str { "Executes a shell command. Features safety timeout and output capture." }
-    fn is_modifying(&self) -> bool { false } // Shell commands are execution, not file modification
+    fn is_modifying(&self) -> bool { true } // Mark as modifying to ensure human-in-the-loop for shell execution
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -61,8 +61,13 @@ impl AgentTool for RunCommandTool {
             .arg("-c")
             .arg(&final_cmd)
             .current_dir(shellexpand::tilde(&cwd).to_string())
+            .env("TERM", "dumb")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .env("GIT_EDITOR", "true")
+            .env("PAGER", "cat")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true) // Automatically kill the process if we timeout and drop the handle
             .spawn()
             .map_err(|e| ExecutionError::CommandFailed { command: final_cmd.clone(), message: e.to_string() })?;
 
@@ -74,17 +79,20 @@ impl AgentTool for RunCommandTool {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let status = output.status;
                 
-                let mut full_output = format!("Exit Status: {}\n", status);
+                let mut combined = String::new();
                 if !stdout.is_empty() {
-                    full_output.push_str(&format!("--- STDOUT ---\n{}\n", stdout));
+                    combined.push_str(&format!("--- STDOUT ---\n{}\n", stdout));
                 }
                 if !stderr.is_empty() {
-                    full_output.push_str(&format!("--- STDERR ---\n{}\n", stderr));
+                    combined.push_str(&format!("--- STDERR ---\n{}\n", stderr));
                 }
                 
+                let mut full_output = format!("Exit Status: {}\n{}", status, combined);
+                
                 if full_output.len() > 10000 {
-                    full_output.truncate(10000);
-                    full_output.push_str("\n...[output truncated]...");
+                    let head = &full_output[..2000];
+                    let tail = &full_output[full_output.len() - 8000..];
+                    full_output = format!("{}\n\n...[OUTPUT TRUNCATED - Showing first 2k and last 8k bytes]...\n\n{}", head, tail);
                 }
                 Ok(full_output)
             }

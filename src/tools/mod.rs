@@ -61,3 +61,4 @@ pub mod network_manager;
 pub mod service_manager;
 pub mod developer;
 pub mod privilege;
+pub mod rust;

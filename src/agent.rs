@@ -1,28 +1,47 @@
-use miette::Result;
+use miette::{Result, miette};
 use colored::*;
 use ollama_rs::{
-    generation::{
-        chat::{request::ChatMessageRequest, ChatMessage, MessageRole},
-        completion::request::GenerationRequest,
-        parameters::{KeepAlive, TimeUnit},
-    },
+    generation::chat::{ChatMessage, MessageRole},
     models::ModelOptions,
     Ollama,
 };
 use serde_json::Value;
-use futures::StreamExt;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::io::Write;
 use parking_lot::Mutex;
 use dashmap::DashMap;
 use miette::IntoDiagnostic;
 use std::path::Path;
-
 use crate::tools::ToolContext;
 use crate::memory::MemoryStore;
+use crate::inference::{Backend, AgentMode};
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AgentPhase {
+    Planning,     // Strong reasoning model (DeepSeek R1)
+    Execution,    // Fast & accurate coding model (Qwen2.5-Coder)
+    Testing,      // Verification & error-catching model (Ministral 8B)
+}
+
+impl AgentPhase {
+    pub fn default_model(&self) -> String {
+        match self {
+            AgentPhase::Planning => "deepseek-r1:14b".to_string(),
+            AgentPhase::Execution => "qwen2.5-coder:14b".to_string(),
+            AgentPhase::Testing => "ministral-3:8b".to_string(),
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            AgentPhase::Planning => "Planning Phase (Reasoning)",
+            AgentPhase::Execution => "Execution Phase (Coding)",
+            AgentPhase::Testing => "Testing Phase (Verification)",
+        }
+    }
+}
 
 struct PlannerOutput {
     content: String,
@@ -33,8 +52,11 @@ struct PlannerOutput {
 
 #[derive(Clone)]
 pub struct Agent {
-    ollama: Ollama,
-    model: String,
+    #[allow(dead_code)]
+    pub mode: AgentMode,
+    pub phase: Arc<Mutex<AgentPhase>>,
+    backend: Arc<Backend>,
+    model: Arc<Mutex<String>>,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     tools: Arc<DashMap<String, Arc<dyn crate::tools::AgentTool>>>,
     tool_registry: Vec<ollama_rs::generation::tools::ToolInfo>,
@@ -63,7 +85,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(model: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>, sub_agent_model: String) -> Self {
+    pub async fn new(mode: AgentMode, model: String, quant: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>, sub_agent_model: String) -> Self {
+        let event_tx = Arc::new(Mutex::new(None));
+        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone()).await;
+
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
             Arc::new(crate::tools::file::ReadFileTool),
             Arc::new(crate::tools::file::WriteFileTool),
@@ -125,6 +150,8 @@ impl Agent {
             Arc::new(crate::tools::system::CurrentProcessTool),
             Arc::new(crate::tools::system::SystemTelemetryTool),
             Arc::new(crate::tools::privilege::RequestPrivilegesTool),
+            Arc::new(crate::tools::rust::CargoAddTool),
+            Arc::new(crate::tools::rust::CrateSearchTool),
         ];
 
         let tools_map = Arc::new(DashMap::new());
@@ -140,8 +167,10 @@ impl Agent {
             .unwrap_or_else(|_| crate::vector_brain::VectorBrain::new())));
 
         Agent {
-            ollama: Ollama::default(),
-            model: model.clone(),
+            mode,
+            phase: Arc::new(Mutex::new(AgentPhase::Planning)),
+            backend: Arc::new(backend),
+            model: Arc::new(Mutex::new(final_model)),
             history: Arc::new(Mutex::new(vec![])),
             tools: tools_map,
             tool_registry,
@@ -160,7 +189,7 @@ impl Agent {
             telemetry: Arc::new(Mutex::new(String::new())),
             is_root: Arc::new(AtomicBool::new(nix::unistd::getuid().is_root())),
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(5)),
-            event_tx: Arc::new(Mutex::new(None)),
+            event_tx,
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
             sentinel: crate::sentinel::SentinelManager::new(),
 
@@ -168,32 +197,65 @@ impl Agent {
         }
     }
 
+    pub fn get_ollama(&self) -> Result<&Ollama> {
+        match &*self.backend {
+            Backend::Ollama(o) => Ok(o),
+            #[cfg(feature = "mlx")]
+            Backend::MLX(_) => Err(miette!("Active backend is MLX, not Ollama")),
+        }
+    }
+
     pub async fn initialize_atlas(&self, force: bool) -> Result<()> {
-        crate::tools::atlas::run_semantic_indexing(
-            &self.ollama, 
-            self.vector_brain.clone(), 
-            &self.brain_path, 
-            force
-        ).await
+        if let Ok(ollama) = self.get_ollama() {
+            crate::tools::atlas::run_semantic_indexing(
+                ollama, 
+                self.vector_brain.clone(), 
+                &self.brain_path, 
+                force
+            ).await
+        } else {
+            Ok(())
+        }
     }
     
     fn calculate_optimal_ctx(&self) -> u64 {
-        let model = self.model.to_lowercase();
+        let model = self.model.lock().to_lowercase();
+        
+        // If we are using MLX, the current config is locked to 16,384 for performance/VRAM safety on 16GB Macs.
+        if matches!(&*self.backend, Backend::MLX(_)) {
+            return 16384;
+        }
+
         if model.contains("20b") || model.contains("27b") || model.contains("30b") || model.contains("deepseek-r1:32b") {
             2048
         } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
             4096
         } else if model.contains("14b") {
-            20000
+            12288
         } else if model.contains("7b") || model.contains("8b") || model.contains("9b") {
             32768
         } else {
-             16384
+             12288
         }
     }
 
     pub async fn check_connection(&self) -> Result<()> {
-        self.ollama.list_local_models().await.into_diagnostic()?;
+        if let Ok(ollama) = self.get_ollama() {
+            let models = ollama.list_local_models().await.into_diagnostic()?;
+            let model_names: std::collections::HashSet<String> = models.into_iter().map(|m| m.name).collect();
+
+            let required = vec![
+                AgentPhase::Planning.default_model(),
+                AgentPhase::Execution.default_model(),
+                AgentPhase::Testing.default_model(),
+            ];
+
+            for req in required {
+                if !model_names.contains(&req) {
+                    return Err(miette!("Required model '{}' not found in Ollama. Please run: ollama pull {}", req, req));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -230,6 +292,30 @@ impl Agent {
         h_lock.push(ChatMessage::new(MessageRole::System, state_msg));
     }
 
+    pub async fn switch_phase(&self, new_phase: AgentPhase) -> Result<()> {
+        let mut p_lock = self.phase.lock();
+        if *p_lock == new_phase {
+            return Ok(());
+        }
+
+        let old_desc = p_lock.description();
+        *p_lock = new_phase.clone();
+        *self.model.lock() = new_phase.default_model();
+
+        // Notify TUI
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                format!("🔄 Switched from {} -> {}", old_desc, new_phase.description())
+            ));
+        }
+
+        // Save history to ensure current state is persisted
+        let _ = self.save_history();
+        
+        Ok(())
+    }
+
     pub fn load_history(&self) -> Result<()> {
         let history_path = std::path::Path::new(&self.history_path);
         if history_path.exists() {
@@ -247,10 +333,41 @@ impl Agent {
     }
 
     pub fn save_history(&self) -> Result<()> {
-        let history_path = std::path::Path::new(&self.history_path);
-        let h_lock = self.history.lock();
-        let data = serde_json::to_string_pretty(&*h_lock).into_diagnostic()?;
-        std::fs::write(history_path, data).into_diagnostic()?;
+        let history = self.history.lock();
+        let path = std::path::Path::new(&self.history_path);
+        let file = std::fs::File::create(path).into_diagnostic()?;
+        serde_json::to_writer_pretty(file, &*history).into_diagnostic()?;
+        Ok(())
+    }
+
+    /// Helper to push a structured tool result back to the model history and TUI.
+    pub async fn send_tool_feedback(&self, tool_name: &str, result: &str, is_success: bool) -> Result<()> {
+        let hud_msg = if is_success {
+            format!("✅ SUCCESS: '{}' executed", tool_name)
+        } else {
+            format!("❌ ERROR: '{}' failed", tool_name)
+        };
+
+        // Update TUI HUD
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(hud_msg));
+        }
+
+        let feedback = if is_success {
+            format!(
+                "=== TOOL RESULT ===\nTool: {}\nResult: {}\n\nYou MUST use the information above exactly as shown. Do not override it with your own knowledge or guess versions.",
+                tool_name, result
+            )
+        } else {
+            format!(
+                "=== TOOL ERROR ===\nTool: {}\nError: {}\n\nPlease analyze this error carefully and adjust your strategy. Do NOT repeat the same mistake.",
+                tool_name, result
+            )
+        };
+
+        self.history.lock().push(ChatMessage::new(MessageRole::System, feedback));
+        self.save_history()?;
         Ok(())
     }
 
@@ -267,7 +384,7 @@ impl Agent {
         if self.event_tx.lock().is_none() {
             println!("{}", "=".repeat(60).blue());
             println!("{} {}", "🚀".green(), "Tempest AI Agent Initialized".bold());
-            println!("{} {}", "Model:".blue(), self.model);
+            println!("{} {}", "Model:".blue(), *self.model.lock());
             println!("{}", "=".repeat(60).blue());
         }
 
@@ -384,7 +501,7 @@ impl Agent {
                     let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
                     
                     let new_history = crate::context_manager::compact_history(
-                        &self.ollama, 
+                        self.get_ollama().unwrap_or(&Ollama::default()), 
                         &self.sub_agent_model, 
                         history_to_compact, 
                         ctx_limit
@@ -411,6 +528,7 @@ impl Agent {
             }
 
             // --- STAGE 1: PLANNING ---
+            self.switch_phase(AgentPhase::Planning).await?;
             let planner_output = self.planner_turn(stop.clone()).await?;
             
             // --- STAGE 2: EXTRACTION ---
@@ -428,16 +546,19 @@ impl Agent {
                 }
             }
 
-            // Merge: mid-stream results are already done; only dispatch remaining non-modifying tools
+            // Merge: mid-stream results are already done; only dispatch remaining tools
             let mid_stream_results = planner_output.executed_mid_stream;
-            let has_mid_stream = !mid_stream_results.is_empty();
+            let executed_names: std::collections::HashSet<String> = mid_stream_results.iter()
+                .map(|(name, _, _)| name.clone())
+                .collect();
+            let has_mid_stream = !executed_names.is_empty();
             
-            // Filter out tools that were already executed mid-stream (modifying ones)
+            // Filter out tools that were already executed mid-stream
             let remaining_tool_calls: Vec<_> = if has_mid_stream {
                 all_tool_calls.into_iter().filter(|tc| {
                     let name = tc.get("name").or_else(|| tc.get("tool"))
                         .and_then(|v| v.as_str()).unwrap_or("unknown");
-                    !self.tools.get(name).map(|t| t.is_modifying()).unwrap_or(false)
+                    !executed_names.contains(name)
                 }).collect()
             } else {
                 all_tool_calls
@@ -485,65 +606,66 @@ impl Agent {
             // --- STAGE 3: EXECUTION (remaining non-modifying tools) ---
             let mut results = mid_stream_results; // Start with already-executed mid-stream tools
             if !remaining_tool_calls.is_empty() {
+                self.switch_phase(AgentPhase::Execution).await?;
                 let dispatch_results = self.executor_dispatch(remaining_tool_calls).await?;
                 results.extend(dispatch_results);
             }
 
             // --- STAGE 4: COLLECTION & STRUCTURED FEEDBACK ---
+            self.switch_phase(AgentPhase::Testing).await?;
             let mut detected_loop_key = None;
-            {
-                let mut h_lock = self.history.lock();
-                for (tool_name, result, is_success) in results {
-                    let (formatted_res, hud_msg) = if is_success { 
-                        // Reset failure counters on any success
-                        self.recent_failures.remove(&tool_name);
-                        self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
-                        
-                        if result.starts_with("BLOCKED:") {
-                            (
-                                format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result),
-                                format!("🚫 BLOCKED: '{}' - Plan requires approval", tool_name)
-                            )
-                        } else {
-                            let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
-                            let mut base_res = format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result);
-                            
-                            if is_modifying {
-                                base_res.push_str("\n\n⚠️ SYSTEM DIRECTIVE: You have just modified a physical file. Before doing ANYTHING else, you MUST rigorously test and verify your changes. If it is code, run it or its tests using 'run_command'. Do NOT assume your modifications work correctly. Verify them immediately and report the outcome.");
-                            }
+            let mut feedback_to_apply = Vec::new();
 
-                            (
-                                base_res,
-                                format!("✅ SUCCESS: '{}' executed", tool_name)
-                            )
-                        }
-                    } else { 
-                        // Broad matching: If it's a "Not Found" error, we group it
-                        let fail_key = if result.contains("os error 2") || result.contains("No such file") || result.contains("No files found") {
-                            "GENERIC_FILE_NOT_FOUND".to_string()
-                        } else {
-                            format!("{}:{}", tool_name, result.chars().take(50).collect::<String>())
-                        };
-
-                        let count = *self.recent_failures.entry(fail_key.clone()).and_modify(|c| *c += 1).or_insert(1);
+            for (tool_name, result, is_success) in results {
+                let (formatted_res, hud_msg) = if is_success { 
+                    // Reset failure counters on any success
+                    self.recent_failures.remove(&tool_name);
+                    self.recent_failures.remove("GENERIC_FILE_NOT_FOUND");
+                    
+                    if result.starts_with("BLOCKED:") {
+                        (
+                            format!("SYSTEM NOTIFICATION: TOOL BLOCKED for {}:\n{}\n\nACTION REQUIRED: You MUST propose a plan and ask for approval via 'ask_user' before this tool can be used.", tool_name, result),
+                            format!("🚫 BLOCKED: '{}' - Plan requires approval", tool_name)
+                        )
+                    } else {
+                        let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+                        let mut base_res = format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result);
                         
-                        if count >= 3 {
-                            detected_loop_key = Some(fail_key);
+                        if is_modifying {
+                            base_res.push_str("\n\n⚠️ SYSTEM DIRECTIVE: You have just modified a physical file. Before doing ANYTHING else, you MUST rigorously test and verify your changes. If it is code, run it or its tests using 'run_command'. Do NOT assume your modifications work correctly. Verify them immediately and report the outcome.");
                         }
 
                         (
-                            format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result),
-                            format!("❌ ERROR: '{}' failed", tool_name)
+                            base_res,
+                            format!("✅ SUCCESS: '{}' executed", tool_name)
                         )
-                    };
-                    
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(hud_msg));
                     }
-                    h_lock.push(ChatMessage::new(MessageRole::User, formatted_res));
-                }
+                } else { 
+                    let fail_key = if result.contains("os error 2") || result.contains("No such file") || result.contains("No files found") {
+                        "GENERIC_FILE_NOT_FOUND".to_string()
+                    } else {
+                        format!("{}:{}", tool_name, result.chars().take(50).collect::<String>())
+                    };
+
+                    let count = *self.recent_failures.entry(fail_key.clone()).and_modify(|c| *c += 1).or_insert(1);
+                    if count >= 3 {
+                        detected_loop_key = Some(fail_key);
+                    }
+
+                    (
+                        format!("ERROR: Tool '{}' failed.\nREASON:\n{}", tool_name, result),
+                        format!("❌ ERROR: '{}' failed", tool_name)
+                    )
+                };
+                
+                feedback_to_apply.push((tool_name, formatted_res, hud_msg, is_success));
             }
+
+            for (tool_name, formatted_res, _hud_msg, is_success) in feedback_to_apply {
+                // Use the structured feedback helper for each result
+                let _ = self.send_tool_feedback(&tool_name, &formatted_res, is_success).await;
+            }
+            let _ = self.save_history();
 
             if let Some(key) = detected_loop_key {
                 let mut h_lock = self.history.lock();
@@ -610,187 +732,24 @@ impl Agent {
              6. If you just received tool results, analyze them and take the next action. Do NOT stop to summarize unless the task is DONE.".to_string()
         ));
         
-        let request = ChatMessageRequest::new(self.model.clone(), history_snapshot)
-            .options(options);
+        let executed_mid_stream: Vec<(String, String, bool)> = Vec::new();
 
-        let tx_opt = self.event_tx.lock().clone();
-        if let Some(tx) = tx_opt {
-            let _ = tx.send(crate::tui::AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
-        }
-        
-        let mut stream = self.ollama.send_chat_messages_stream(request).await.into_diagnostic()?;
-        let mut full_content = String::new();
-        let mut reasoning_content = String::new();
-        let mut native_tool_calls = Vec::new();
-        let mut first_token = true;
-        let mut is_thinking = false;
+        // Transition to Execution phase for inference
+        *self.phase.lock() = AgentPhase::Execution;
 
-        let mut last_segments: Vec<String> = Vec::new();
-        
-        // --- REAL-TIME TOOL INTERCEPTOR STATE ---
-        let mut executed_mid_stream: Vec<(String, String, bool)> = Vec::new();
-        let mut last_checked_len: usize = 0; // Track how much of full_content we've already scanned
+        let model_name = self.model.lock().clone();
+        let output = self.backend.stream_chat(
+            model_name,
+            history_snapshot,
+            options,
+            self.event_tx.clone(),
+            stop,
+            self.system_prompt.clone(),
+        ).await?;
 
-        while let Some(res) = stream.next().await {
-            if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🛑 INTERRUPTED: Prompt stream halted.".to_string())).await;
-                }
-                break;
-            }
-            if let Ok(chunk) = res {
-                let text = chunk.message.content.clone();
-                
-                // --- 🛡️ REPETITION SENTINEL ---
-                let trimmed = text.trim();
-                if !trimmed.is_empty() && trimmed.len() > 3 {
-                    last_segments.push(trimmed.to_string());
-                    if last_segments.len() > 15 { last_segments.remove(0); }
-                    
-                    // Trigger only if 80% of recent segments are identical (higher threshold for reasoning)
-                    if last_segments.iter().filter(|&s| s == trimmed).count() >= 8 {
-                        let warning = "\n\n⚠️ [REPETITION SENTINEL]: Breaking loop to prevent hallucination plateau.";
-                        full_content.push_str(warning);
-                        
-                        let tx_opt = self.event_tx.lock().clone();
-                        if let Some(tx) = tx_opt {
-                            let _ = tx.send(crate::tui::AgentEvent::StreamToken(warning.to_string())).await;
-                        }
-                        break; 
-                    }
-                }
-                // --- END SENTINEL ---
-
-                // --- 🧠 REASONING EXTRACTION (Field or Tags) ---
-                // 1. Check for dedicated reasoning fields (Native Ollama or OpenAI-compatible)
-                let val = serde_json::to_value(&chunk.message).unwrap_or(serde_json::Value::Null);
-                let reasoning_field = val.get("thinking")
-                    .or_else(|| val.get("reasoning"))
-                    .or_else(|| val.get("reasoning_content"))
-                    .and_then(|v| v.as_str());
-
-                if let Some(reasoning) = reasoning_field {
-                    if !reasoning.is_empty() {
-                        reasoning_content.push_str(reasoning);
-                        let tx_opt = self.event_tx.lock().clone();
-                        if let Some(tx) = tx_opt {
-                            let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(reasoning.to_string())).await;
-                        }
-                    }
-                }
-
-                // 2. Tag-based detection
-                if text.contains("<think>") {
-                    is_thinking = true;
-                    if let Some(idx) = text.find("<think>") {
-                        let after = &text[idx + 7..];
-                        if !after.is_empty() {
-                            reasoning_content.push_str(after);
-                            let tx_opt = self.event_tx.lock().clone();
-                            if let Some(tx) = tx_opt {
-                                let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(after.to_string())).await;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                
-                if text.contains("</think>") {
-                    is_thinking = false;
-                    if let Some(idx) = text.find("</think>") {
-                        let before = &text[..idx];
-                        if !before.is_empty() {
-                            reasoning_content.push_str(before);
-                            let tx_opt = self.event_tx.lock().clone();
-                            if let Some(tx) = tx_opt {
-                                let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(before.to_string())).await;
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if is_thinking {
-                    reasoning_content.push_str(&text);
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.send(crate::tui::AgentEvent::ReasoningToken(text.clone())).await;
-                    }
-                    continue;
-                }
-
-                if !chunk.message.tool_calls.is_empty() {
-                    native_tool_calls.extend(chunk.message.tool_calls.clone());
-                }
-                if first_token && !text.trim().is_empty() {
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.send(crate::tui::AgentEvent::Thinking(None)).await;
-                    }
-                    first_token = false;
-                }
-                full_content.push_str(&text);
-
-                // --- 🔥 REAL-TIME TOOL INTERCEPTOR ---
-                // Scan for newly completed ```json...``` blocks as they stream in
-                if full_content.len() > last_checked_len && full_content[last_checked_len..].contains("```") {
-                    let block_regex = regex::Regex::new(r"```json\s*([\s\S]*?)\s*```").unwrap();
-                    let already_executed: std::collections::HashSet<String> = executed_mid_stream.iter()
-                        .map(|(_, result, _)| result.clone())
-                        .collect();
-                    
-                    for caps in block_regex.captures_iter(&full_content) {
-                        if let Some(m) = caps.get(1) {
-                            let json_text = m.as_str().trim();
-                            // Skip blocks we've already processed
-                            if already_executed.contains(json_text) { continue; }
-                            
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_text) {
-                                if let Some(obj) = val.as_object() {
-                                    if obj.contains_key("name") || obj.contains_key("tool") {
-                                        let tool_name = obj.get("name")
-                                            .or_else(|| obj.get("tool"))
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                        
-                                        let is_modifying = self.tools.get(tool_name)
-                                            .map(|t| t.is_modifying())
-                                            .unwrap_or(false);
-                                        
-                                        if is_modifying {
-                                            // Fire approval + execute IMMEDIATELY while stream continues
-                                            let result = self.process_single_tool_call(val.clone()).await;
-                                            executed_mid_stream.push(result);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    last_checked_len = full_content.len();
-                }
-                // --- END INTERCEPTOR ---
-
-                if self.event_tx.lock().is_none() {
-                    print!("{}", text);
-                    let _ = std::io::stdout().flush();
-                }
-
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(crate::tui::AgentEvent::StreamToken(text)).await;
-                }
-            } else if let Err(_) = res {
-                let error_msg = "\n\n❌ [OLLAMA STREAM ERROR]: The model inference stream was interrupted or timed out. Check Ollama server status.".to_string();
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(error_msg.clone())).await;
-                    let _ = tx.send(crate::tui::AgentEvent::StreamToken(error_msg)).await;
-                }
-                break;
-            }
-        }
+        let full_content = output.content;
+        let _reasoning_content = output.reasoning;
+        let native_tool_calls = output.native_tool_calls;
         let tx_opt = self.event_tx.lock().clone();
         if let Some(tx) = tx_opt {
             let _ = tx.send(crate::tui::AgentEvent::StreamToken("".to_string())).await;
@@ -896,13 +855,14 @@ impl Agent {
                 if let Some(tx) = tx_opt {
                     let args_preview = serde_json::to_string(&args)
                         .unwrap_or_default()
-                        .chars().take(200).collect::<String>();
+                        .chars().take(100).collect::<String>();
                     let prompt = format!(
-                        "\x07Approve '{}' → {}? (ENTER=y, ESC=n)",
-                        tool_name, args_preview
+                        "APPROVE {} ({})? [ENTER/ESC]",
+                        tool_name.to_uppercase(),
+                        args_preview
                     );
                     let _ = tx.send(crate::tui::AgentEvent::RequestInput(
-                        "__system_approval__".to_string(), 
+                        tool_name.clone(), 
                         prompt
                     )).await;
 
@@ -1012,8 +972,8 @@ impl Agent {
         };
 
         ToolContext {
-            ollama: self.ollama.clone(),
-            model: self.model.clone(),
+            ollama: self.get_ollama().unwrap_or(&Ollama::default()).clone(),
+            model: self.model.lock().clone(),
             sub_agent_model: self.sub_agent_model.clone(),
             history: self.history.clone(),
             task_context: self.task_context.clone(),
@@ -1067,25 +1027,11 @@ impl Agent {
 
     /// Explicitly unload the model from Ollama's memory (GPU) by sending a request with keep_alive: 0.
     pub async fn shutdown(&self) {
-        let options = ModelOptions::default()
-            .num_ctx(1)
-            .temperature(0.1);
-
-        // ZERO-PULSE: Use GenerationRequest with an empty prompt.
-        // This is the fastest way to signal an unload in Ollama without triggering 'Thinking'.
-        let request = GenerationRequest::new(
-            self.model.clone(),
-            "".to_string(), // Empty prompt = official Unload signal
-        )
-        .options(options)
-        .keep_alive(KeepAlive::Until { time: 0, unit: TimeUnit::Seconds });
-
-        // Fire-and-forget with a short timeout to prevent shutdown hangs
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_millis(200),
-            self.ollama.generate(request)
-        ).await;
+        self.backend.shutdown(self.model.lock().clone()).await;
     }
+
+    #[cfg(feature = "mlx")]
+    async fn _unused_placeholder() {}
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use miette::{Result, IntoDiagnostic, miette};
+use miette::{Result, IntoDiagnostic};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
 use crate::tools::execution::RunCommandTool;
@@ -110,11 +110,13 @@ impl AgentTool for GitCommitTool {
         let typed_args: GitCommitArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let message = typed_args.message;
         
-        let add_args = json!({ "command": "git add ." });
+        let add_args = json!({ "command": "git add .", "timeout_seconds": 30 });
         RunCommandTool.execute(&add_args, context.clone()).await?;
 
-        let commit_args = json!({ "command": format!("git commit -m \"{}\"", message) });
-        RunCommandTool.execute(&commit_args, context).await
+        // Use shell escaping or array-based approach via git_action logic if possible
+        // For now, we'll use a safer format or just use GitActionTool logic
+        let commit_args = json!({ "args": ["commit", "-m", &message] });
+        GitActionTool.execute(&commit_args, context).await
     }
 }
 
@@ -146,26 +148,16 @@ impl AgentTool for GitActionTool {
         }
     }
 
-    async fn execute(&self, json_args: &Value, _context: ToolContext) -> Result<String> {
+    async fn execute(&self, json_args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: GitActionArgs = serde_json::from_value(json_args.clone()).into_diagnostic()?;
         let string_args = typed_args.args;
-
-        let output = std::process::Command::new("git")
-            .args(&string_args)
-            .output().into_diagnostic()?;
-
-        let mut result = String::from_utf8_lossy(&output.stdout).to_string();
-        let err_result = String::from_utf8_lossy(&output.stderr).to_string();
         
-        if !err_result.is_empty() {
-            result.push_str("\n--- STDERR ---\n");
-            result.push_str(&err_result);
-        }
+        // Escape args for shell execution
+        let safe_cmd = format!("git {}", string_args.iter()
+            .map(|a| format!("'{}'", a.replace("'", "'\\''")))
+            .collect::<Vec<_>>().join(" "));
 
-        if !output.status.success() {
-            return Err(miette!("Git command failed with status {}:\n{}", output.status, result));
-        }
-
-        Ok(result)
+        let exec_args = json!({ "command": safe_cmd, "timeout_seconds": 60 });
+        RunCommandTool.execute(&exec_args, context).await
     }
 }

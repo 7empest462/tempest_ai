@@ -1,6 +1,6 @@
 [package]
 name = "tempest_ai"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.95"
 
@@ -61,6 +61,14 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 evalexpr = "11.0"
+mlx-rs = { version = "0.25.3", features = ["metal"] }
+mlx-macros = "0.25.3"
+mistralrs = { version = "0.8.1", features = ["metal"] }
+candle-core = { version = "0.10.2", optional = true }
+
+[features]
+default = ["mlx"]
+mlx = ["dep:candle-core"]
 [build-dependencies]
 chrono = "0.4"
 [dev-dependencies]

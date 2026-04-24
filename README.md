@@ -43,11 +43,14 @@ Tempest features a persistent SQLite-backed **Conceptual Brain** and a backgroun
 - **Micro-Model Compaction**: Background summarization is offloaded to a secondary model (e.g., `llama3.2:1b`), preserving context window for the primary reasoning model.
 - **Hard-Prune Recovery**: Aggressive context management ensures the agent stays within 16k tokens, maintaining zero-latency responsiveness during massive refactors.
 
-### 🌪️ The Sentinel Fleet & Sentient Telemetry
-Tempest is protected by autonomous supervisors and real-time reasoning engine:
-- **Reasoning Trace (Chain of Thought)**: View the agent's internal monologue in a dedicated side-pane.
+### 🌪️ The Sentinel Fleet & High-Fidelity Telemetry
+Tempest is protected by autonomous supervisors and a real-time reasoning engine:
+- **Native MLX Engine**: Direct Metal integration for Apple Silicon (M1-M4).
+- **Dynamic Quantization**: Seamlessly switch between `Q4_K_M` (Fast) and `Q8_0` (Quality) via config or `--quant`.
+- **High-Fidelity Dashboard**: Professional TUI with real-time GPU load and accurate Unified Memory tracking.
 - **Context Runway**: Predictive token management that prevents context overflow before it happens.
-- **Thermal Guard**: Monitors hardware temperatures and autonomously triggers throttling or cooling pauses to protect your workstation.
+- **Thermal Guard**: Monitors hardware temperatures and autonomously triggers safety pauses to protect your workstation.
+- **Agency Hardening**: Disciplined Planning vs. Execution workflow for reliable, non-hallucinatory code generation.
 
 ---
 

@@ -284,6 +284,16 @@ impl AgentTool for DownloadFileTool {
         let client = reqwest::Client::builder()
             .user_agent("TempestAI/0.1")
             .build().into_diagnostic()?;
+        
+        // Check Content-Length first
+        let head_res = client.head(&url).send().await.into_diagnostic()?;
+        if let Some(len) = head_res.headers().get(reqwest::header::CONTENT_LENGTH) {
+            let size = len.to_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+            if size > 50_000_000 {
+                return Err(miette!("File is too large ({} bytes). Maximum allowed size is 50MB.", size));
+            }
+        }
+
         let response = client.get(&url).send().await.into_diagnostic()?;
         let status = response.status();
         
@@ -292,6 +302,9 @@ impl AgentTool for DownloadFileTool {
         }
 
         let bytes = response.bytes().await.into_diagnostic()?;
+        if bytes.len() > 50_000_000 {
+             return Err(miette!("File is too large ({} bytes). Maximum allowed size is 50MB.", bytes.len()));
+        }
         
         if let Some(parent) = std::path::Path::new(&path).parent() {
             if !parent.as_os_str().is_empty() {

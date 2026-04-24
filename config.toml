@@ -12,3 +12,7 @@ db_path = "~/fleet.db"
 
 # Enable encrypted conversation history (requires passphrase on startup)
 encrypt_history = false
+
+# MLX Native Engine Configuration
+# mlx_quant: "Q4_K_M" (Fast, low RAM) or "Q8_0" (High quality, ~10GB RAM)
+mlx_quant = "Q4_K_M"

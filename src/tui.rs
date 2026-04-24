@@ -60,11 +60,11 @@ pub struct App {
     pub pending_input: Option<(String, String)>,
     pub input_response_buffer: String,
     pub pending_privilege_request: Option<(String, tokio::sync::mpsc::Sender<ToolResponse>)>,
-    pub subagent_notification: Option<String>,
     pub context_used: usize,
     pub context_total: u64,
     pub active_sentinels: Vec<String>,
     pub sentinel_log: Vec<String>,
+    pub engine_status: Option<String>,
     pub focused_pane: FocusedPane,
 }
 
@@ -91,12 +91,23 @@ impl App {
             pending_input: None,
             input_response_buffer: String::new(),
             pending_privilege_request: None,
-            subagent_notification: None,
-            context_used: 0,
+                context_used: 0,
             context_total: 0,
             active_sentinels: Vec::new(),
             sentinel_log: Vec::new(),
+            engine_status: None,
             focused_pane: FocusedPane::Chat,
+        }
+    }
+
+    pub fn push_message(&mut self, msg: String) {
+        self.messages.push(msg);
+        if self.messages.len() > 1000 {
+            self.messages.remove(0);
+        }
+        // Ensure scroll follows new messages if focused
+        if self.focused_pane == FocusedPane::Chat {
+            self.list_state.select(Some(self.messages.len().saturating_sub(1)));
         }
     }
 }
@@ -223,7 +234,7 @@ pub async fn run_tui(
                         KeyCode::Enter => {
                             if !app.input_buffer.is_empty() {
                                 let msg = app.input_buffer.drain(..).collect::<String>();
-                                app.messages.push(format!("You: {}", msg));
+                                app.push_message(format!("You: {}", msg));
                                 let _ = user_tx.send(msg).await;
                                 app.auto_scroll = true;
                             }
@@ -278,7 +289,7 @@ pub async fn run_tui(
                         KeyCode::Esc => {
                             if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                app.messages.push("⚠️ [INTERRUPTED]: Stopping agent...".to_string());
+                                app.push_message("⚠️ [INTERRUPTED]: Stopping agent...".to_string());
                             } else {
                                 // In IDLE mode, Esc can clear input or do nothing. 
                                 // Let's have it clear input for better UX.
@@ -303,8 +314,10 @@ pub async fn run_tui(
                 }
                 AgentEvent::Thinking(msg) => app.thinking_msg = msg,
                 AgentEvent::RequestInput(tool, question) => {
-                    app.pending_input = Some((tool.clone(), question));
+                    app.pending_input = Some((tool.clone(), question.clone()));
                     app.input_response_buffer.clear();
+                    // High-visibility alert in chat pane too
+                    app.push_message(format!("⚠️ [ACTION REQUIRED]: Approval needed for {} in the input bar below.", tool.to_uppercase()));
                 }
                 AgentEvent::RequestPrivileges { rationale, response_tx } => {
                     app.pending_privilege_request = Some((rationale, response_tx));
@@ -312,7 +325,7 @@ pub async fn run_tui(
                 AgentEvent::StreamToken(token) => {
                     if token.is_empty() {
                         if !app.current_stream.is_empty() {
-                            app.messages.push(format!("Tempest: {}", app.current_stream));
+                            app.push_message(format!("Tempest: {}", app.current_stream));
                             app.current_stream.clear();
                         }
                     } else {
@@ -327,13 +340,6 @@ pub async fn run_tui(
                          app.reasoning_scroll = (lines as u16).saturating_sub(15);
                     }
                 }
-                AgentEvent::SubagentStatus(msg) => {
-                    app.subagent_notification = msg;
-                }
-                AgentEvent::ContextStatus { used, total } => {
-                    app.context_used = used;
-                    app.context_total = total;
-                }
                 AgentEvent::SentinelUpdate { active, log } => {
                     app.active_sentinels = active;
                     if !log.is_empty() {
@@ -342,6 +348,13 @@ pub async fn run_tui(
                             app.sentinel_log.remove(0);
                         }
                     }
+                }
+                AgentEvent::SubagentStatus(msg) => {
+                    app.engine_status = msg;
+                }
+                AgentEvent::ContextStatus { used, total } => {
+                    app.context_used = used;
+                    app.context_total = total;
                 }
             }
         }
@@ -556,9 +569,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         ]));
     }
 
-    if let Some(msg) = &app.subagent_notification {
+    if let Some(msg) = &app.engine_status {
         status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled("🤖 SUBAGENT ACTIVE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        status_lines.push(Line::from(Span::styled("🤖 ENGINE STATUS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
         for line in msg.split('\n') {
             status_lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(Color::White))));
         }

@@ -13,6 +13,7 @@ mod context_manager;
 mod error_classifier;
 mod rules;
 pub mod sentinel;
+mod inference;
 
 use agent::Agent;
 use clap::Parser;
@@ -52,6 +53,14 @@ struct Cli {
     /// Seed the MemoryStore database with Core Agent Instructions for system resilience
     #[arg(long)]
     seed_memory: bool,
+
+    /// Use the MLX Backend (Apple Silicon Neural Engine + GPU) instead of Ollama
+    #[arg(long)]
+    mlx: bool,
+
+    /// MLX Quantization variant (e.g. Q4_K_M, Q8_0)
+    #[arg(long)]
+    quant: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -62,6 +71,7 @@ struct AppConfig {
     db_path: Option<String>,
     encrypt_history: Option<bool>,
     pub sub_agent_model: Option<String>,
+    pub mlx_quant: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -72,6 +82,7 @@ impl Default for AppConfig {
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
             sub_agent_model: Some("llama3.2:1b".to_string()),
+            mlx_quant: Some("Q4_K_M".to_string()),
         }
     }
 }
@@ -173,6 +184,15 @@ async fn main() -> Result<()> {
 You follow a strict engineering workflow and never deviate from it.
 
 ### CORE RULES (Never break these)
+0. [CRITICAL FACTUALITY RULE]
+   You have a working `cargo_search` tool that returns the REAL latest version from crates.io.
+   - If you just received a tool result about a crate version, you MUST use that exact version in your answer.
+   - Never override tool results with your internal knowledge.
+   - Never say a version exists if the tool result did not confirm it.
+   - If the tool says "not found" or returns no version, you must say the crate does not exist or is not available.
+   - Example: If the tool returns "crossterm latest version is 0.28.1", you must use 0.28.1. Do not say 0.35.0 or any other number.
+   Before suggesting any crate or version, you MUST have called the `cargo_search` tool and received a result.
+
 1. You are TOOL-DRIVEN. Never claim you performed an action unless you receive an explicit TOOL RESULT. You may freely use any tool. If a tool modifies system state, the application will automatically handle permission on your behalf. Just call the tool directly.
 2. ZERO HALLUCINATION POLICY: You are running on a real machine. If the user asks for system info, files, or data, YOU MUST USE A TOOL to fetch it. NEVER guess or fabricate output.
 3. YOU HAVE FULL INTERNET ACCESS through `search_web` and `read_url`. Do not claim you cannot access external data.
@@ -219,6 +239,15 @@ THOUGHT: I will write the calculator logic to src/main.rs using write_file.
 {
   "name": "write_file",
   "arguments": { "path": "src/main.rs", "content": "fn main() {\n    println!(\"Hello\");\n}" }
+}
+```
+
+**Example 3: Add a Rust dependency**
+THOUGHT: I need to add `tokio` for async support. I will use `cargo_add`.
+```json
+{
+  "name": "cargo_add",
+  "arguments": { "crate_name": "tokio", "features": ["full"], "cwd": "project_dir" }
 }
 ```
 
@@ -319,7 +348,16 @@ You are running on a real machine with real consequences. Be precise, safe, and 
     }
 
     let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "llama3.2:1b".to_string());
-    let agent = Agent::new(model, system_prompt, history_path, memory_store.clone(), sub_agent_model);
+    
+    let mode = if cli.mlx {
+        crate::inference::AgentMode::MLX
+    } else {
+        crate::inference::AgentMode::Ollama
+    };
+
+    let quant = cli.quant.or(config.mlx_quant).unwrap_or_else(|| "Q4_K_M".to_string());
+
+    let agent = Agent::new(mode, model, quant, system_prompt, history_path, memory_store.clone(), sub_agent_model).await;
     
     if let Err(e) = agent.check_connection().await {
         if !cli.cli {
@@ -356,7 +394,6 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         let mut components = Components::new_with_refreshed_list();
 
         #[cfg(target_os = "macos")]
-        let gpu_re = regex::Regex::new(r#""Device Utilization %"=(\d+)"#).unwrap();
 
         loop {
             sys.refresh_all();
@@ -364,31 +401,53 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             components.refresh(true);
             
             let mut ollama_mem_bytes = 0;
-            for process in sys.processes().values() {
+            let mut tempest_mem_bytes = 0;
+            let current_pid = std::process::id();
+
+            for (pid, process) in sys.processes() {
                 let name = process.name().to_string_lossy().to_lowercase();
                 if name.contains("ollama") || name.contains("llama") {
                     ollama_mem_bytes = std::cmp::max(ollama_mem_bytes, process.memory());
                 }
+                if pid.as_u32() == current_pid {
+                    tempest_mem_bytes = process.memory();
+                }
             }
-            let ollama_mb = ollama_mem_bytes / 1024 / 1024;
+
+            #[cfg(target_os = "macos")]
+            let mac_gpu = tempest_monitor::macos_helper::get_macos_gpu_info(false);
+
+            // In MLX/Native mode, we need to capture the Metal/AGX memory.
+            // sysinfo process.memory() often misses private Metal heaps on macOS.
+            let ai_ram_mb = if mode == crate::inference::AgentMode::MLX {
+                let mut vram_mb = 0;
+                #[cfg(target_os = "macos")]
+                {
+                    // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
+                    // We'll peek at the PerformanceStatistics from AGX specifically.
+                    if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-c", "AGXAccelerator"]).output() {
+                        let s = String::from_utf8_lossy(&output.stdout);
+                        let vram_re = regex::Regex::new(r#""In use system memory"=(\d+)"#).unwrap();
+                        if let Some(caps) = vram_re.captures(&s) {
+                            if let Some(m) = caps.get(1) {
+                                vram_mb = m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024;
+                            }
+                        }
+                    }
+                }
+                (tempest_mem_bytes / 1024 / 1024) + vram_mb
+            } else {
+                (ollama_mem_bytes + tempest_mem_bytes) / 1024 / 1024
+            };
+            let engine_label = match mode {
+                crate::inference::AgentMode::MLX => "(Native Engine)",
+                crate::inference::AgentMode::Ollama => "(Ollama)",
+            };
 
             let gpu_load = {
                 #[cfg(target_os = "macos")]
                 {
-                    let mut current_load = 0;
-                    let output = std::process::Command::new("ioreg")
-                        .args(["-r", "-c", "AGXAccelerator"])
-                        .output()
-                        .ok();
-                    if let Some(out) = output {
-                        let s = String::from_utf8_lossy(&out.stdout);
-                        if let Some(caps) = gpu_re.captures(&s) {
-                            if let Some(m) = caps.get(1) {
-                                current_load = m.as_str().parse::<i32>().unwrap_or(0);
-                            }
-                        }
-                    }
-                    current_load
+                    mac_gpu.usage_pct as i32
                 }
                 #[cfg(target_os = "linux")]
                 {
@@ -453,7 +512,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 
 🚀 MEMORY ALLOC   : {}/{} MB ({:.1}%)
 
-🤖 AI RAM USE     : {} MB (Ollama)
+🤖 AI RAM USE     : {} MB {}
 
 🎨 GPU LOAD       : {}% (Graphics)
 
@@ -468,7 +527,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 ⚙️ ACTIVE PROCS   : {}
 
 ⏱️ CORE UPTIME    : {}h {}m {}s",
-                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ollama_mb, gpu_load, used_swap, total_swap, swap_perc,
+                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ai_ram_mb, engine_label, gpu_load, used_swap, total_swap, swap_perc,
                 total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
             );
 
