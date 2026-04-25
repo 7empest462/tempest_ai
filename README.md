@@ -24,9 +24,10 @@ The agent monitors its own hardware and software "Win/Loss" record.
 - **Self-Reflective Warnings**: If a tool fails repeatedly, the system injects a **Competency Warning** at the start of the next turn, forcing the model to stop, analyze the failures, and verify its assumptions.
 
 ### 🌡️ 4. Dynamic Temperature Governance
-Tempest dynamically shifts its internal reasoning "thermal" state:
-- **Planning Mode (0.1 Temp)**: Locked for maximum logical rigor and architectural discipline.
-- **Execution Mode (0.4 Temp)**: Optimized for creative problem-solving and implementation agility.
+Tempest dynamically shifts its internal reasoning "thermal" state based on the active backend and phase:
+- **Ollama Mode**: Optimized for maximum logical rigor (Planning: 0.05 Temp, Execution: 0.25 Temp).
+- **MLX Native Engine**: Fine-tuned for high-performance reasoning models like DeepSeek-R1 (Planning: 0.6 Temp, Execution: 0.2 Temp).
+- **Independent Tuning**: Every backend has its own set of sampling parameters (Temperature, Top-P, Repeat Penalty) in `config.toml`.
 
 ---
 
@@ -45,12 +46,14 @@ Tempest features a persistent SQLite-backed **Conceptual Brain** and a backgroun
 
 ### 🌪️ The Sentinel Fleet & High-Fidelity Telemetry
 Tempest is protected by autonomous supervisors and a real-time reasoning engine:
-- **Native MLX Engine**: Direct Metal integration for Apple Silicon (M1-M4).
+- **Native MLX Engine**: Direct Metal integration for Apple Silicon (M1-M4) with optimized KV-cache management.
+- **DeepSeek-R1 Optimized**: Specialized reasoning extraction for R1 models, supporting native `<think>` blocks and distilled Qwen/Llama variants.
 - **Dynamic Quantization**: Seamlessly switch between `Q4_K_M` (Fast) and `Q8_0` (Quality) via config or `--quant`.
 - **High-Fidelity Dashboard**: Professional TUI with real-time GPU load and accurate Unified Memory tracking.
 - **Context Runway**: Predictive token management that prevents context overflow before it happens.
 - **Thermal Guard**: Monitors hardware temperatures and autonomously triggers safety pauses to protect your workstation.
 - **Agency Hardening**: Disciplined Planning vs. Execution workflow for reliable, non-hallucinatory code generation.
+- **Text-Injection Protocol**: Improved system prompt injection using clear text-based headers for better model compatibility across diverse LLM families.
 
 ---
 

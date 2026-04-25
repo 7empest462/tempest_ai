@@ -50,7 +50,7 @@ impl SentinelManager {
     }
 
     /// Analyzes the current state and returns an optional action if a sentinel triggers.
-    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64) -> Option<SentinelAction> {
+    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64, repetition_stack: &[(String, String)]) -> Option<SentinelAction> {
         let mut action = SentinelAction {
             message: String::new(),
             needs_compaction: false,
@@ -61,9 +61,22 @@ impl SentinelManager {
                 "Compiler Guard".into(),
                 "Build Watcher".into(),
                 "Thermal Guard".into(),
+                "Code Guard".into(),
             ],
         };
         let mut triggered = false;
+        
+        // 0. Repetition Check
+        if repetition_stack.len() >= 3 {
+            let last = &repetition_stack[repetition_stack.len() - 1];
+            let prev1 = &repetition_stack[repetition_stack.len() - 2];
+            let prev2 = &repetition_stack[repetition_stack.len() - 3];
+            
+            if last == prev1 && last == prev2 {
+                action.message.push_str(&format!("⚠️ [SENTINEL - REPETITION]: You have called '{}' with the same arguments 3 times in a row. YOU ARE LOOPING. Pivot to a new strategy (e.g., search_web) or use ask_user if you are stuck.\n", last.0));
+                triggered = true;
+            }
+        }
 
         // 1. Context Runway Check
         if context_manager::needs_compaction(messages, ctx_limit) {
@@ -121,6 +134,13 @@ impl SentinelManager {
                         }
                     }
                 }
+            }
+
+            // Code Guard: Detect if the model is dumping raw code without planning
+            if (last_msg.content.contains("```") || last_msg.content.contains("pub fn") || last_msg.content.contains("import ")) 
+                && !last_msg.content.contains("THOUGHT:") && !last_msg.content.to_lowercase().contains("<think>") {
+                action.message.push_str("⚠️ [SENTINEL - CODE GUARD]: You are dumping raw code blocks without a visible thinking/planning phase. STOP. Follow the protocol: Plan first, then execute.\n");
+                triggered = true;
             }
         }
 

@@ -39,6 +39,9 @@ pub trait AgentTool: Send + Sync {
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String>;
     
     fn is_modifying(&self) -> bool { false }
+    
+    /// Returns an optional preview of the intended action (e.g. a diff) to show during approval.
+    async fn get_approval_preview(&self, _args: &Value) -> Option<String> { None }
 }
 
 pub mod file;

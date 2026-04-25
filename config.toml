@@ -1,18 +1,64 @@
 # Tempest AI Configuration
-# Copy this file to ~/.config/tempest_ai/config.toml to customize
+# This file is used to customize the behavior of the Tempest AI agent.
 
-# The Ollama model to use (can also be set via --model or OLLAMA_MODEL env var)
+# ==========================================
+# 🌊 OLLAMA 3-TIER STACK (Automatic)
+# ==========================================
+# The agent will automatically cycle through these models based on the phase.
+planner_model = "deepseek-r1:8b"
+executor_model = "qwen2.5-coder:7b"
+verifier_model = "deepseek-r1:7b"
+
+# ==========================================
+# ⚡ MLX MODEL OPTIONS (Manual Switching)
+# ==========================================
+# The model currently loaded in memory for the MLX backend.
+# Use /switch <name> in the TUI to hot-swap between presets.
+mlx_model = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
+mlx_quant = "Q8_0"
+
+# Available MLX presets
+[mlx_presets.r1]
+repo = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
+quant = "Q8_0"
+
+[mlx_presets.qwen_big]
+repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
+quant = "Q8_0"
+
+[mlx_presets.qwen_small]
+repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
+quant = "Q4_K_M"
+
+# ==========================================
+# ⚙️ SAMPLING PARAMETERS
+# ==========================================
+# Fine-tune the creativity and stiffness of the models.
+temp_planning = 0.05
+temp_execution = 0.25
+top_p_planning = 0.95
+top_p_execution = 0.92
+repeat_penalty_planning = 1.18
+repeat_penalty_execution = 1.12
+ctx_planning = 16384
+ctx_execution = 32768
+
+# ==========================================
+# ⚡ MLX SAMPLING PARAMETERS
+# ==========================================
+# MLX models (especially 7B distilled) require higher temperatures to trigger reasoning.
+mlx_temp_planning = 0.6
+mlx_temp_execution = 0.2
+mlx_top_p_planning = 0.95
+mlx_top_p_execution = 0.9
+mlx_repeat_penalty_planning = 1.05
+mlx_repeat_penalty_execution = 1.05
+
+# ==========================================
+# 🧹 BASE SETTINGS
+# ==========================================
 model = "qwen2.5-coder:7b"
-
-# Path to conversation history file (relative to CWD or absolute)
+sub_agent_model = "llama3.2:1b"
 history_path = "history.json"
-
-# Path to the SQLite fleet database
 db_path = "~/fleet.db"
-
-# Enable encrypted conversation history (requires passphrase on startup)
 encrypt_history = false
-
-# MLX Native Engine Configuration
-# mlx_quant: "Q4_K_M" (Fast, low RAM) or "Q8_0" (High quality, ~10GB RAM)
-mlx_quant = "Q4_K_M"

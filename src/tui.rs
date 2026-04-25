@@ -54,6 +54,7 @@ pub struct App {
     pub agent_mode: String,
     pub thinking_msg: Option<String>,
     pub reasoning_buffer: String,
+    pub reasoning_lines: usize,
     pub reasoning_scroll: u16,
     pub list_state: ratatui::widgets::ListState,
     pub auto_scroll: bool,
@@ -85,6 +86,7 @@ impl App {
             agent_mode: "IDLE".to_string(),
             thinking_msg: None,
             reasoning_buffer: String::new(),
+            reasoning_lines: 0,
             reasoning_scroll: 0,
             list_state: ratatui::widgets::ListState::default(),
             auto_scroll: true,
@@ -335,11 +337,15 @@ pub async fn run_tui(
                     }
                 }
                 AgentEvent::ReasoningToken(token) => {
+                    for c in token.chars() {
+                        if c == '\n' {
+                            app.reasoning_lines += 1;
+                        }
+                    }
                     app.reasoning_buffer.push_str(&token);
-                    // Basic heuristic for line counting to auto-scroll
-                    let lines = app.reasoning_buffer.split('\n').count();
-                    if lines > 20 {
-                         app.reasoning_scroll = (lines as u16).saturating_sub(15);
+                    
+                    if app.reasoning_lines > 20 {
+                        app.reasoning_scroll = (app.reasoning_lines as u16).saturating_sub(15);
                     }
                 }
                 AgentEvent::SentinelUpdate { active, log } => {

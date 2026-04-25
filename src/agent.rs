@@ -2,7 +2,6 @@ use miette::{Result, miette};
 use colored::*;
 use ollama_rs::{
     generation::chat::{ChatMessage, MessageRole},
-    models::ModelOptions,
     Ollama,
 };
 use serde_json::Value;
@@ -55,7 +54,7 @@ pub struct Agent {
     #[allow(dead_code)]
     pub mode: AgentMode,
     pub phase: Arc<Mutex<AgentPhase>>,
-    backend: Arc<Backend>,
+    backend: Arc<tokio::sync::RwLock<Backend>>,
     model: Arc<Mutex<String>>,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     tools: Arc<DashMap<String, Arc<dyn crate::tools::AgentTool>>>,
@@ -82,24 +81,72 @@ pub struct Agent {
     pub recent_failures: Arc<DashMap<String, usize>>,
     pub sentinel: crate::sentinel::SentinelManager,
     pub tool_stats: Arc<DashMap<String, (usize, usize)>>,
+    pub tool_repetition_stack: Arc<Mutex<Vec<(String, String)>>>,
+    pub planner_model: Option<String>,
+    pub executor_model: Option<String>,
+    pub verifier_model: Option<String>,
+    pub mlx_presets: Arc<DashMap<String, crate::MlxPreset>>,
+    pub temp_planning: f32,
+    pub temp_execution: f32,
+    pub top_p_planning: f32,
+    pub top_p_execution: f32,
+    pub repeat_penalty_planning: f32,
+    pub repeat_penalty_execution: f32,
+    pub ctx_planning: u64,
+    pub ctx_execution: u64,
+    pub mlx_temp_planning: Option<f32>,
+    pub mlx_temp_execution: Option<f32>,
+    pub mlx_top_p_planning: Option<f32>,
+    pub mlx_top_p_execution: Option<f32>,
+    pub mlx_repeat_penalty_planning: Option<f32>,
+    pub mlx_repeat_penalty_execution: Option<f32>,
 }
 
 impl Agent {
-    pub async fn new(mode: AgentMode, model: String, quant: String, system_prompt: String, history_path: String, memory_store: Arc<Mutex<MemoryStore>>, sub_agent_model: String) -> Self {
+    pub async fn new(
+        mode: AgentMode, 
+        model: String, 
+        quant: String, 
+        system_prompt: String, 
+        history_path: String, 
+        memory_store: Arc<Mutex<MemoryStore>>, 
+        sub_agent_model: String,
+        planner_model: Option<String>,
+        executor_model: Option<String>,
+        verifier_model: Option<String>,
+        mlx_presets: std::collections::HashMap<String, crate::MlxPreset>,
+        temp_planning: f32,
+        temp_execution: f32,
+        top_p_planning: f32,
+        top_p_execution: f32,
+        repeat_penalty_planning: f32,
+        repeat_penalty_execution: f32,
+        ctx_planning: u64,
+        ctx_execution: u64,
+        mlx_temp_planning: Option<f32>,
+        mlx_temp_execution: Option<f32>,
+        mlx_top_p_planning: Option<f32>,
+        mlx_top_p_execution: Option<f32>,
+        mlx_repeat_penalty_planning: Option<f32>,
+        mlx_repeat_penalty_execution: Option<f32>,
+    ) -> Self {
         let event_tx = Arc::new(Mutex::new(None));
         let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone()).await;
+        let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
             Arc::new(crate::tools::file::ReadFileTool),
             Arc::new(crate::tools::file::WriteFileTool),
             Arc::new(crate::tools::file::ListDirTool),
             Arc::new(crate::tools::file::SearchFilesTool),
+            Arc::new(crate::tools::file::DiffFilesTool),
             Arc::new(crate::tools::file::AppendFileTool),
             Arc::new(crate::tools::file::PatchFileTool),
             Arc::new(crate::tools::file::FindReplaceTool),
             Arc::new(crate::tools::file::CreateDirectoryTool),
             Arc::new(crate::tools::file::DeleteFileTool),
             Arc::new(crate::tools::file::RenameFileTool),
+            Arc::new(crate::tools::editing::EditFileWithDiffTool),
             Arc::new(crate::tools::execution::RunCommandTool),
             Arc::new(crate::tools::execution::RunTestsTool),
             Arc::new(crate::tools::execution::BuildProjectTool),
@@ -169,7 +216,7 @@ impl Agent {
         Agent {
             mode,
             phase: Arc::new(Mutex::new(AgentPhase::Planning)),
-            backend: Arc::new(backend),
+            backend: backend,
             model: Arc::new(Mutex::new(final_model)),
             history: Arc::new(Mutex::new(vec![])),
             tools: tools_map,
@@ -194,35 +241,59 @@ impl Agent {
             sentinel: crate::sentinel::SentinelManager::new(),
 
             tool_stats: Arc::new(DashMap::new()),
+            tool_repetition_stack: Arc::new(Mutex::new(Vec::new())),
+            planner_model,
+            executor_model,
+            verifier_model,
+            mlx_presets: {
+                let dm = DashMap::new();
+                for (k, v) in mlx_presets { dm.insert(k, v); }
+                Arc::new(dm)
+            },
+            temp_planning,
+            temp_execution,
+            top_p_planning,
+            top_p_execution,
+            repeat_penalty_planning,
+            repeat_penalty_execution,
+            ctx_planning,
+            ctx_execution,
+            mlx_temp_planning,
+            mlx_temp_execution,
+            mlx_top_p_planning,
+            mlx_top_p_execution,
+            mlx_repeat_penalty_planning,
+            mlx_repeat_penalty_execution,
         }
     }
 
-    pub fn get_ollama(&self) -> Result<&Ollama> {
-        match &*self.backend {
-            Backend::Ollama(o) => Ok(o),
+    pub async fn get_ollama(&self) -> Result<Ollama> {
+        match &*self.backend.read().await {
+            Backend::Ollama(o) => Ok(o.clone()),
             #[cfg(feature = "mlx")]
             Backend::MLX(_) => Err(miette!("Active backend is MLX, not Ollama")),
         }
     }
 
     pub async fn initialize_atlas(&self, force: bool) -> Result<()> {
-        if let Ok(ollama) = self.get_ollama() {
+        if let Ok(ollama) = self.get_ollama().await {
             crate::tools::atlas::run_semantic_indexing(
-                ollama, 
+                &ollama, 
                 self.vector_brain.clone(), 
                 &self.brain_path, 
-                force
+                force,
+                self.event_tx.lock().clone()
             ).await
         } else {
             Ok(())
         }
     }
     
-    fn calculate_optimal_ctx(&self) -> u64 {
+    async fn calculate_optimal_ctx(&self) -> u64 {
         let model = self.model.lock().to_lowercase();
         
         // If we are using MLX, the current config is locked to 16,384 for performance/VRAM safety on 16GB Macs.
-        if matches!(&*self.backend, Backend::MLX(_)) {
+        if matches!(&*self.backend.read().await, Backend::MLX(_)) {
             return 16384;
         }
 
@@ -240,7 +311,7 @@ impl Agent {
     }
 
     pub async fn check_connection(&self) -> Result<()> {
-        if let Ok(ollama) = self.get_ollama() {
+        if let Ok(ollama) = self.get_ollama().await {
             // Only enforce the multi-model fleet if we are actually using Ollama.
             // MLX uses a single loaded model and doesn't require these.
             let models = ollama.list_local_models().await.into_diagnostic()?;
@@ -295,18 +366,20 @@ impl Agent {
     }
 
     pub async fn switch_phase(&self, new_phase: AgentPhase) -> Result<()> {
-        let mut p_lock = self.phase.lock();
-        if *p_lock == new_phase {
-            return Ok(());
-        }
-
-        let old_desc = p_lock.description();
-        *p_lock = new_phase.clone();
+        let old_desc = {
+            let mut p_lock = self.phase.lock();
+            if *p_lock == new_phase {
+                return Ok(());
+            }
+            let old = p_lock.description();
+            *p_lock = new_phase.clone();
+            old
+        };
         
         // --- BACKEND-AWARE MODEL ROUTING ---
         // If we are in MLX mode, we only have one model pipeline loaded. 
         // Overwriting the model string here would break the MLX backend.
-        if !matches!(&*self.backend, crate::inference::Backend::MLX(_)) {
+        if !matches!(&*self.backend.read().await, crate::inference::Backend::MLX(_)) {
             *self.model.lock() = new_phase.default_model();
         }
 
@@ -382,12 +455,74 @@ impl Agent {
     pub fn clear_history(&self) {
         self.history.lock().clear();
         let _ = std::fs::remove_file(&self.history_path);
+        
+        // Clear Atlas semantic index to prevent session leakage
+        let mut atlas_path = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        atlas_path.push("tempest_ai");
+        atlas_path.push("atlas_index");
+        let _ = std::fs::remove_dir_all(atlas_path);
+    }
+
+    pub async fn switch_mlx_model(&self, preset_name: String) -> Result<()> {
+        let preset = self.mlx_presets.get(&preset_name)
+            .ok_or_else(|| miette!("Preset {} not found", preset_name))?
+            .clone();
+            
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🔄 Hot-swapping MLX to: {} ({})", preset_name, preset.quant))).await;
+        } else {
+            println!("{} Hot-swapping MLX to: {} ({})", "🔄".yellow(), preset_name, preset.quant);
+        }
+        
+        let (new_backend, new_model_name) = crate::inference::Backend::new(
+            crate::inference::AgentMode::MLX,
+            preset.repo,
+            preset.quant,
+            self.event_tx.clone()
+        ).await;
+        
+        {
+            let mut lock = self.backend.write().await;
+            *lock = new_backend;
+        }
+        
+        {
+            let mut model_lock = self.model.lock();
+            *model_lock = new_model_name;
+        }
+
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("✅ MLX Switched to {}", preset_name))).await;
+        } else {
+            println!("{} MLX Switched to {}", "✅".green(), preset_name);
+        }
+        
+        Ok(())
     }
 
     pub async fn run(&self, initial_user_prompt: String, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
         if initial_user_prompt.trim() == "/clear" {
             self.clear_history();
             return Ok(());
+        }
+
+        let prompt_trimmed = initial_user_prompt.trim();
+        if prompt_trimmed.starts_with('/') {
+            let cmd = if prompt_trimmed.starts_with("/switch ") {
+                prompt_trimmed.strip_prefix("/switch ").unwrap().trim()
+            } else {
+                prompt_trimmed.strip_prefix("/").unwrap().trim()
+            };
+            
+            let cmd_str = cmd.to_string();
+            if self.mlx_presets.get(&cmd_str).is_some() {
+                return self.switch_mlx_model(cmd_str).await;
+            } else if prompt_trimmed.starts_with("/switch ") {
+                println!("{} Preset not found: {}", "❌".red(), cmd_str);
+                return Ok(());
+            }
         }
 
         self.initialize_session(&initial_user_prompt).await?;
@@ -423,7 +558,7 @@ impl Agent {
             }
 
             // --- STAGE 1: SENTINEL FLEET CHECK ---
-            let ctx_limit = self.calculate_optimal_ctx();
+            let ctx_limit = self.calculate_optimal_ctx().await;
             self.run_sentinel_stage(ctx_limit).await?;
 
             // --- STAGE 1: PLANNING ---
@@ -492,6 +627,26 @@ impl Agent {
                     self.history.lock().push(ChatMessage::new(MessageRole::User, reprimand));
                     let _ = self.save_history();
                     continue; // Force another turn
+                }
+
+                // --- 🛡️ SENTINEL: Detect raw code output in chat (Violation of Rule 12) ---
+                let contains_raw_code = {
+                    let content = &planner_output.content;
+                    content.contains("```rust") || content.contains("```python") || content.contains("```javascript") || content.contains("```sh")
+                };
+
+                if contains_raw_code && !reprimand_issued {
+                    reprimand_issued = true;
+                    let reprimand = "⚠️ [SENTINEL REPRIMAND]: You are writing code directly into the chat pane. This violates CORE RULE 12. ALL code must be written via 'write_file' or 'replace_file_content' tools. NEVER show raw code blocks in chat. I have blocked your response. Rewrite your answer using the appropriate tools NOW.".to_string();
+                    
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("🛡️ Sentinel: Intercepted raw code block. Forcing tool-driven rewrite...".to_string()));
+                    }
+
+                    self.history.lock().push(ChatMessage::new(MessageRole::User, reprimand));
+                    let _ = self.save_history();
+                    continue; 
                 }
 
                 if !planner_output.content.is_empty() {
@@ -582,7 +737,8 @@ impl Agent {
     }
 
     async fn run_sentinel_stage(&self, ctx_limit: u64) -> Result<()> {
-        let action_opt = self.sentinel.analyze_state(&self.history.lock(), ctx_limit);
+        let rep_stack = self.tool_repetition_stack.lock().clone();
+        let action_opt = self.sentinel.analyze_state(&self.history.lock(), ctx_limit, &rep_stack);
 
         if let Some(action) = action_opt {
             let tx_opt = self.event_tx.lock().clone();
@@ -601,8 +757,9 @@ impl Agent {
                 let history_to_compact = self.history.lock().clone();
                 let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
                 
+                let ollama_client = self.get_ollama().await.unwrap_or_else(|_| Ollama::default());
                 let new_history = crate::context_manager::compact_history(
-                    self.get_ollama().unwrap_or(&Ollama::default()), 
+                    &ollama_client, 
                     &self.sub_agent_model, 
                     history_to_compact, 
                     ctx_limit
@@ -693,24 +850,15 @@ impl Agent {
     }
 
     async fn planner_turn(&self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<PlannerOutput> {
-        let ctx_limit = self.calculate_optimal_ctx();
-        let is_planning = *self.planning_mode.lock();
-        let temp = if is_planning { 0.1 } else { 0.4 };
-
-        let options = ModelOptions::default()
-            .num_ctx(ctx_limit)
-            .num_predict(8192)
-            .temperature(temp);
-
         let mut history_snapshot = self.history.lock().clone();
 
         // --- PHASE 3: TOKEN BUDGET AWARENESS ---
-        let ctx_limit = self.calculate_optimal_ctx();
+        let ctx_limit = self.calculate_optimal_ctx().await;
         let used = crate::context_manager::estimate_tokens(&history_snapshot);
         
         let tx_opt = self.event_tx.lock().clone();
         if let Some(tx) = tx_opt {
-            let _ = tx.send(crate::tui::AgentEvent::ContextStatus { used, total: ctx_limit }).await;
+            let _ = tx.try_send(crate::tui::AgentEvent::ContextStatus { used, total: ctx_limit });
         }
 
         let runway_report = crate::context_manager::generate_runway_report(used, ctx_limit);
@@ -751,15 +899,38 @@ impl Agent {
             executed_mid_stream_clone.lock().push((res_name, res_content, res_success));
         }));
 
-        // Transition to active state for inference (Display only)
-        // Note: Removed the hard override to AgentPhase::Execution that was here.
-        // The phase is now correctly managed by the run() loop.
+        let mode = self.backend.read().await.mode();
 
-        let model_name = self.model.lock().clone();
-        let output = self.backend.stream_chat(
+        let is_mlx = mode == crate::inference::AgentMode::MLX;
+
+        let phase = self.phase.lock().clone();
+        let is_planning = matches!(phase, AgentPhase::Planning);
+        let model_name = match phase {
+            AgentPhase::Planning => self.planner_model.clone().unwrap_or_else(|| self.model.lock().clone()),
+            AgentPhase::Execution => self.executor_model.clone().unwrap_or_else(|| self.model.lock().clone()),
+            AgentPhase::Testing => self.verifier_model.clone().unwrap_or_else(|| self.model.lock().clone()),
+        };
+
+        let sampling = if is_planning {
+            crate::inference::SamplingConfig {
+                temperature: if is_mlx { self.mlx_temp_planning.unwrap_or(0.6) } else { self.temp_planning },
+                top_p: if is_mlx { self.mlx_top_p_planning.unwrap_or(0.95) } else { self.top_p_planning },
+                repeat_penalty: if is_mlx { self.mlx_repeat_penalty_planning.unwrap_or(1.1) } else { self.repeat_penalty_planning },
+                context_size: self.ctx_planning,
+            }
+        } else {
+            crate::inference::SamplingConfig {
+                temperature: if is_mlx { self.mlx_temp_execution.unwrap_or(0.2) } else { self.temp_execution },
+                top_p: if is_mlx { self.mlx_top_p_execution.unwrap_or(0.9) } else { self.top_p_execution },
+                repeat_penalty: if is_mlx { self.mlx_repeat_penalty_execution.unwrap_or(1.05) } else { self.repeat_penalty_execution },
+                context_size: self.ctx_execution,
+            }
+        };
+
+        let output = self.backend.read().await.stream_chat(
             model_name,
             history_snapshot,
-            options,
+            sampling,
             self.event_tx.clone(),
             stop,
             self.system_prompt.clone(),
@@ -767,7 +938,7 @@ impl Agent {
         ).await?;
 
         let full_content = output.content;
-        let _reasoning_content = output.reasoning;
+        let reasoning_content = output.reasoning;
         let native_tool_calls = output.native_tool_calls;
         let tx_opt = self.event_tx.lock().clone();
         if let Some(tx) = tx_opt {
@@ -777,13 +948,22 @@ impl Agent {
             println!();
         }
 
-        if !full_content.trim().is_empty() || !native_tool_calls.is_empty() {
+        if !full_content.trim().is_empty() || !native_tool_calls.is_empty() || !reasoning_content.is_empty() {
             let mut stored_content = full_content.clone();
             if !native_tool_calls.is_empty() && stored_content.is_empty() {
                 stored_content = "THOUGHT: I am executing a structural tool call.".to_string();
             }
+            
+            // Re-use reasoning in history if the model supports it (like our serialization does)
             let mut msg = ChatMessage::new(MessageRole::Assistant, stored_content);
             msg.tool_calls = native_tool_calls.clone();
+            
+            // Try to set thinking if the field exists (it appears in history.json)
+            // We use a reflective approach or just direct access if we are sure it's there.
+            // Based on history.json, we know 'thinking' is a field in the serialized ChatMessage.
+            // If it fails to compile, we will know for sure.
+            msg.thinking = Some(reasoning_content);
+            
             self.history.lock().push(msg);
         }
 
@@ -843,6 +1023,15 @@ impl Agent {
             .unwrap_or(Value::Null);
 
         // 🧠 FUZZY ARGUMENT REPAIR
+        // Track for sentinel loop detection
+        {
+            let mut stack = self.tool_repetition_stack.lock();
+            stack.push((tool_name.clone(), args.to_string()));
+            if stack.len() > 10 {
+                stack.remove(0);
+            }
+        }
+
         if tool_name == "get_stock_price" {
             if let Some(obj) = args.as_object_mut() {
                 if obj.contains_key("symbol") && !obj.contains_key("ticker") {
@@ -872,14 +1061,24 @@ impl Agent {
             if tool.is_modifying() {
                 let tx_opt = self.event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
-                    let args_preview = serde_json::to_string(&args)
-                        .unwrap_or_default()
-                        .chars().take(100).collect::<String>();
-                    let prompt = format!(
-                        "APPROVE {} ({})? [ENTER/ESC]",
-                        tool_name.to_uppercase(),
-                        args_preview
-                    );
+                    let preview = tool.get_approval_preview(&args).await;
+                    
+                    let mut prompt = String::new();
+                    if let Some(p) = preview {
+                        prompt.push_str(&p);
+                        prompt.push_str("\n\n");
+                    } else {
+                        let args_preview = serde_json::to_string(&args)
+                            .unwrap_or_default()
+                            .chars().take(100).collect::<String>();
+                        prompt.push_str(&format!("Arguments: {}\n", args_preview));
+                    }
+                    
+                    prompt.push_str(&format!(
+                        "APPROVE {}? [ENTER/ESC]",
+                        tool_name.to_uppercase()
+                    ));
+
                     let _ = tx.send(crate::tui::AgentEvent::RequestInput(
                         tool_name.clone(), 
                         prompt
@@ -922,7 +1121,7 @@ impl Agent {
                 metrics::gauge!("tool.semaphore_available_permits").set(self.concurrency_semaphore.available_permits() as f64);
                 
                 let _permit = self.concurrency_semaphore.acquire().await.ok();
-                let context = self.get_tool_context();
+                let context = self.get_tool_context().await;
                 
                 match tool.execute(&args, context).await {
                     Ok(res) => {
@@ -982,11 +1181,11 @@ impl Agent {
         }
     }
 
-    pub fn get_tool_context(&self) -> ToolContext {
+    pub async fn get_tool_context(&self) -> ToolContext {
         let real_tx = self.event_tx.lock().clone();
 
         ToolContext {
-            ollama: self.get_ollama().unwrap_or(&Ollama::default()).clone(),
+            ollama: self.get_ollama().await.unwrap_or_else(|_| Ollama::default()),
             model: self.model.lock().clone(),
             sub_agent_model: self.sub_agent_model.clone(),
             history: self.history.clone(),
@@ -1041,7 +1240,7 @@ impl Agent {
 
     /// Explicitly unload the model from Ollama's memory (GPU) by sending a request with keep_alive: 0.
     pub async fn shutdown(&self) {
-        self.backend.shutdown(self.model.lock().clone()).await;
+        self.backend.read().await.shutdown(self.model.lock().clone()).await;
     }
 
     #[cfg(feature = "mlx")]

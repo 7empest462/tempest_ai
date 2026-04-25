@@ -71,10 +71,8 @@ impl AgentTool for RequestPrivilegesTool {
                         Ok(format!("🚀 Privilege escalation SUCCESSFUL. Rationale: {} (Passwordless/Cached mode confirmed)", typed_args.rationale))
                     }
                     _ => {
-                        // Sudo failed or requires password. For now, we set the flag anyway
-                        // but warn the user.
-                        context.is_root.store(true, Ordering::SeqCst);
-                        Ok(format!("⚠️ Privilege escalation PARTIAL SUCCESS. Sudo appears to require a password. Commands may fail unless you run 'sudo true' in your terminal first. Rationale: {}", typed_args.rationale))
+                        // Sudo failed or requires password. Do NOT set is_root = true.
+                        Ok(format!("⚠️ Privilege escalation requires a password. Commands will fail until you run 'sudo -v' (or similar) in your primary terminal to cache credentials. Rationale: {}", typed_args.rationale))
                     }
                 }
             }

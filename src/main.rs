@@ -63,6 +63,12 @@ struct Cli {
     quant: Option<String>,
 }
 
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct MlxPreset {
+    pub repo: String,
+    pub quant: String,
+}
+
 #[allow(dead_code)]
 #[derive(serde::Deserialize, Debug)]
 struct AppConfig {
@@ -71,18 +77,70 @@ struct AppConfig {
     db_path: Option<String>,
     encrypt_history: Option<bool>,
     pub sub_agent_model: Option<String>,
+    pub mlx_model: Option<String>,
     pub mlx_quant: Option<String>,
+    pub planner_model: Option<String>,
+    pub executor_model: Option<String>,
+    pub verifier_model: Option<String>,
+    pub mlx_presets: Option<std::collections::HashMap<String, MlxPreset>>,
+    pub temp_planning: Option<f32>,
+    pub temp_execution: Option<f32>,
+    pub top_p_planning: Option<f32>,
+    pub top_p_execution: Option<f32>,
+    pub repeat_penalty_planning: Option<f32>,
+    pub repeat_penalty_execution: Option<f32>,
+    pub ctx_planning: Option<u64>,
+    pub ctx_execution: Option<u64>,
+    pub mlx_temp_planning: Option<f32>,
+    pub mlx_temp_execution: Option<f32>,
+    pub mlx_top_p_planning: Option<f32>,
+    pub mlx_top_p_execution: Option<f32>,
+    pub mlx_repeat_penalty_planning: Option<f32>,
+    pub mlx_repeat_penalty_execution: Option<f32>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let mut mlx_presets = std::collections::HashMap::new();
+        mlx_presets.insert("r1".to_string(), MlxPreset {
+            repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string(),
+            quant: "Q8_0".to_string(),
+        });
+        mlx_presets.insert("qwen_big".to_string(), MlxPreset {
+            repo: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string(),
+            quant: "Q8_0".to_string(),
+        });
+        mlx_presets.insert("qwen_small".to_string(), MlxPreset {
+            repo: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string(),
+            quant: "Q4_K_M".to_string(),
+        });
+
         AppConfig {
             model: Some("qwen2.5-coder:7b".to_string()),
             history_path: Some("history.json".to_string()),
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
             sub_agent_model: Some("llama3.2:1b".to_string()),
-            mlx_quant: Some("Q4_K_M".to_string()),
+            mlx_model: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
+            mlx_quant: Some("Q8_0".to_string()),
+            planner_model: Some("deepseek-r1:14b".to_string()),
+            executor_model: Some("qwen2.5-coder:7b".to_string()),
+            verifier_model: Some("deepseek-r1:7b".to_string()),
+            mlx_presets: Some(mlx_presets),
+            temp_planning: Some(0.05),
+            temp_execution: Some(0.25),
+            top_p_planning: Some(0.95),
+            top_p_execution: Some(0.92),
+            repeat_penalty_planning: Some(1.18),
+            repeat_penalty_execution: Some(1.12),
+            ctx_planning: Some(16384),
+            ctx_execution: Some(32768),
+            mlx_temp_planning: Some(0.6),
+            mlx_temp_execution: Some(0.2),
+            mlx_top_p_planning: Some(0.95),
+            mlx_top_p_execution: Some(0.9),
+            mlx_repeat_penalty_planning: Some(1.05),
+            mlx_repeat_penalty_execution: Some(1.05),
         }
     }
 }
@@ -206,10 +264,13 @@ You follow a strict engineering workflow and never deviate from it.
 11. INITIATIVE REQUIREMENT: Do NOT use `notify` or `ask_user` to avoid taking the next logical step. If you find files, analyze them. If you see a bug, patch it.
 12. CODE WRITING RULE: ALL code MUST go through `write_file` or `replace_file_content` tools. NEVER output raw code blocks (```rust, ```python, etc.) into chat. Code in chat is NOT saved to disk.
 
-### RESPONSE FORMAT (Follow exactly)
-Every response must contain exactly one of these structures:
+### RESPONSE FORMAT
+- **If you are a reasoning model (like DeepSeek-R1):** You MUST begin your response with native `<think>` tags. Perform all your internal planning and tool selection inside these tags. After the closing `</think>` tag, output your selected tool call in the JSON format below.
+- **If you are a standard model:** Start your response immediately with `THOUGHT:` followed by your reasoning and then the JSON tool call.
 
-**Standard Turn:**
+**Tool Call Format:**
+
+**Standard Turn (Standard Model):**
 THOUGHT: [Your reasoning]
 ```json
 {
@@ -260,7 +321,9 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 
     // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
     let model = if cli.mlx {
-        cli.model.clone().unwrap_or_else(|| "Qwen2.5-Coder-7B (Native MLX)".to_string())
+        cli.model.clone()
+            .or(config.mlx_model.clone())
+            .unwrap_or_else(|| "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string())
     } else {
         cli.model.clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
@@ -336,8 +399,8 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             ),
             (
                 "tempest_identity",
-                "CORE INSTRUCTION (Identity): Your name is Tempest AI. You are a high-performance, autonomous engineering assistant. Be concise, technical, and professional at all times.",
-                vec!["identity", "branding", "instructions"]
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI. You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
+                vec!["identity", "branding", "instructions", "architecture"]
             )
         ];
         let mut count = 0;
@@ -361,7 +424,37 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 
     let quant = cli.quant.or(config.mlx_quant).unwrap_or_else(|| "Q4_K_M".to_string());
 
-    let agent = Agent::new(mode, model, quant, system_prompt, history_path, memory_store.clone(), sub_agent_model).await;
+    if !cli.cli {
+        println!("{} Initializing Tempest AI Agent (Backend: {:?}, Model: {})...", "🚀".blue(), mode, model);
+    }
+
+    let agent = Agent::new(
+        mode, 
+        model, 
+        quant, 
+        system_prompt, 
+        history_path, 
+        memory_store.clone(), 
+        sub_agent_model,
+        config.planner_model.clone(),
+        config.executor_model.clone(),
+        config.verifier_model.clone(),
+        config.mlx_presets.clone().unwrap_or_default(),
+        config.temp_planning.unwrap_or(0.05),
+        config.temp_execution.unwrap_or(0.25),
+        config.top_p_planning.unwrap_or(0.95),
+        config.top_p_execution.unwrap_or(0.92),
+        config.repeat_penalty_planning.unwrap_or(1.18),
+        config.repeat_penalty_execution.unwrap_or(1.12),
+        config.ctx_planning.unwrap_or(16384),
+        config.ctx_execution.unwrap_or(32768),
+        config.mlx_temp_planning,
+        config.mlx_temp_execution,
+        config.mlx_top_p_planning,
+        config.mlx_top_p_execution,
+        config.mlx_repeat_penalty_planning,
+        config.mlx_repeat_penalty_execution,
+    ).await;
     
     if let Err(e) = agent.check_connection().await {
         if !cli.cli {
@@ -374,7 +467,13 @@ You are running on a real machine with real consequences. Be precise, safe, and 
     }
     
     let _ = agent.load_history();
+    if !cli.cli {
+        println!("{} Indexing local workspace and skills...", "🧠".cyan());
+    }
     let _ = agent.initialize_atlas(false).await;
+    if !cli.cli {
+        println!("{} Startup sequence complete. Launching TUI...", "✅".green());
+    }
 
     if cli.cli {
         run_cli_mode(agent).await?;
@@ -383,7 +482,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
     
     // Default to TUI mode
     let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
-    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(100);
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(10000);
     let (tool_tx, tool_rx) = tokio::sync::mpsc::channel::<crate::tui::ToolResponse>(1);
 
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -427,7 +526,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
                 {
                     // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
                     // We'll peek at the PerformanceStatistics from AGX specifically.
-                    if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-c", "AGXAccelerator"]).output() {
+                    if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
                         let s = String::from_utf8_lossy(&output.stdout);
                         // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
                         let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();

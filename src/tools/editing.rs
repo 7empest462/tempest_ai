@@ -9,7 +9,6 @@ use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
 
 #[derive(Deserialize, JsonSchema)]
-#[allow(dead_code)]
 pub struct EditFileWithDiffArgs {
     /// Path to the file to edit.
     pub path: String,
@@ -17,7 +16,6 @@ pub struct EditFileWithDiffArgs {
     pub new_content: String,
 }
 
-#[allow(dead_code)]
 pub struct EditFileWithDiffTool;
 
 #[async_trait]
@@ -40,14 +38,22 @@ impl AgentTool for EditFileWithDiffTool {
         }
     }
 
-    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: EditFileWithDiffArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let new_content = &typed_args.new_content;
 
+        // Actually write it
+        fs::write(&path, new_content).into_diagnostic()?;
+        Ok(format!("Successfully applied changes to {}.", path))
+    }
+
+    async fn get_approval_preview(&self, args: &Value) -> Option<String> {
+        let typed_args: EditFileWithDiffArgs = serde_json::from_value(args.clone()).ok()?;
+        let path = shellexpand::tilde(&typed_args.path).to_string();
+        let new_content = &typed_args.new_content;
+
         let old_content = fs::read_to_string(&path).unwrap_or_default();
-        
-        // Generate Diff for the console/TUI
         let diff = TextDiff::from_lines(old_content.as_str(), new_content);
         let mut diff_output = String::new();
         
@@ -60,14 +66,7 @@ impl AgentTool for EditFileWithDiffTool {
             diff_output.push_str(sign);
             diff_output.push_str(change.value());
         }
-
-        // Send diff to TUI before actually writing
-        if let Some(ref tx) = context.tx {
-            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🔄 Proposed changes for {}:\n\n{}", path, diff_output))).await;
-        }
         
-        // Actually write it
-        fs::write(&path, new_content).into_diagnostic()?;
-        Ok(format!("Successfully applied changes to {}.", path))
+        Some(format!("🔄 Proposed changes for {}:\n\n{}", path, diff_output))
     }
 }

@@ -5,3 +5,9 @@ brain_vectors.json
 history.json
 master.key
 temp_agent_chunk*.rs
+
+# Local Development & Scratch
+scratch/
+test_tools.rs
+fleet.db*
+.env

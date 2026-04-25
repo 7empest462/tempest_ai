@@ -31,7 +31,15 @@ pub async fn compact_history(
     mut messages: Vec<ChatMessage>,
     _ctx_limit: u64,
 ) -> Result<Vec<ChatMessage>> {
-    let _initial_count = estimate_tokens(&messages);
+    let initial_count = estimate_tokens(&messages);
+    let pressure_pct = (initial_count as f64 / _ctx_limit as f64 * 100.0).min(100.0);
+    
+    // Determine compression intensity based on pressure
+    let (ratio, intensity) = if pressure_pct > 90.0 {
+        ("10x", "CRITICAL: Maximum density required. Drop all conversational filler. Preserve ONLY raw technical facts, paths, and tool results.")
+    } else {
+        ("5x", "Standard density. Distill history while retaining technical context and logic flow.")
+    };
 
     if messages.len() <= 6 {
         return Ok(messages); 
@@ -59,20 +67,23 @@ pub async fn compact_history(
     }
 
     let summary_prompt = format!(
-        "### TASK: CONTEXT DENSITY COMPACTION
+        "### TASK: CONTEXT DENSITY COMPACTION (Pressure: {:.1}%)
 You are a high-speed context compressor. Summarize the following session history.
 
+### DENSITY TARGET: {}
+{}
+
 ### RULES:
-1. OUTPUT DENSITY: Achieve a 5x compression ratio or higher.
+1. OUTPUT DENSITY: Achieve the target ratio above.
 2. TECHNICAL PRESERVATION: Retain all tool calls, file paths, PIDs, and error codes.
 3. NO LOGORRHEA: Do NOT use phrases like 'The user and assistant discussed...'. 
-4. NO VERBATIM: Do not repeat long blocks of text. Distill them into bulleted technical facts.
+4. NO VERBATIM: Do not repeat long blocks of text.
 5. NO PREAMBLE: Start immediately with the summary.
 
 ### CONVERSATION STREAM:
 {}
 ",
-        summary_context
+        pressure_pct, ratio, intensity, summary_context
     );
 
     let options = ModelOptions::default()
@@ -86,7 +97,7 @@ You are a high-speed context compressor. Summarize the following session history
 
     // If we are at critical capacity, try to summarize, but fallback to Hard-Prune if it fails or is too slow
     let summary_result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(15),
+        tokio::time::Duration::from_secs(30),
         ollama.send_chat_messages(request)
     ).await;
 
@@ -99,12 +110,21 @@ You are a high-speed context compressor. Summarize the following session history
             );
             messages.splice(compaction_target_range, std::iter::once(summary_message));
         },
-        _ => {
-            // HARD PRUNE FALLBACK: If summarizing fails or hangs, just drop the chunk to save the system
+        Ok(Err(e)) => {
+            // Model error (e.g. model not found)
             messages.drain(compaction_target_range);
             let panic_message = ChatMessage::new(
                 MessageRole::System,
-                "⚠️ [CRITICAL OVERLOAD]: Summarization failed. Old history has been hard-pruned to restore system stability.".to_string()
+                format!("⚠️ [CRITICAL OVERLOAD]: Summarization model error ({}). Old history hard-pruned to restore stability.", e)
+            );
+            messages.insert(1, panic_message);
+        },
+        Err(_) => {
+            // Timeout fallback
+            messages.drain(compaction_target_range);
+            let panic_message = ChatMessage::new(
+                MessageRole::System,
+                "⚠️ [CRITICAL OVERLOAD]: Summarization TIMEOUT (30s). Background model too slow. History hard-pruned.".to_string()
             );
             messages.insert(1, panic_message);
         }

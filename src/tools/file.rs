@@ -140,12 +140,13 @@ impl AgentTool for WriteFileTool {
             return Err(miette!("Guardrail: Placeholder detected. You must provide the full file content. Do NOT use ellipsis or comments as placeholders."));
         }
 
+        let mut warning = String::new();
         // Accidental Truncation Guard: If the new file is significantly shorter than the old one, warn.
         if let Ok(meta) = fs::metadata(&path) {
             let old_len = meta.len();
             let new_len = content.len() as u64;
             if old_len > 1000 && new_len < old_len / 2 {
-                // We still allow it, but we add a warning to the result so the agent notices
+                warning = format!("\n\n⚠️  [WARNING]: This write significantly TRUNCATED the file ({} -> {} bytes). Ensure this was intentional.", old_len, new_len);
             }
         }
 
@@ -156,7 +157,7 @@ impl AgentTool for WriteFileTool {
             }
             
             fs::write(&path, &content).into_diagnostic()?;
-            Ok(format!("Successfully wrote {} bytes to {}. Please verify the file content is correct.", content.len(), path.display()))
+            Ok(format!("Successfully wrote {} bytes to {}. Please verify the file content is correct.{}", content.len(), path.display(), warning))
         }).await.map_err(|e| miette!("Task join error: {}", e))?
     }
 }
@@ -499,7 +500,6 @@ impl AgentTool for FindReplaceTool {
     }
 }
 #[derive(Deserialize, JsonSchema)]
-#[allow(dead_code)]
 pub struct DiffFilesArgs {
     /// The first (original) file path.
     pub file1: String,
@@ -507,7 +507,6 @@ pub struct DiffFilesArgs {
     pub file2: String,
 }
 
-#[allow(dead_code)]
 pub struct DiffFilesTool;
 
 #[async_trait]

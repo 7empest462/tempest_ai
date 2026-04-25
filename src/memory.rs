@@ -30,6 +30,10 @@ impl MemoryStore {
 
         let conn = Connection::open(&path).into_diagnostic()?;
         
+        // ⚡ Enable WAL mode for better concurrency
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| miette::miette!("Failed to enable WAL mode: {}", e))?;
+        
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memories (
                 topic TEXT PRIMARY KEY,
@@ -40,8 +44,22 @@ impl MemoryStore {
             [],
         ).into_diagnostic()?;
 
-        // 🛡️ MIGRATION: Add tags if it doesn't exist for legacy databases
-        if let Err(_) = conn.execute("SELECT tags FROM memories LIMIT 1", []) {
+        // 🛡️ MIGRATION: Robustly check for 'tags' column using PRAGMA table_info
+        let mut has_tags = false;
+        if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(memories)") {
+            if let Ok(mut rows) = stmt.query([]) {
+                while let Ok(Some(row)) = rows.next() {
+                    if let Ok(name) = row.get::<_, String>(1) {
+                        if name == "tags" {
+                            has_tags = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !has_tags {
             let _ = conn.execute("ALTER TABLE memories ADD COLUMN tags TEXT", []);
         }
 
