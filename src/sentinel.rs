@@ -49,7 +49,8 @@ impl SentinelManager {
         }
     }
 
-    /// Analyzes the current state and returns an optional action if a sentinel triggers.
+    /// Analyzes the current state and returns an action. 
+    /// Now always returns Some to ensure the TUI HUD stays populated.
     pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64, repetition_stack: &[(String, String)]) -> Option<SentinelAction> {
         let mut action = SentinelAction {
             message: String::new(),
@@ -62,9 +63,9 @@ impl SentinelManager {
                 "Build Watcher".into(),
                 "Thermal Guard".into(),
                 "Code Guard".into(),
+                "Hallucination Guard".into(),
             ],
         };
-        let mut triggered = false;
         
         // 0. Repetition Check
         if repetition_stack.len() >= 3 {
@@ -73,8 +74,8 @@ impl SentinelManager {
             let prev2 = &repetition_stack[repetition_stack.len() - 3];
             
             if last == prev1 && last == prev2 {
-                action.message.push_str(&format!("⚠️ [SENTINEL - REPETITION]: You have called '{}' with the same arguments 3 times in a row. YOU ARE LOOPING. Pivot to a new strategy (e.g., search_web) or use ask_user if you are stuck.\n", last.0));
-                triggered = true;
+                action.message.push_str(&format!("⚠️ [SENTINEL - REPETITION]: You have called '{}' with the same arguments 3 times in a row. YOU ARE LOOPING.\n", last.0));
+                
             }
         }
 
@@ -82,7 +83,7 @@ impl SentinelManager {
         if context_manager::needs_compaction(messages, ctx_limit) {
             action.message.push_str("⚠️ [SENTINEL - CONTEXT RUNWAY]: History is >85% full. Automatic compaction recommended.\n");
             action.needs_compaction = true;
-            triggered = true;
+            
         }
 
         // 2. Privilege Ladder Check & Compiler Guard & Build Watcher
@@ -91,9 +92,19 @@ impl SentinelManager {
             
             // Privilege Check
             if content.contains("permission denied") || content.contains("eacces") || content.contains("operation not permitted") {
-                action.message.push_str("⚠️ [SENTINEL - PRIVILEGE ESCALATION]: Access error detected. Use 'request_privileges' or ensure you have sudo authority.\n");
+                action.message.push_str("⚠️ [SENTINEL - PRIVILEGE ESCALATION]: Access error detected. Use 'request_privileges'.\n");
                 action.needs_privilege = true;
-                triggered = true;
+                
+            }
+
+            // Hallucination Guard: Detect "Tool not found" loops or faked results
+            if content.contains("tool not found in registry") || content.contains("hallucinated a capability") {
+                action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Tool hallucination detected. Model is inventing tools.\n");
+                
+            }
+            if content.contains("tool result") || content.contains("tool error") || content.contains("output shown below") {
+                action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Faked tool output detected. Assistant is pretending to be the system.\n");
+                
             }
 
             // Compiler Guard: Count errors in the last output
@@ -110,8 +121,8 @@ impl SentinelManager {
                 state.last_error_count = Some(error_count);
 
                 if state.stagnation_counter >= 3 {
-                    action.message.push_str(&format!("⚠️ [SENTINEL - COMPILER GUARD]: Build is STAGNANT ({} errors). STOP and RE-EVALUATE.\n", error_count));
-                    triggered = true;
+                    action.message.push_str(&format!("⚠️ [SENTINEL - COMPILER GUARD]: Build is STAGNANT ({} errors).\n", error_count));
+                    
                     state.stagnation_counter = 0; 
                 }
             } else if last_msg.content.contains("FINISHED") || last_msg.content.contains("COMPLETED") {
@@ -129,7 +140,7 @@ impl SentinelManager {
                         if let Ok(bin_meta) = std::fs::metadata(bin) {
                             if src_time > bin_meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH) {
                                 action.message.push_str("⚠️ [SENTINEL - BUILD WATCHER]: You are running tests against STALE code.\n");
-                                triggered = true;
+                                
                             }
                         }
                     }
@@ -139,8 +150,8 @@ impl SentinelManager {
             // Code Guard: Detect if the model is dumping raw code without planning
             if (last_msg.content.contains("```") || last_msg.content.contains("pub fn") || last_msg.content.contains("import ")) 
                 && !last_msg.content.contains("THOUGHT:") && !last_msg.content.to_lowercase().contains("<think>") {
-                action.message.push_str("⚠️ [SENTINEL - CODE GUARD]: You are dumping raw code blocks without a visible thinking/planning phase. STOP. Follow the protocol: Plan first, then execute.\n");
-                triggered = true;
+                action.message.push_str("⚠️ [SENTINEL - CODE GUARD]: Raw code dump detected without thinking phase.\n");
+                
             }
         }
 
@@ -151,17 +162,14 @@ impl SentinelManager {
             for comp in &state.components {
                 let temp = comp.temperature().unwrap_or(0.0);
                 if temp > 80.0 {
-                    action.message.push_str(&format!("⚠️ [SENTINEL - THERMAL GUARD]: {} is running HOT ({:.1}°C). Throttling background work.\n", comp.label(), temp));
-                    triggered = true;
+                    action.message.push_str(&format!("⚠️ [SENTINEL - THERMAL GUARD]: {} is HOT ({:.1}°C).\n", comp.label(), temp));
+                    
                     break;
                 }
             }
         }
 
-        if triggered {
-            Some(action)
-        } else {
-            None
-        }
+        // Always return the action to keep TUI HUD active
+        Some(action)
     }
 }

@@ -9,6 +9,7 @@ use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 use parking_lot::Mutex;
 use dashmap::DashMap;
 use miette::IntoDiagnostic;
@@ -44,9 +45,36 @@ impl AgentPhase {
 
 struct PlannerOutput {
     content: String,
+    reasoning: String,
     native_tool_calls: Vec<ollama_rs::generation::tools::ToolCall>,
     /// Tool results that were already executed mid-stream (real-time approval)
     executed_mid_stream: Vec<(String, String, bool)>,
+}
+
+static TOOL_BLOCK_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub tool_name: String,
+    pub result: String,
+    pub is_success: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum AgentStreamState {
+    /// DeepSeek-R1 is generating its internal <think> block
+    Thinking { accumulated: String },
+    /// Model is generating the main response content
+    StreamingContent { content: String },
+    /// Model has suggested tool calls, waiting for approval
+    PendingTools { tool_calls: Vec<Value> },
+    /// Actively running the approved tool batch
+    ExecutingTools { 
+        tool_calls: Vec<Value>,
+        results: Vec<ToolResult> 
+    },
+    /// Turn completed
+    Done,
 }
 
 #[derive(Clone)]
@@ -102,6 +130,127 @@ pub struct Agent {
     pub mlx_repeat_penalty_execution: Option<f32>,
 }
 
+pub struct AgentStream<'a> {
+    pub agent: &'a Agent,
+    pub state: AgentStreamState,
+    pub stop: Arc<AtomicBool>,
+    pub iteration: usize,
+}
+
+impl<'a> AgentStream<'a> {
+    pub fn new(agent: &'a Agent, stop: Arc<AtomicBool>) -> Self {
+        Self {
+            agent,
+            state: AgentStreamState::Thinking { accumulated: String::new() },
+            stop,
+            iteration: 0,
+        }
+    }
+
+    pub async fn transition(&mut self) -> Result<()> {
+        let current_state = self.state.clone();
+        match current_state {
+            AgentStreamState::Thinking { accumulated } => {
+                // If we have accumulated reasoning from a previous step, broadcast it
+                if !accumulated.is_empty() {
+                    let tx_opt = self.agent.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Thought Process finalized ({} chars)", accumulated.len())));
+                    }
+                }
+
+                self.agent.inject_state_context();
+                let ctx_limit = self.agent.calculate_optimal_ctx().await;
+                self.agent.run_sentinel_stage(ctx_limit).await?;
+                self.agent.switch_phase(AgentPhase::Planning).await?;
+                
+                let planner_output = self.agent.planner_turn(self.stop.clone()).await?;
+                
+                // Update state with new reasoning
+                self.state = AgentStreamState::Thinking { 
+                    accumulated: planner_output.reasoning.clone() 
+                };
+
+                let mut all_tool_calls = Vec::new();
+                for native_call in planner_output.native_tool_calls {
+                    all_tool_calls.push(serde_json::json!({
+                        "tool": native_call.function.name,
+                        "arguments": native_call.function.arguments,
+                    }));
+                }
+                if all_tool_calls.is_empty() {
+                    if let Ok(legacy_calls) = self.agent.extract_tool_calls(&planner_output.content) {
+                        all_tool_calls.extend(legacy_calls);
+                    }
+                }
+
+                // Handle mid-stream results
+                let mid_stream_results = planner_output.executed_mid_stream;
+                if !mid_stream_results.is_empty() {
+                    self.agent.process_tool_feedback_stage(mid_stream_results).await?;
+                }
+
+                if !all_tool_calls.is_empty() {
+                    self.state = AgentStreamState::PendingTools { tool_calls: all_tool_calls };
+                } else if !planner_output.content.trim().is_empty() {
+                    self.state = AgentStreamState::StreamingContent { content: planner_output.content };
+                } else {
+                    self.state = AgentStreamState::Done;
+                }
+            }
+            AgentStreamState::PendingTools { tool_calls } => {
+                let calls = tool_calls.clone();
+                
+                self.state = AgentStreamState::ExecutingTools { 
+                    tool_calls: calls.clone(), 
+                    results: Vec::new() 
+                };
+                
+                let execution_results = self.agent.executor_dispatch(calls).await?;
+                let mut tool_results = Vec::new();
+                for (name, result, success) in execution_results {
+                    tool_results.push(ToolResult { tool_name: name, result, is_success: success });
+                }
+                
+                // Update state with results
+                self.state = AgentStreamState::ExecutingTools { 
+                    tool_calls: tool_calls.clone(), 
+                    results: tool_results.clone() 
+                };
+                
+                let feedback_batch: Vec<_> = tool_results.into_iter()
+                    .map(|r| (r.tool_name, r.result, r.is_success))
+                    .collect();
+                self.agent.process_tool_feedback_stage(feedback_batch).await?;
+                
+                self.iteration += 1;
+                self.state = AgentStreamState::Thinking { accumulated: String::new() };
+            }
+            AgentStreamState::StreamingContent { content } => {
+                let contains_raw_code = content.contains("```rust") || content.contains("```python") || content.contains("```javascript") || content.contains("```sh");
+                if contains_raw_code {
+                    let reprimand = "⚠️ [SENTINEL REPRIMAND]: You are writing code directly into the chat pane. Rewrite using tools NOW.".to_string();
+                    self.agent.history.lock().push(ChatMessage::new(MessageRole::User, reprimand));
+                    self.agent.save_history()?;
+                    self.state = AgentStreamState::Thinking { accumulated: String::new() };
+                } else {
+                    self.state = AgentStreamState::Done;
+                }
+            }
+            AgentStreamState::ExecutingTools { tool_calls, results } => {
+                // Log the execution summary to ensure fields are read
+                let tx_opt = self.agent.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🛠️ Executed {} tools with {} results", tool_calls.len(), results.len())));
+                }
+                self.state = AgentStreamState::Done;
+            }
+            AgentStreamState::Done => {}
+        }
+        Ok(())
+    }
+}
+
 impl Agent {
     pub async fn new(
         mode: AgentMode, 
@@ -129,9 +278,9 @@ impl Agent {
         mlx_top_p_execution: Option<f32>,
         mlx_repeat_penalty_planning: Option<f32>,
         mlx_repeat_penalty_execution: Option<f32>,
-    ) -> Self {
+    ) -> Result<Self> {
         let event_tx = Arc::new(Mutex::new(None));
-        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone()).await;
+        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone()).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
@@ -208,12 +357,34 @@ impl Agent {
 
         let history_path_obj = Path::new(&history_path);
         let brain_path = history_path_obj.parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
-        let tool_registry: Vec<ollama_rs::generation::tools::ToolInfo> = tools_vec.iter().map(|t| t.tool_info()).collect();
+        
+        // --- 🛠️ TOOL PRUNING (MLX Optimization) ---
+        // For MLX, we only provide a "Core" set of tools to keep the prompt small (~1500 tokens instead of 9000).
+        // The model can use `query_schema` to see the full details of other tools if needed.
+        let tool_registry: Vec<ollama_rs::generation::tools::ToolInfo> = if mode == AgentMode::MLX {
+            let core_tool_names = vec![
+                "read_file", "write_file", "list_dir", "search_files", "grep_search", "edit_file_with_diff",
+                "run_command", "run_tests", "build_project",
+                "git_status", "git_diff", "git_action",
+                "semantic_search", "tree", "project_atlas",
+                "search_web", "read_url",
+                "recall_brain", "recall_memory", "recall_skill", "list_skills",
+                "ask_user", "query_schema", "update_task_context",
+                "system_telemetry", "network_check",
+                "cargo_search", "cargo_add"
+            ];
+            tools_vec.iter()
+                .filter(|t| core_tool_names.contains(&t.name()))
+                .map(|t| t.tool_info())
+                .collect()
+        } else {
+            tools_vec.iter().map(|t| t.tool_info()).collect()
+        };
 
         let vector_brain = Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(&brain_path)
             .unwrap_or_else(|_| crate::vector_brain::VectorBrain::new())));
 
-        Agent {
+        Ok(Agent {
             mode,
             phase: Arc::new(Mutex::new(AgentPhase::Planning)),
             backend: backend,
@@ -264,36 +435,33 @@ impl Agent {
             mlx_top_p_execution,
             mlx_repeat_penalty_planning,
             mlx_repeat_penalty_execution,
-        }
+        })
     }
 
     pub async fn get_ollama(&self) -> Result<Ollama> {
         match &*self.backend.read().await {
             Backend::Ollama(o) => Ok(o.clone()),
             #[cfg(feature = "mlx")]
-            Backend::MLX(_) => Err(miette!("Active backend is MLX, not Ollama")),
+            Backend::MLX { .. } => Err(miette!("Active backend is MLX, not Ollama")),
         }
     }
 
     pub async fn initialize_atlas(&self, force: bool) -> Result<()> {
-        if let Ok(ollama) = self.get_ollama().await {
-            crate::tools::atlas::run_semantic_indexing(
-                &ollama, 
-                self.vector_brain.clone(), 
-                &self.brain_path, 
-                force,
-                self.event_tx.lock().clone()
-            ).await
-        } else {
-            Ok(())
-        }
+        let backend = self.backend.read().await;
+        crate::tools::atlas::run_semantic_indexing(
+            &*backend, 
+            self.vector_brain.clone(), 
+            &self.brain_path, 
+            force,
+            self.event_tx.lock().clone()
+        ).await
     }
     
     async fn calculate_optimal_ctx(&self) -> u64 {
         let model = self.model.lock().to_lowercase();
         
         // If we are using MLX, the current config is locked to 16,384 for performance/VRAM safety on 16GB Macs.
-        if matches!(&*self.backend.read().await, Backend::MLX(_)) {
+        if matches!(&*self.backend.read().await, Backend::MLX { .. }) {
             return 16384;
         }
 
@@ -379,7 +547,7 @@ impl Agent {
         // --- BACKEND-AWARE MODEL ROUTING ---
         // If we are in MLX mode, we only have one model pipeline loaded. 
         // Overwriting the model string here would break the MLX backend.
-        if !matches!(&*self.backend.read().await, crate::inference::Backend::MLX(_)) {
+        if !matches!(&*self.backend.read().await, crate::inference::Backend::MLX { .. }) {
             *self.model.lock() = new_phase.default_model();
         }
 
@@ -457,10 +625,7 @@ impl Agent {
         let _ = std::fs::remove_file(&self.history_path);
         
         // Clear Atlas semantic index to prevent session leakage
-        let mut atlas_path = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        atlas_path.push("tempest_ai");
-        atlas_path.push("atlas_index");
-        let _ = std::fs::remove_dir_all(atlas_path);
+        let _ = std::fs::remove_file(".tempest_atlas.md");
     }
 
     pub async fn switch_mlx_model(&self, preset_name: String) -> Result<()> {
@@ -480,7 +645,7 @@ impl Agent {
             preset.repo,
             preset.quant,
             self.event_tx.clone()
-        ).await;
+        ).await?;
         
         {
             let mut lock = self.backend.write().await;
@@ -527,20 +692,10 @@ impl Agent {
 
         self.initialize_session(&initial_user_prompt).await?;
         
-        // Reset thinking just in case
-        let tx_opt = self.event_tx.lock().clone();
-        if let Some(tx) = tx_opt {
-            let _ = tx.try_send(crate::tui::AgentEvent::Thinking(None));
-        }
-
+        let mut stream = AgentStream::new(self, stop.clone());
         let max_iterations = 30;
-        let mut iteration_count = 0;
-        let mut reprimand_issued = false;
 
-        loop {
-            // --- STAGE 0: STATE INJECTION ---
-            self.inject_state_context();
-
+        while stream.iteration < max_iterations {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let tx_opt = self.event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -549,127 +704,15 @@ impl Agent {
                 }
                 break;
             }
-            iteration_count += 1;
-            if iteration_count > max_iterations {
-                if self.event_tx.lock().is_none() {
-                    println!("\n{}", "🛑 Execution limit reached (30 turns). Stopping.".red());
-                }
-                break;
-            }
 
-            // --- STAGE 1: SENTINEL FLEET CHECK ---
-            let ctx_limit = self.calculate_optimal_ctx().await;
-            self.run_sentinel_stage(ctx_limit).await?;
-
-            // --- STAGE 1: PLANNING ---
-            self.switch_phase(AgentPhase::Planning).await?;
-            let planner_output = self.planner_turn(stop.clone()).await?;
-            
-            // --- STAGE 2: EXTRACTION ---
-            let mut all_tool_calls = Vec::new();
-            for native_call in planner_output.native_tool_calls {
-                all_tool_calls.push(serde_json::json!({
-                    "tool": native_call.function.name,
-                    "arguments": native_call.function.arguments,
-                }));
-            }
-
-            if all_tool_calls.is_empty() {
-                if let Ok(legacy_calls) = self.extract_tool_calls(&planner_output.content) {
-                    all_tool_calls.extend(legacy_calls);
+            match &stream.state {
+                AgentStreamState::Done => break,
+                _ => {
+                    stream.transition().await?;
                 }
             }
-
-            // Merge: mid-stream results are already done; only dispatch remaining tools
-            let mid_stream_results = planner_output.executed_mid_stream;
-            let executed_names: std::collections::HashSet<String> = mid_stream_results.iter()
-                .map(|(name, _, _)| name.clone())
-                .collect();
-            let has_mid_stream = !executed_names.is_empty();
-            
-            // Filter out tools that were already executed mid-stream
-            let remaining_tool_calls: Vec<_> = if has_mid_stream {
-                all_tool_calls.into_iter().filter(|tc| {
-                    let name = tc.get("name").or_else(|| tc.get("tool"))
-                        .and_then(|v| v.as_str()).unwrap_or("unknown");
-                    !executed_names.contains(name)
-                }).collect()
-            } else {
-                all_tool_calls
-            };
-
-            if remaining_tool_calls.is_empty() && !has_mid_stream {
-                // --- 🛡️ WATCHDOG: Detect silent completion after tool result ---
-                let needs_reprimand = {
-                    let h_lock = self.history.lock();
-                    let last_msg_is_tool_result = h_lock.last()
-                        .map(|m| m.role == MessageRole::User && m.content.contains("SYSTEM NOTIFICATION: TOOL RESULT"))
-                        .unwrap_or(false);
-                    
-                    let content_is_weak = {
-                        let trimmed = planner_output.content.trim();
-                        let lower = trimmed.to_lowercase();
-                        trimmed.is_empty() || (lower.contains("thought") && trimmed.len() < 60)
-                    };
-                    
-                    last_msg_is_tool_result && content_is_weak
-                };
-
-                if needs_reprimand && !reprimand_issued {
-                    reprimand_issued = true;
-                    let reprimand = "CRITICAL REPRIMAND: You just received data from the system but you FAILED to report it to the human! DO NOT call another tool. Analyze the tool results in your history and give the final answer to the user NOW. You MUST provide a summary.".to_string();
-                    
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("Watchdog: Forcing response...".to_string()));
-                    }
-
-                    self.history.lock().push(ChatMessage::new(MessageRole::User, reprimand));
-                    let _ = self.save_history();
-                    continue; // Force another turn
-                }
-
-                // --- 🛡️ SENTINEL: Detect raw code output in chat (Violation of Rule 12) ---
-                let contains_raw_code = {
-                    let content = &planner_output.content;
-                    content.contains("```rust") || content.contains("```python") || content.contains("```javascript") || content.contains("```sh")
-                };
-
-                if contains_raw_code && !reprimand_issued {
-                    reprimand_issued = true;
-                    let reprimand = "⚠️ [SENTINEL REPRIMAND]: You are writing code directly into the chat pane. This violates CORE RULE 12. ALL code must be written via 'write_file' or 'replace_file_content' tools. NEVER show raw code blocks in chat. I have blocked your response. Rewrite your answer using the appropriate tools NOW.".to_string();
-                    
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("🛡️ Sentinel: Intercepted raw code block. Forcing tool-driven rewrite...".to_string()));
-                    }
-
-                    self.history.lock().push(ChatMessage::new(MessageRole::User, reprimand));
-                    let _ = self.save_history();
-                    continue; 
-                }
-
-                if !planner_output.content.is_empty() {
-                    if self.event_tx.lock().is_none() {
-                        println!("\n{} {}", "✅".green(), "Turn complete.".dimmed());
-                    }
-                }
-                break;
-            }
-
-            // --- STAGE 3: EXECUTION (remaining non-modifying tools) ---
-            let mut results = mid_stream_results; // Start with already-executed mid-stream tools
-            if !remaining_tool_calls.is_empty() {
-                self.switch_phase(AgentPhase::Execution).await?;
-                let dispatch_results = self.executor_dispatch(remaining_tool_calls).await?;
-                results.extend(dispatch_results);
-            }
-
-            // --- STAGE 4: COLLECTION & STRUCTURED FEEDBACK ---
-            self.process_tool_feedback_stage(results).await?;
         }
-        
-        // Ensure final state is persisted even if loop broke early
+
         let _ = self.save_history();
         Ok(())
     }
@@ -750,6 +793,11 @@ impl Agent {
                 
                 if !action.message.is_empty() {
                     let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(action.message.clone()));
+                    // Inject into history so the model sees the reprimand immediately
+                    self.history.lock().push(ollama_rs::generation::chat::ChatMessage::new(
+                        ollama_rs::generation::chat::MessageRole::System, 
+                        format!("SENTINEL INTERVENTION: {}", action.message)
+                    ));
                 }
             }
 
@@ -868,36 +916,31 @@ impl Agent {
         history_snapshot.insert(pos, ChatMessage::new(
             MessageRole::System,
             "CRITICAL RULES REMINDER (re-read every turn):\n\
-             1. Begin with THOUGHT: always. No preamble, no 'Sure', no 'Here is'.\n\
-             2. ALL code MUST go through the `write_file` tool. NEVER output ```rust or ```python blocks into chat. That does NOT save files.\n\
-             3. Your tool call MUST be valid JSON inside a ```json block with keys 'name' and 'arguments'.\n\
-             4. After writing code, IMMEDIATELY use `run_command` to test/compile it. Do not ask the user if they want you to verify.\n\
-             5. Do NOT ask the user how you can help. Execute the next step of your plan autonomously.\n\
-             6. If you just received tool results, analyze them and take the next action. Do NOT stop to summarize unless the task is DONE.".to_string()
+             1. ABSOLUTE BAN ON PREAMBLE: Never start with 'Sure', 'Here is', 'Okay', or 'I can do that'.\n\
+             2. REASONING FORMAT: Begin your response IMMEDIATELY with THOUGHT: (standard models) or <think> (reasoning models).\n\
+             3. TOOL USAGE: ALL code MUST go through `write_file`. NEVER output raw code blocks into chat.\n\
+             4. MOMENTUM: If you receive a tool result, move to the next logical step immediately. Do NOT ask for permission.".to_string()
         ));
         
-        let executed_mid_stream = Arc::new(Mutex::new(Vec::new()));
-        let executed_mid_stream_clone = executed_mid_stream.clone();
-        let agent_clone = self.clone();
+        let executed_mid_stream = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (tool_tx, mut tool_rx) = tokio::sync::mpsc::unbounded_channel::<ollama_rs::generation::tools::ToolCall>();
+        let executed_mid_stream_for_task = executed_mid_stream.clone();
+        let agent_for_task = self.clone();
 
-        let on_tool_call: Option<Box<dyn FnMut(ollama_rs::generation::tools::ToolCall) + Send>> = Some(Box::new(move |call| {
-            let tool_name = call.function.name.clone();
-            let args_val = serde_json::to_value(&call.function.arguments).unwrap_or(serde_json::Value::Null);
-            
-            let req = serde_json::json!({
-                "name": tool_name,
-                "arguments": args_val,
-            });
+        let tool_task = tokio::spawn(async move {
+            while let Some(call) = tool_rx.recv().await {
+                let tool_name = call.function.name.clone();
+                let args_val = serde_json::to_value(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+                
+                let req = serde_json::json!({
+                    "name": tool_name,
+                    "arguments": args_val,
+                });
 
-            // We use a block_on here because the stream_chat loop is async but the callback is sync.
-            // This is a trade-off for simplicity in the current architecture.
-            let handle = tokio::runtime::Handle::current();
-            let (res_name, res_content, res_success) = tokio::task::block_in_place(|| {
-                handle.block_on(agent_clone.process_single_tool_call(req))
-            });
-            
-            executed_mid_stream_clone.lock().push((res_name, res_content, res_success));
-        }));
+                let res = agent_for_task.process_single_tool_call(req).await;
+                executed_mid_stream_for_task.lock().push(res);
+            }
+        });
 
         let mode = self.backend.read().await.mode();
 
@@ -934,8 +977,16 @@ impl Agent {
             self.event_tx.clone(),
             stop,
             self.system_prompt.clone(),
-            on_tool_call,
+            Some(tool_tx),
+            Some(self.tool_registry.clone()),
         ).await?;
+
+        // Signal end of tool calls and wait for all mid-stream tools to finish
+        // (though in reality the task completes as soon as tool_tx is dropped)
+        // drop(tool_tx); // already dropped by being passed by value? no, it was Some(tool_tx)
+        // Wait, stream_chat takes Option<UnboundedSender<...>> by value.
+        // So tool_tx is dropped when stream_chat returns.
+        let _ = tool_task.await;
 
         let full_content = output.content;
         let reasoning_content = output.reasoning;
@@ -962,13 +1013,14 @@ impl Agent {
             // We use a reflective approach or just direct access if we are sure it's there.
             // Based on history.json, we know 'thinking' is a field in the serialized ChatMessage.
             // If it fails to compile, we will know for sure.
-            msg.thinking = Some(reasoning_content);
+            msg.thinking = Some(reasoning_content.clone());
             
             self.history.lock().push(msg);
         }
 
         Ok(PlannerOutput {
             content: full_content,
+            reasoning: reasoning_content,
             native_tool_calls,
             executed_mid_stream: Arc::try_unwrap(executed_mid_stream).map(|m| m.into_inner()).unwrap_or_default(),
         })
@@ -976,19 +1028,43 @@ impl Agent {
 
     async fn executor_dispatch(&self, tool_calls: Vec<Value>) -> Result<Vec<(String, String, bool)>> {
         let mut results = Vec::new();
+        let mut parallel_batch = Vec::new();
+
         for tool_req in tool_calls {
-            let tool_name = tool_req.get("name").or_else(|| tool_req.get("tool")).and_then(|v| v.as_str()).unwrap_or("unknown");
+            let tool_name = tool_req.get("name")
+                .or_else(|| tool_req.get("tool"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            
             let is_modifying = self.tools.get(tool_name).map(|t| t.is_modifying()).unwrap_or(false);
-            
-            let result = self.process_single_tool_call(tool_req).await;
-            results.push(result);
-            
+
             if is_modifying {
+                // Before running a modifying tool, flush any pending parallel batch
+                if !parallel_batch.is_empty() {
+                    let batch_results = futures::future::join_all(parallel_batch).await;
+                    results.extend(batch_results);
+                    parallel_batch = Vec::new();
+                }
+
+                // Execute the modifying tool sequentially for safety
+                let result = self.process_single_tool_call(tool_req).await;
+                results.push(result);
+                
                 // BREAK AFTER ONE MODIFYING TOOL
                 // This ensures the AI sees the result of a write/patch before continuing
                 break;
+            } else {
+                // Add to parallel batch for simultaneous execution
+                parallel_batch.push(self.process_single_tool_call(tool_req));
             }
         }
+
+        // Flush any remaining parallel batch
+        if !parallel_batch.is_empty() {
+            let batch_results = futures::future::join_all(parallel_batch).await;
+            results.extend(batch_results);
+        }
+
         Ok(results)
     }
 
@@ -1186,6 +1262,7 @@ impl Agent {
 
         ToolContext {
             ollama: self.get_ollama().await.unwrap_or_else(|_| Ollama::default()),
+            backend: self.backend.clone(),
             model: self.model.lock().clone(),
             sub_agent_model: self.sub_agent_model.clone(),
             history: self.history.clone(),
@@ -1204,7 +1281,9 @@ impl Agent {
     // Removed auto_summarize_memory (unused)
 
     fn extract_tool_calls(&self, content: &str) -> Result<Vec<Value>, String> {
-        let block_regex = regex::Regex::new(r"```json\s*([\s\S]*?)\s*```").unwrap();
+        let block_regex = TOOL_BLOCK_RE.get_or_init(|| {
+            regex::Regex::new(r"```json\s*([\s\S]*?)\s*```").unwrap()
+        });
         let mut calls = Vec::new();
         for caps in block_regex.captures_iter(content) {
             if let Some(m) = caps.get(1) {
@@ -1221,19 +1300,19 @@ impl Agent {
     }
 
     pub async fn run_tui_mode(&self, mut user_rx: tokio::sync::mpsc::Receiver<String>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-             if let Ok(user_msg) = user_rx.try_recv() {
-                 // Run one full turn
-                 if let Err(e) = self.run(user_msg, stop.clone()).await {
-                     let tx_opt = self.event_tx.lock().clone();
-                     if let Some(tx) = tx_opt {
-                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Error: {}", e))).await;
-                     }
+        while let Some(user_msg) = user_rx.recv().await {
+             // Always reset stop flag before starting a new turn
+             stop.store(false, std::sync::atomic::Ordering::Relaxed);
+
+             if let Err(e) = self.run(user_msg, stop.clone()).await {
+                 let tx_opt = self.event_tx.lock().clone();
+                 if let Some(tx) = tx_opt {
+                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Error: {}", e))).await;
                  }
-                 // Auto-reset stop flag after a turn finishes/is interrupted
-                 stop.store(false, std::sync::atomic::Ordering::Relaxed);
              }
-             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+             
+             // Ensure stop is reset after completion
+             stop.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -1253,12 +1332,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_new() {
+        let memory_store = Arc::new(Mutex::new(crate::memory::MemoryStore::new("test-passphrase".to_string()).unwrap()));
         let agent = Agent::new(
-            "test-model".to_string(),
-            "test-sub-model".to_string(),
-            std::path::PathBuf::from("/tmp/tempest_test_brain"),
             crate::inference::AgentMode::Ollama,
-            false,
+            "test-model".to_string(),
+            "Q4_K_M".to_string(),
+            "test-prompt".to_string(),
+            "/tmp/tempest_test_history.json".to_string(),
+            memory_store,
+            "test-sub-model".to_string(),
+            None,
+            None,
+            None,
+            std::collections::HashMap::new(),
+            0.05,
+            0.25,
+            0.95,
+            0.92,
+            1.18,
+            1.12,
+            16384,
+            32768,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ).await.unwrap();
 
         assert_eq!(agent.sub_agent_model, "test-sub-model");

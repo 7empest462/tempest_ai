@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
-tempest-monitor = { version = "0.3.4", default-features = false }
+tempest-monitor = { version = "0.3.7", default-features = false }
 tokio = { version = "1.0", features = ["full"] }
 ollama-rs = { version = "0.3.4", features = ["stream", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -61,9 +61,9 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 evalexpr = "11.0"
-mlx-rs = { version = "0.25.3", features = ["metal"] }
+mlx-rs = { version = "0.25.3", features = ["metal", "accelerate"] }
 mlx-macros = "0.25.3"
-mistralrs = { version = "0.8.1", features = ["metal"] }
+mistralrs = { version = "0.8.1", features = ["metal", "accelerate"] }
 candle-core = { version = "0.10.2", optional = true }
 unicode-width = "0.2"
 

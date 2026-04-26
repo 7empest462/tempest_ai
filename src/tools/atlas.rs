@@ -11,7 +11,6 @@ use walkdir::WalkDir;
 use colored::*;
 use std::sync::Arc;
 use parking_lot::Mutex;
-use ollama_rs::Ollama;
 use crate::vector_brain::VectorBrain;
 use crate::tui::AgentEvent;
 
@@ -173,14 +172,15 @@ impl AgentTool for ProjectAtlasTool {
 
                 fs::write(atlas_path, &output).into_diagnostic()?;
                 
-                // 🧠 SEMANTIC SYNC
+    // 🧠 SEMANTIC SYNC
                 let brain = context.vector_brain.clone();
-                let ollama = context.ollama.clone();
+                let backend = context.backend.clone();
                 let brain_path = context.brain_path.clone();
                 let tx = context.tx.clone();
                 
                 tokio::spawn(async move {
-                    if let Err(e) = run_semantic_indexing(&ollama, brain, &brain_path, true, tx).await {
+                    let b = backend.read().await;
+                    if let Err(e) = run_semantic_indexing(&*b, brain, &brain_path, true, tx).await {
                         eprintln!("{} Background indexing FAILED: {}", "❌".red().bold(), e);
                     }
                 });
@@ -193,14 +193,12 @@ impl AgentTool for ProjectAtlasTool {
 }
 
 pub async fn run_semantic_indexing(
-    ollama: &Ollama, 
+    backend: &crate::inference::Backend, 
     brain_lock: Arc<Mutex<VectorBrain>>, 
     brain_path: &Path, 
     force: bool,
     tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>
 ) -> Result<()> {
-    let embedding_model = "nomic-embed-text";
-
     let update = |msg: String| {
         let tx_clone = tx.clone();
         tokio::spawn(async move {
@@ -211,14 +209,6 @@ pub async fn run_semantic_indexing(
             }
         });
     };
-
-    // 🛡️ Upfront Verification: Check if nomic-embed-text is available
-    let models = ollama.list_local_models().await.into_diagnostic()?;
-    if !models.iter().any(|m| m.name.starts_with(embedding_model)) {
-        let err_msg = format!("❌ Embedding model '{}' not found. Conceptual brain disabled. Please run 'ollama pull {}' in your terminal.", embedding_model, embedding_model);
-        update(err_msg.red().bold().to_string());
-        return Err(miette!(err_msg));
-    }
 
     // 1. Check if we need to do anything
     {
@@ -292,22 +282,15 @@ pub async fn run_semantic_indexing(
             }
 
             for (i, chunk) in chunks.iter().enumerate() {
-                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                    embedding_model.to_string(),
-                    chunk.clone().into()
-                );
-
-                match ollama.generate_embeddings(req).await {
-                    Ok(res) => {
-                        if let Some(embedding) = res.embeddings.first() {
-                            let mut brain = brain_lock.lock();
-                            brain.add_entry(
-                                chunk.clone(), 
-                                embedding.clone(), 
-                                format!("{} (Chunk {})", path.to_string_lossy(), i + 1), 
-                                std::collections::HashMap::new()
-                            );
-                        }
+                match backend.generate_embeddings(chunk).await {
+                    Ok(embedding) => {
+                        let mut brain = brain_lock.lock();
+                        brain.add_entry(
+                            chunk.clone(), 
+                            embedding, 
+                            format!("{} (Chunk {})", path.to_string_lossy(), i + 1), 
+                            std::collections::HashMap::new()
+                        );
                     }
                     Err(e) => {
                         update(format!("⚠️ Failed to index {} chunk {}: {}", path.display(), i + 1, e).yellow().to_string());

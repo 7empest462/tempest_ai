@@ -68,6 +68,7 @@ pub struct App {
     pub sentinel_log: Vec<String>,
     pub engine_status: Option<String>,
     pub focused_pane: FocusedPane,
+    pub show_reasoning: bool,
 }
 
 impl App {
@@ -100,6 +101,7 @@ impl App {
             sentinel_log: Vec::new(),
             engine_status: None,
             focused_pane: FocusedPane::Chat,
+            show_reasoning: false,
         }
     }
 
@@ -333,10 +335,19 @@ pub async fn run_tui(
                             app.current_stream.clear();
                         }
                     } else {
+                        // Clear reasoning pane at the start of each new response
+                        if app.current_stream.is_empty() {
+                            app.reasoning_buffer.clear();
+                            app.reasoning_lines = 0;
+                            app.reasoning_scroll = 0;
+                            app.show_reasoning = false;
+                        }
                         app.current_stream.push_str(&token);
                     }
                 }
                 AgentEvent::ReasoningToken(token) => {
+                    app.show_reasoning = true;
+                    if token.is_empty() { continue; } // Marker for reasoning start
                     for c in token.chars() {
                         if c == '\n' {
                             app.reasoning_lines += 1;
@@ -393,8 +404,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         ].as_ref())
         .split(f.area());
 
-    // Main Content Area: Split horizontally if there's reasoning content
-    let main_chunks = if !app.reasoning_buffer.is_empty() {
+    // Main Content Area: Split horizontally if there's reasoning content or flag set
+    let main_chunks = if app.show_reasoning || !app.reasoning_buffer.is_empty() {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -419,7 +430,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Line::from(Span::styled("    | |  |  __| | |\\/| |  ___/|  __|  \\___ \\   | |   ", Style::default().fg(Color::Cyan))),
         Line::from(Span::styled("    | |  | |____| |  | | |    | |____ ____) |  | |   ", Style::default().fg(Color::Cyan))),
         Line::from(Span::styled("    |_|  |______|_|  |_|_|    |______|_____/   |_|   ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("🌪️  AUTONOMOUS AGENTIC CORE  🌪️", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(" 🌪️    AUTONOMOUS SYSTEMS ENGINEERING    🌪️ ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))),
     ];
     let header_block = Paragraph::new(logo)
         .alignment(ratatui::layout::Alignment::Center)
@@ -576,6 +587,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 "Compiler Guard" => "[G]",
                 "Build Watcher" => "[B]",
                 "Thermal Guard" => "[T]",
+                "Hallucination Guard" => "[H]",
                 _ => "[?]",
             };
             spans.push(Span::styled(format!("{} ", tag), Style::default().fg(Color::Cyan)));

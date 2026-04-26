@@ -13,6 +13,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "accelerate-src"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -903,12 +909,14 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
 dependencies = [
+ "accelerate-src",
  "byteorder",
  "candle-metal-kernels",
  "candle-ug",
  "float8",
  "gemm 0.19.0",
  "half",
+ "libc",
  "libm",
  "memmap2",
  "num-traits",
@@ -946,6 +954,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
 dependencies = [
+ "accelerate-src",
  "candle-core",
  "candle-metal-kernels",
  "half",
@@ -8820,9 +8829,9 @@ dependencies = [
 
 [[package]]
 name = "tempest-monitor"
-version = "0.3.4"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0654574e4b83fa5a888fdfbb2a62abd291ba5d1920ee3c66758fd55a7a825ad5"
+checksum = "83515ca7ad23e75dc76a1d581d8acdefc8734cdffe3aa4e67b7894272e6a6a61"
 dependencies = [
  "battery",
  "chrono",

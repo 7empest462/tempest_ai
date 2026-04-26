@@ -22,7 +22,7 @@ pub struct SystemTelemetryTool;
 
 #[async_trait]
 impl AgentTool for SystemTelemetryTool {
-    fn name(&self) -> &'static str { "system_diagnostic_scan" }
+    fn name(&self) -> &'static str { "system_telemetry" }
     fn description(&self) -> &'static str { 
         "Performs a COMPLETE SYSTEM DIAGNOSTIC SCAN (Hardware, GPU, Services, Network, SSD). This is your primary tool for all 'checks' and 'scans'. Use extensive=true for deep sweeps."
     }
@@ -188,7 +188,7 @@ impl AgentTool for SystemTelemetryTool {
             // Refine error check: ignore common Launchd non-zero codes (1, 78) that aren't necessarily failures
             let errors = services.iter().filter(|s| {
                 if cfg!(target_os = "macos") {
-                    s.status != 0 && s.status != 1 && s.status != 78 && s.status != 0
+                    s.status != 0 && s.status != 1 && s.status != 78
                 } else {
                     s.status != 0
                 }

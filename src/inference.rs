@@ -11,11 +11,15 @@ use ollama_rs::{
 };
 use futures::StreamExt;
 use std::sync::Arc;
+use regex::Regex;
 
 #[cfg(feature = "mlx")]
 use mistralrs::{
     GgufModelBuilder, Model, TextMessageRole, 
-    Response as MistralResponse, RequestBuilder, SamplingParams
+    Response as MistralResponse, RequestBuilder, SamplingParams,
+    Tool, ToolChoice, Function, ToolType,
+    PagedAttentionMetaBuilder, MemoryGpuConfig,
+    EmbeddingModelBuilder, EmbeddingRequest
 };
 use crate::tui::AgentEvent;
 
@@ -28,7 +32,10 @@ pub enum AgentMode {
 pub enum Backend {
     Ollama(Ollama),
     #[cfg(feature = "mlx")]
-    MLX(Model),
+    MLX {
+        model: Model,
+        embedder: Option<Model>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,18 +57,14 @@ impl Backend {
         match self {
             Backend::Ollama(_) => AgentMode::Ollama,
             #[cfg(feature = "mlx")]
-            Backend::MLX(_) => AgentMode::MLX,
+            Backend::MLX { .. } => AgentMode::MLX,
         }
     }
 
-    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>) -> (Self, String) {
+    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>) -> Result<(Self, String)> {
         match mode {
             AgentMode::Ollama => {
-                let tx_opt = event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🚀 Connecting to Ollama Backend...".to_string()))).await;
-                }
-                (Backend::Ollama(Ollama::default()), model)
+                Ok((Backend::Ollama(Ollama::default()), model))
             }
             AgentMode::MLX => {
                 #[cfg(feature = "mlx")]
@@ -75,20 +78,11 @@ impl Backend {
                         println!("{} Note: Downloading/Verifying model from Hugging Face if not cached...", "📦".blue());
                     }
                     
-                    // Disabled PagedAttention temporarily to troubleshoot Metal hangs. 
-                    // We will use standard attention which is more stable on some M4 configurations.
-                    /*
-                    let paged_attn_cfg = PagedAttentionMetaBuilder::default()
-                        .with_gpu_memory(MemoryGpuConfig::ContextSize(16384))
-                        .build()
-                        .expect("Failed to build PagedAttention config");
-                    */
-
                     let tx_opt = event_tx.lock().clone();
                     if let Some(tx) = tx_opt {
                         let _ = tx.send(AgentEvent::SubagentStatus(Some("⚡ [MLX]: Allocating Metal KV Cache (16k context)...".to_string()))).await;
                     } else {
-                        println!("{} [MLX]: Allocating Metal KV Cache (16k context)...", "⚡".yellow());
+                        println!("{} [MLX]: Allocating Paged Attention KV Cache (M4 Optimized)...", "⚡".yellow());
                     }
 
                     let (repo, filename_prefix) = if model.contains("/") {
@@ -104,28 +98,33 @@ impl Backend {
                     };
 
                     let gguf_file = format!("{}-{}.gguf", filename_prefix, quant);
+                    let paged_attn_cfg = PagedAttentionMetaBuilder::default()
+                        .with_block_size(32)
+                        .with_gpu_memory(MemoryGpuConfig::ContextSize(16384))
+                        .build()
+                        .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
+
                     let mlx_model = GgufModelBuilder::new(
                         &repo, 
                         vec![gguf_file.clone()]
                     )
-                    // .with_paged_attn(paged_attn_cfg) // Disabled for stability
+                    .with_paged_attn(paged_attn_cfg)
+                    .with_logging()
                     .with_max_num_seqs(1)
                     .build()
                     .await
-                    .expect("Failed to load MLX model");
+                    .map_err(|e| miette!("Failed to load MLX model: {}", e))?;
 
-                    let tx_opt = event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.send(AgentEvent::SubagentStatus(Some("✅ MLX model loaded successfully on Apple Silicon".to_string()))).await;
-                    } else {
-                        println!("{} MLX model loaded successfully on Apple Silicon", "✅".green());
-                    }
+                    let embed_model = EmbeddingModelBuilder::new("sentence-transformers/all-MiniLM-L6-v2")
+                        .build()
+                        .await
+                        .ok(); // Fallback to None if embedding model fails to load
 
-                    (Backend::MLX(mlx_model), model)
+                    Ok((Backend::MLX { model: mlx_model, embedder: embed_model }, model))
                 }
                 #[cfg(not(feature = "mlx"))]
                 {
-                    (Backend::Ollama(Ollama::default()), model)
+                    Ok((Backend::Ollama(Ollama::default()), model))
                 }
             }
         }
@@ -139,7 +138,8 @@ impl Backend {
         event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         _system_prompt: String,
-        mut on_tool_call: Option<Box<dyn FnMut(ollama_rs::generation::tools::ToolCall) + Send>>,
+        on_tool_call: Option<tokio::sync::mpsc::UnboundedSender<ollama_rs::generation::tools::ToolCall>>,
+        tool_registry: Option<Vec<ollama_rs::generation::tools::ToolInfo>>,
     ) -> Result<InferenceOutput> {
         let mut full_content = String::new();
         let mut reasoning_content = String::new();
@@ -155,23 +155,41 @@ impl Backend {
 
         match self {
             Backend::Ollama(ollama) => {
-                let request = ChatMessageRequest::new(model, history).options(options);
-                
+                let mut request = ChatMessageRequest::new(model, history).options(options);
+                if let Some(registry) = tool_registry {
+                    request = request.tools(registry);
+                }
+
                 let tx = event_tx.lock().clone();
                 if let Some(tx) = tx {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
                 }
-
+                
                 let mut stream = ollama.send_chat_messages_stream(request).await.into_diagnostic()?;
                 let mut is_thinking = false;
                 let mut first_token = true;
                 let mut last_segments: Vec<String> = Vec::new();
                 let mut tag_residue = String::new();
+                let mut in_thought_block = false;
 
                 while let Some(res) = stream.next().await {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     let chunk = res.map_err(|_| miette!("Ollama stream error"))?;
                     
+                    let mut got_native_thinking = false;
+                    let mut received_any_token = false;
+                    // Handle native thinking field from Ollama (DeepSeek R1)
+                    if let Some(thinking) = &chunk.message.thinking {
+                        if !thinking.is_empty() {
+                            got_native_thinking = true;
+                            received_any_token = true;
+                            reasoning_content.push_str(thinking);
+                            if let Some(tx) = event_tx.lock().clone() {
+                                let _ = tx.try_send(AgentEvent::ReasoningToken(thinking.to_string()));
+                            }
+                        }
+                    }
+
                     let mut text = tag_residue.clone();
                     text.push_str(&chunk.message.content);
                     tag_residue.clear();
@@ -179,56 +197,89 @@ impl Backend {
                     // --- 🧠 STREAMING REASONING EXTRACTION (Cross-Chunk Robust) ---
                     let mut current_pos = 0;
                     while current_pos < text.len() {
-                        if !is_thinking {
-                            if let Some(start_idx) = text[current_pos..].find("<think>") {
-                                // Content before <think>
-                                let before = &text[current_pos..current_pos + start_idx];
-                                if !before.is_empty() {
-                                    full_content.push_str(before);
+                        if !is_thinking && !in_thought_block {
+                            // Detect implicit thinking at the absolute start of response (skipping whitespace)
+                            if first_token && !text.trim().is_empty() {
+                                let trimmed_start = text.trim_start();
+                                let lower = trimmed_start.to_lowercase();
+                                let implicit_phrases = [
+                                    "alright", "okay", "so,", "hmm", "thinking", "let me", "sure", 
+                                    "certainly", "absolutely", "i'll", "let's", "i need to", "first,",
+                                    "alright,", "okay,"
+                                ];
+                                if implicit_phrases.iter().any(|&p| lower.starts_with(p)) {
+                                    in_thought_block = true;
+                                    // Signal reasoning start immediately
                                     if let Some(tx) = event_tx.lock().clone() {
-                                        let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
                                     }
                                 }
-                                is_thinking = true;
-                                current_pos += start_idx + 7; // Skip "<think>"
-                            } else if let Some(last_lt) = text[current_pos..].rfind('<') {
-                                // Potential partial tag at end of chunk
-                                let pot_tag = &text[current_pos + last_lt..];
-                                if "<think>".starts_with(pot_tag) {
-                                    // It's a potential start tag - buffer it
-                                    let before = &text[current_pos..current_pos + last_lt];
+                            }
+
+                            if !in_thought_block {
+                                if let Some(start_idx) = text[current_pos..].find("<think>") {
+                                    // Content before <think>
+                                    let before = &text[current_pos..current_pos + start_idx];
                                     if !before.is_empty() {
                                         full_content.push_str(before);
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
                                         }
                                     }
-                                    tag_residue = pot_tag.to_string();
-                                    break;
-                                } else {
-                                    // Not a tag, just a normal bracket
-                                    let content = &text[current_pos..];
-                                    full_content.push_str(content);
-                                    if let Some(tx) = event_tx.lock().clone() {
-                                        let _ = tx.try_send(AgentEvent::StreamToken(content.to_string()));
+                                    is_thinking = true;
+                                    current_pos += start_idx + 7; // Skip "<think>"
+                                    continue;
+                                } else if let Some(found_pos) = {
+                                    let upper = text[current_pos..].to_uppercase();
+                                    ["THOUGHT:", "PLAN:", "REASONING:", "ANALYSIS:"].iter()
+                                        .filter_map(|&marker| upper.find(marker).map(|idx| (idx, marker.len())))
+                                        .min_by_key(|&(idx, _)| idx)
+                                } {
+                                    let (found_idx, marker_len) = found_pos;
+                                    let sub = &text[current_pos..];
+                                    
+                                    // Check for optional leading asterisks (e.g., **THOUGHT:)
+                                    let mut start_idx = found_idx;
+                                    while start_idx > 0 && sub.as_bytes()[start_idx - 1] == b'*' {
+                                        start_idx -= 1;
                                     }
-                                    break;
+
+                                    let before = &sub[..start_idx];
+                                    // Content before marker (unless it's just filler we already handled or want to ignore)
+                                    if !before.trim().is_empty() {
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                        }
+                                        full_content.push_str(before);
+                                    }
+
+                                    in_thought_block = true;
+                                    
+                                    // Signal reasoning start immediately
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                    }
+
+                                    // Move current_pos past marker and any trailing colon/asterisks/spaces
+                                    let mut end_idx = found_idx + marker_len;
+                                    while end_idx < sub.len() && (sub.as_bytes()[end_idx] == b':' || sub.as_bytes()[end_idx] == b'*' || sub.as_bytes()[end_idx] == b' ') {
+                                        end_idx += 1;
+                                    }
+                                    current_pos += end_idx;
+                                    continue;
                                 }
-                            } else {
-                                let remaining = &text[current_pos..];
-                                full_content.push_str(remaining);
-                                if let Some(tx) = event_tx.lock().clone() {
-                                    let _ = tx.try_send(AgentEvent::StreamToken(remaining.to_string()));
-                                }
-                                break;
                             }
-                        } else {
+                        }
+
+                        if is_thinking {
                             if let Some(end_idx) = text[current_pos..].find("</think>") {
                                 // Reasoning before </think>
                                 let reasoning = &text[current_pos..current_pos + end_idx];
-                                reasoning_content.push_str(reasoning);
-                                if let Some(tx) = event_tx.lock().clone() {
-                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                if !got_native_thinking {
+                                    reasoning_content.push_str(reasoning);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    }
                                 }
                                 is_thinking = false;
                                 current_pos += end_idx + 8; // Skip "</think>"
@@ -237,7 +288,7 @@ impl Backend {
                                 let pot_tag = &text[current_pos + last_lt..];
                                 if "</think>".starts_with(pot_tag) {
                                     let before = &text[current_pos..current_pos + last_lt];
-                                    if !before.is_empty() {
+                                    if !before.is_empty() && !got_native_thinking {
                                         reasoning_content.push_str(before);
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::ReasoningToken(before.to_string()));
@@ -247,11 +298,66 @@ impl Backend {
                                     break;
                                 } else {
                                     let content = &text[current_pos..];
-                                    reasoning_content.push_str(content);
-                                    if let Some(tx) = event_tx.lock().clone() {
-                                        let _ = tx.try_send(AgentEvent::ReasoningToken(content.to_string()));
+                                    if !got_native_thinking {
+                                        reasoning_content.push_str(content);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::ReasoningToken(content.to_string()));
+                                        }
                                     }
                                     break;
+                                }
+                            } else {
+                                let remaining = &text[current_pos..];
+                                if !got_native_thinking {
+                                    reasoning_content.push_str(remaining);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                    }
+                                }
+                                break;
+                            }
+                        } else if in_thought_block {
+                            // If we're in a THOUGHT: block, we look for the first JSON block or DONE: to end it
+                            if let Some(json_idx) = text[current_pos..].find("```json") {
+                                let reasoning = &text[current_pos..current_pos + json_idx];
+                                reasoning_content.push_str(reasoning);
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                }
+                                in_thought_block = false;
+                                current_pos += json_idx; // Don't skip ```json, it belongs to full_content
+                            } else if let Some(done_idx) = text[current_pos..].find("DONE:") {
+                                let reasoning = &text[current_pos..current_pos + done_idx];
+                                reasoning_content.push_str(reasoning);
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                }
+                                in_thought_block = false;
+                                current_pos += done_idx; // Don't skip DONE:
+                            } else if let Some(newline_idx) = text[current_pos..].find("\n\n") {
+                                // Heuristic: If we see a double newline and then a transition phrase, end thoughts
+                                let after_nl = &text[current_pos + newline_idx + 2..];
+                                let lower = after_nl.to_lowercase();
+                                let transitions = [
+                                    "i will", "i'll", "i'm going to", "now", "starting", "let's begin",
+                                    "here is", "i have", "first,"
+                                ];
+                                
+                                if transitions.iter().any(|&t| lower.starts_with(t)) {
+                                    let reasoning = &text[current_pos..current_pos + newline_idx];
+                                    reasoning_content.push_str(reasoning);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    }
+                                    in_thought_block = false;
+                                    current_pos += newline_idx;
+                                } else {
+                                    let reasoning = &text[current_pos..current_pos + newline_idx + 2];
+                                    reasoning_content.push_str(reasoning);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    }
+                                    current_pos += newline_idx + 2;
                                 }
                             } else {
                                 let remaining = &text[current_pos..];
@@ -262,26 +368,31 @@ impl Backend {
                                 break;
                             }
                         }
-                    }
-
-                    if first_token && !full_content.is_empty() {
-                        first_token = false;
-                        if let Some(tx) = event_tx.lock().clone() {
-                            let _ = tx.try_send(AgentEvent::Thinking(None));
+                        if !text[current_pos..].is_empty() {
+                             received_any_token = true;
                         }
                     }
 
+                    if first_token && received_any_token {
+                        first_token = false;
+                        if let Some(tx) = event_tx.lock().clone() {
+                            let _ = tx.try_send(AgentEvent::Thinking(None));
+                            let _ = tx.try_send(AgentEvent::SubagentStatus(None));
+                        }
+                    }
+
+
                     if !chunk.message.tool_calls.is_empty() {
                         for call in chunk.message.tool_calls {
-                            if let Some(ref mut cb) = on_tool_call {
-                                cb(call.clone());
+                            if let Some(ref tx) = on_tool_call {
+                                let _ = tx.send(call.clone());
                             }
                             native_tool_calls.push(call);
                         }
                     }
 
                     // --- 🛡️ REPETITION SENTINEL ---
-                    let trimmed = text.trim();
+                    let trimmed = chunk.message.content.trim();
                     if !trimmed.is_empty() && trimmed.len() > 3 {
                         last_segments.push(trimmed.to_string());
                         if last_segments.len() > 15 { last_segments.remove(0); }
@@ -298,8 +409,8 @@ impl Backend {
                 }
             }
             #[cfg(feature = "mlx")]
-            Backend::MLX(mistralrs) => {
-                let _on_tool_call = on_tool_call; // Currently unused in MLX
+            Backend::MLX { model: mistralrs, .. } => {
+                let on_tool_call = on_tool_call;
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
                     let _ = tx.try_send(AgentEvent::Thinking(Some("Thinking...".to_string())));
@@ -320,27 +431,96 @@ impl Backend {
                     }
                 }
                 
+                let model_lower = model.to_lowercase();
+                let is_reasoning_model = model_lower.contains("deepseek") || model_lower.contains("r1");
+
                 let merged_system = system_content.join("\n\n");
-                let mut system_injected = false;
+                
+                // If it's a reasoning model, we often get better results merging system into the first user msg
+                if is_reasoning_model && !other_messages.is_empty() {
+                    let first_msg = other_messages.remove(0);
+                    let combined = format!("### SYSTEM DIRECTIVE ###\n{}\n\n### USER REQUEST ###\n{}", merged_system, first_msg.content);
+                    request_builder = request_builder.add_message(TextMessageRole::User, combined);
+                } else if !merged_system.is_empty() {
+                    request_builder = request_builder.add_message(TextMessageRole::System, merged_system);
+                }
 
                 for msg in other_messages {
-                    let role = match msg.role {
-                        MessageRole::User => TextMessageRole::User,
-                        MessageRole::Assistant => TextMessageRole::Assistant,
-                        _ => TextMessageRole::User,
-                    };
-                    
-                    let mut content = msg.content;
-                    if role == TextMessageRole::User && !system_injected && !merged_system.is_empty() {
-                        content = format!("### SYSTEM INSTRUCTIONS ###\n{}\n\n### USER REQUEST ###\n{}", merged_system, content);
-                        system_injected = true;
+                    match msg.role {
+                        MessageRole::User => {
+                            request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
+                        }
+                        MessageRole::Assistant => {
+                            if !msg.tool_calls.is_empty() {
+                                // Convert Ollama ToolCalls to Mistral ToolCallResponses
+                                let mut mistral_calls = Vec::new();
+                                for (i, c) in msg.tool_calls.iter().enumerate() {
+                                    mistral_calls.push(mistralrs::ToolCallResponse {
+                                        index: i,
+                                        id: format!("call_{}", i), // Synthetic ID for ollama-rs compatibility
+                                        tp: mistralrs::ToolCallType::Function,
+                                        function: mistralrs::CalledFunction {
+                                            name: c.function.name.clone(),
+                                            arguments: c.function.arguments.to_string(),
+                                        },
+                                    });
+                                }
+                                
+                                request_builder = request_builder.add_message_with_tool_call(
+                                    TextMessageRole::Assistant,
+                                    msg.content,
+                                    mistral_calls
+                                );
+                            } else {
+                                request_builder = request_builder.add_message(TextMessageRole::Assistant, msg.content);
+                            }
+                        }
+                        MessageRole::Tool => {
+                            // Link tool results back to synthetic IDs (assuming sequential order for now)
+                            let call_id = "call_0".to_string(); 
+                            request_builder = request_builder.add_tool_message(msg.content, call_id);
+                        }
+                        _ => {
+                            request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
+                        }
                     }
-                    
-                    request_builder = request_builder.add_message(role, content);
                 }
-                
-                if !system_injected && !merged_system.is_empty() {
-                    request_builder = request_builder.add_message(TextMessageRole::User, format!("### SYSTEM INSTRUCTIONS ###\n{}", merged_system));
+
+                if is_reasoning_model {
+                    request_builder = request_builder.enable_thinking(true);
+                }
+
+                // --- 🛠️ NATIVE TOOL CALLING (MLX) ---
+                if let Some(registry) = tool_registry {
+                    let mut mistral_tools = Vec::new();
+                    for tool in registry {
+                        // Convert Ollama ToolInfo to mistralrs Tool
+                        let mistral_tool = Tool {
+                            tp: ToolType::Function,
+                            function: Function {
+                                name: tool.function.name.clone(),
+                                description: Some(tool.function.description.clone()),
+                                parameters: {
+                                    // Extract properties from Ollama Schema
+                                    let schema_val = serde_json::to_value(&tool.function.parameters).unwrap_or(serde_json::json!({}));
+                                    if let Some(props) = schema_val.get("properties").and_then(|p| p.as_object()) {
+                                        let mut map = std::collections::HashMap::new();
+                                        for (k, v) in props {
+                                            map.insert(k.clone(), v.clone());
+                                        }
+                                        Some(map)
+                                    } else {
+                                        None
+                                    }
+                                },
+                            },
+                        };
+                        mistral_tools.push(mistral_tool);
+                    }
+                        if !mistral_tools.is_empty() {
+                            request_builder = request_builder.set_tools(mistral_tools);
+                            request_builder = request_builder.set_tool_choice(ToolChoice::Auto);
+                        }
                 }
 
                 // Apply backend-aware sampling parameters to MLX via direct SamplingParams configuration
@@ -349,12 +529,12 @@ impl Backend {
                 sampling_params.top_p = Some(sampling.top_p.into());
                 sampling_params.top_k = Some(40);
                 sampling_params.repetition_penalty = Some(sampling.repeat_penalty as f32);
-                sampling_params.max_len = Some(8192);
+                sampling_params.max_len = Some(16384);
                 request_builder = request_builder.set_sampling(sampling_params);
 
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt.as_ref() {
-                    let _ = tx.try_send(AgentEvent::SubagentStatus(Some("⚡ MLX Engine: Pre-filling KV cache...".to_string())));
+                    let _ = tx.try_send(AgentEvent::SubagentStatus(Some("⚡ MLX Engine: Dispatching Request to Metal...".to_string())));
                 }
 
                 let mut stream = mistralrs.stream_chat_request(request_builder).await.into_diagnostic()?;
@@ -364,33 +544,95 @@ impl Backend {
                 }
 
                 let mut first_token = true;
-                let mut is_thinking = false;
+                let mut is_thinking = is_reasoning_model; 
                 let mut tag_residue = String::new();
+                let mut in_thought_block = false;
+
+                if is_thinking {
+                    if let Some(tx) = event_tx.lock().clone() {
+                        let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                    }
+                }
+                let mut last_segments: Vec<String> = Vec::new();
+                let mut should_break = false;
                 
                 while let Some(response) = stream.next().await {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) || should_break { break; }
                     match response {
                         MistralResponse::Chunk(chunk) => {
+                            // Forward tool calls if present (future-proofing)
+                            if let Some(tool_calls) = &chunk.choices[0].delta.tool_calls {
+                                for call in tool_calls {
+                                    // Map mistralrs tool call to ollama_rs tool call
+                                    let mapped_call = ollama_rs::generation::tools::ToolCall {
+                                        function: ollama_rs::generation::tools::ToolCallFunction {
+                                            name: call.function.name.clone(),
+                                            arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
+                                        }
+                                    };
+                                    if let Some(ref tx) = on_tool_call {
+                                        let _ = tx.send(mapped_call.clone());
+                                    }
+                                    native_tool_calls.push(mapped_call);
+                                }
+                            }
+
+                            if let Some(reasoning) = &chunk.choices[0].delta.reasoning_content {
+                                if !reasoning.is_empty() {
+                                    reasoning_content.push_str(reasoning);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    }
+                                    if first_token {
+                                        first_token = false;
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::Thinking(None));
+                                            let _ = tx.try_send(AgentEvent::SubagentStatus(None));
+                                        }
+                                    }
+                                }
+                            }
+
                             if let Some(content) = &chunk.choices[0].delta.content {
-                                let mut text = tag_residue.clone();
+                                 let mut text = tag_residue.clone();
                                 text.push_str(content);
                                 tag_residue.clear();
 
-                                 if first_token {
-                                     if text.len() >= 10 || !text.starts_with("<") {
-                                         first_token = false;
-                                         if !text.contains("<think>") {
-                                             if let Some(tx) = event_tx.lock().clone() {
-                                                 let _ = tx.try_send(AgentEvent::Thinking(None));
-                                             }
-                                         }
-                                     }
-                                 }
-
                                 // --- 🧠 STREAMING REASONING EXTRACTION (MLX Cross-Chunk) ---
                                 let mut current_pos = 0;
+                                
+                                // Detect implicit thinking at the absolute start of response (MLX Standalone)
+                                // We do this BEFORE consuming first_token so we can catch "Alright..." etc.
+                                if first_token && !text.trim().is_empty() {
+                                    let trimmed_start = text.trim_start();
+                                    let lower = trimmed_start.to_lowercase();
+                                    let implicit_phrases = [
+                                        "alright", "okay", "so,", "hmm", "thinking", "let me", "sure", 
+                                        "certainly", "absolutely", "i'll", "let's", "i need to", "first,",
+                                        "alright,", "okay,"
+                                    ];
+                                    if implicit_phrases.iter().any(|&p| lower.starts_with(p)) {
+                                        in_thought_block = true;
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                        }
+                                    }
+                                }
+
+                                if first_token {
+                                    if text.len() >= 10 || !text.starts_with("<") {
+                                        first_token = false;
+                                        if !text.contains("<think>") {
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::Thinking(None));
+                                                let _ = tx.try_send(AgentEvent::SubagentStatus(None));
+                                            }
+                                        }
+                                    }
+                                }
+
                                 while current_pos < text.len() {
-                                    if !is_thinking {
+                                    if !is_thinking && !in_thought_block {
                                         if let Some(start_idx) = text[current_pos..].find("<think>") {
                                             let before = &text[current_pos..current_pos + start_idx];
                                             if !before.is_empty() {
@@ -400,7 +642,63 @@ impl Backend {
                                                 }
                                             }
                                             is_thinking = true;
-                                            current_pos += start_idx + 7;
+                                        } else if let Some(found_pos) = {
+                                            let upper = text[current_pos..].to_uppercase();
+                                            ["THOUGHT:", "PLAN:", "REASONING:", "ANALYSIS:"].iter()
+                                                .filter_map(|&marker| upper.find(marker).map(|idx| (idx, marker.len())))
+                                                .min_by_key(|&(idx, _)| idx)
+                                        } {
+                                            let (found_idx, marker_len) = found_pos;
+                                            let sub = &text[current_pos..];
+                                            let mut is_implicit_thinking = false;
+                                            
+                                            let mut start_idx = found_idx;
+                                            while start_idx > 0 && sub.as_bytes()[start_idx - 1] == b'*' {
+                                                start_idx -= 1;
+                                            }
+
+                                            let before = &sub[..start_idx];
+                                            if !before.is_empty() {
+                                                // SMOTHER PREAMBLE & DETECT IMPLICIT THINKING (MLX)
+                                                let trimmed = before.trim();
+                                                let lower = trimmed.to_lowercase();
+                                                
+                                                let is_filler = ["sure", "okay", "i can", "here is", "i will", "certainly", "alright"].iter()
+                                                    .any(|&filler| lower.starts_with(filler) || lower == filler);
+                                                
+                                                is_implicit_thinking = first_token && (
+                                                    lower.starts_with("alright, so") || 
+                                                    lower.starts_with("okay, so") || 
+                                                    lower.starts_with("so, the user") ||
+                                                    lower.starts_with("hmm")
+                                                );
+
+                                                if is_implicit_thinking {
+                                                    in_thought_block = true;
+                                                    if let Some(tx) = event_tx.lock().clone() {
+                                                        let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                                    }
+                                                } else if !is_filler || trimmed.len() > 40 {
+                                                    if let Some(tx) = event_tx.lock().clone() {
+                                                        let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                                    }
+                                                    full_content.push_str(before);
+                                                }
+                                            }
+
+                                            if !is_implicit_thinking {
+                                                in_thought_block = true;
+                                                
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                                }
+                                            }
+
+                                            let mut end_idx = found_idx + marker_len;
+                                            while end_idx < sub.len() && (sub.as_bytes()[end_idx] == b':' || sub.as_bytes()[end_idx] == b'*' || sub.as_bytes()[end_idx] == b' ') {
+                                                end_idx += 1;
+                                            }
+                                            current_pos += end_idx;
                                         } else if let Some(last_lt) = text[current_pos..].rfind('<') {
                                             let pot_tag = &text[current_pos + last_lt..];
                                             if "<think>".starts_with(pot_tag) {
@@ -429,8 +727,8 @@ impl Backend {
                                             }
                                             break;
                                         }
-                                    } else {
-                                        if let Some(end_idx) = text[current_pos..].find("</think>") {
+                                    } else if is_thinking {
+                                    if let Some(end_idx) = text[current_pos..].find("</think>") {
                                             let reasoning = &text[current_pos..current_pos + end_idx];
                                             reasoning_content.push_str(reasoning);
                                             if let Some(tx) = event_tx.lock().clone() {
@@ -443,6 +741,7 @@ impl Backend {
                                                 first_token = false;
                                                 if let Some(tx) = event_tx.lock().clone() {
                                                     let _ = tx.try_send(AgentEvent::Thinking(None));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(None));
                                                 }
                                             }
                                         } else if let Some(last_lt) = text[current_pos..].rfind('<') {
@@ -473,12 +772,122 @@ impl Backend {
                                             }
                                             break;
                                         }
+                                    } else if in_thought_block {
+                                        if let Some(json_idx) = text[current_pos..].find("```json") {
+                                            let reasoning = &text[current_pos..current_pos + json_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            in_thought_block = false;
+                                            current_pos += json_idx;
+                                        } else if let Some(done_idx) = text[current_pos..].find("DONE:") {
+                                            let reasoning = &text[current_pos..current_pos + done_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            in_thought_block = false;
+                                            current_pos += done_idx;
+                                        } else if let Some(newline_idx) = text[current_pos..].find("\n\n") {
+                                            // Heuristic: Transition from thought to message (MLX)
+                                            let after_nl = &text[current_pos + newline_idx + 2..];
+                                            let lower = after_nl.to_lowercase();
+                                            let transitions = [
+                                                "i will", "i'll", "i'm going to", "now", "starting", "let's begin",
+                                                "here is", "i have", "first,"
+                                            ];
+                                            
+                                            if transitions.iter().any(|&t| lower.starts_with(t)) {
+                                                let reasoning = &text[current_pos..current_pos + newline_idx];
+                                                reasoning_content.push_str(reasoning);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                                }
+                                                in_thought_block = false;
+                                                current_pos += newline_idx;
+                                            } else {
+                                                let reasoning = &text[current_pos..current_pos + newline_idx + 2];
+                                                reasoning_content.push_str(reasoning);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                                }
+                                                current_pos += newline_idx + 2;
+                                            }
+                                        } else {
+                                            let remaining = &text[current_pos..];
+                                            reasoning_content.push_str(remaining);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // --- 🛡️ REPETITION SENTINEL (MLX) ---
+                                let trimmed = content.trim();
+                                if !trimmed.is_empty() && trimmed.len() > 3 {
+                                    last_segments.push(trimmed.to_string());
+                                    if last_segments.len() > 15 { last_segments.remove(0); }
+                                    if last_segments.iter().filter(|&s| s == trimmed).count() >= 8 {
+                                        let warning = "\n\n⚠️ [REPETITION SENTINEL]: Breaking loop to prevent hallucination plateau.";
+                                        full_content.push_str(warning);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::StreamToken(warning.to_string()));
+                                        }
+                                        should_break = true;
                                     }
                                 }
                             }
                         }
                         MistralResponse::ModelError(e, _) => return Err(miette!("MLX Model Error: {}", e)),
                         _ => {}
+                    }
+                }
+            }
+        }
+
+        // --- 🛠️ FALLBACK JSON TOOL PARSER (MLX) ---
+        // If native_tool_calls is empty but full_content has JSON blocks, parse them manually.
+        // This is critical for models like DeepSeek-R1 that may hallucinate the native format
+        // but correctly output the JSON in the text content.
+        if native_tool_calls.is_empty() && !full_content.is_empty() {
+            // Match ```json { "name": "...", "arguments": { ... } } ```
+            let re_json = Regex::new(r"(?s)```json\s*(\{.*?\})\s*```").unwrap();
+            for cap in re_json.captures_iter(&full_content) {
+                if let Some(json_str) = cap.get(1) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.as_str()) {
+                        if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
+                            let arguments = val.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                    name: name.to_string(),
+                                    arguments,
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            
+            // Second pass: Catch naked JSON blocks if no code blocks were found
+            if native_tool_calls.is_empty() {
+                // Look for { "name": "...", "arguments": { ... } }
+                let re_naked = Regex::new(r#"(?s)\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}"#).unwrap();
+                for cap in re_naked.captures_iter(&full_content) {
+                    let name = cap.get(1).map(|m| m.as_str().to_string());
+                    let args_str = cap.get(2).map(|m| m.as_str());
+                    
+                    if let (Some(name), Some(args_str)) = (name, args_str) {
+                        if let Ok(arguments) = serde_json::from_str::<serde_json::Value>(args_str) {
+                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                    name,
+                                    arguments,
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -508,7 +917,32 @@ impl Backend {
                 ).await;
             }
             #[cfg(feature = "mlx")]
-            Backend::MLX(_) => {
+            Backend::MLX { .. } => {
+            }
+        }
+    }
+
+    pub async fn generate_embeddings(&self, text: &str) -> Result<Vec<f32>> {
+        match self {
+            Backend::Ollama(ollama) => {
+                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                    "all-minilm".to_string(), 
+                    text.to_string().into()
+                );
+                let res = ollama.generate_embeddings(req).await
+                    .map_err(|e| miette!("Ollama embedding failed: {}", e))?;
+                Ok(res.embeddings.first().cloned().unwrap_or_default())
+            }
+            #[cfg(feature = "mlx")]
+            Backend::MLX { embedder, .. } => {
+                if let Some(embed) = embedder {
+                    let request = EmbeddingRequest::builder().add_prompt(format!("passage: {}", text));
+                    let res = embed.generate_embeddings(request).await
+                        .map_err(|e| miette!("MLX embedding failed: {}", e))?;
+                    Ok(res.first().cloned().unwrap_or_default())
+                } else {
+                    Err(miette!("MLX Embedder not loaded"))
+                }
             }
         }
     }

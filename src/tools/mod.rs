@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 #[derive(Clone)]
 pub struct ToolContext {
     pub ollama: Ollama,
+    pub backend: Arc<tokio::sync::RwLock<crate::inference::Backend>>,
     #[allow(dead_code)] pub model: String,
     pub sub_agent_model: String,
     #[allow(dead_code)] pub history: Arc<Mutex<Vec<ChatMessage>>>,

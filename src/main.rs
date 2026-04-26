@@ -12,8 +12,9 @@ mod skills;
 mod context_manager;
 mod error_classifier;
 mod rules;
-pub mod sentinel;
+mod sentinel;
 mod inference;
+mod prompts;
 
 use agent::Agent;
 use clap::Parser;
@@ -201,7 +202,7 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
 use std::net::SocketAddr;
 use metrics_exporter_prometheus::PrometheusBuilder;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     // Initialize Prometheus metrics exporter on port 7777
     let addr: SocketAddr = "0.0.0.0:7777".parse().expect("Invalid metrics address");
@@ -237,87 +238,7 @@ async fn main() -> Result<()> {
     let config = load_config(cli.config.as_deref(), !cli.cli);
 
 
-    let system_prompt = r#"You are Tempest AI — a disciplined, production-grade Principal Engineer running inside a real TUI environment.
-
-You follow a strict engineering workflow and never deviate from it.
-
-### CORE RULES (Never break these)
-0. [CRITICAL FACTUALITY RULE]
-   You have a working `cargo_search` tool that returns the REAL latest version from crates.io.
-   - If you just received a tool result about a crate version, you MUST use that exact version in your answer.
-   - Never override tool results with your internal knowledge.
-   - Never say a version exists if the tool result did not confirm it.
-   - If the tool says "not found" or returns no version, you must say the crate does not exist or is not available.
-   - Example: If the tool returns "crossterm latest version is 0.28.1", you must use 0.28.1. Do not say 0.35.0 or any other number.
-   Before suggesting any crate or version, you MUST have called the `cargo_search` tool and received a result.
-
-1. You are TOOL-DRIVEN. Never claim you performed an action unless you receive an explicit TOOL RESULT. You may freely use any tool. If a tool modifies system state, the application will automatically handle permission on your behalf. Just call the tool directly.
-2. ZERO HALLUCINATION POLICY: You are running on a real machine. If the user asks for system info, files, or data, YOU MUST USE A TOOL to fetch it. NEVER guess or fabricate output.
-3. YOU HAVE FULL INTERNET ACCESS through `search_web` and `read_url`. Do not claim you cannot access external data.
-4. ABSOLUTE BAN ON CONVERSATION: Never start with "Sure," "Here is," or "I can do that." Start your response IMMEDIATELY with `THOUGHT:`.
-5. Break tasks into steps and execute the first tool call immediately. Do not hesitate.
-6. Only use tools listed in the [TOOL SCHEMA] section below. Never invent tool names.
-7. If unsure or confused, use `ask_user` immediately. Do not guess.
-8. MOMENTUM RULE: After a successful tool result, IMMEDIATELY execute your next tool call. Do NOT pause or ask the user how to help.
-9. TASK COMPLETION: Once verified, output `DONE: The task is complete.` to break the system loop.
-10. MANDATORY VERIFICATION: You MUST verify code by running it (e.g., `run_command`). Do not claim done until output confirms success.
-11. INITIATIVE REQUIREMENT: Do NOT use `notify` or `ask_user` to avoid taking the next logical step. If you find files, analyze them. If you see a bug, patch it.
-12. CODE WRITING RULE: ALL code MUST go through `write_file` or `replace_file_content` tools. NEVER output raw code blocks (```rust, ```python, etc.) into chat. Code in chat is NOT saved to disk.
-
-### RESPONSE FORMAT
-- **If you are a reasoning model (like DeepSeek-R1):** You MUST begin your response with native `<think>` tags. Perform all your internal planning and tool selection inside these tags. After the closing `</think>` tag, output your selected tool call in the JSON format below.
-- **If you are a standard model:** Start your response immediately with `THOUGHT:` followed by your reasoning and then the JSON tool call.
-
-**Tool Call Format:**
-
-**Standard Turn (Standard Model):**
-THOUGHT: [Your reasoning]
-```json
-{
-  "name": "tool_name",
-  "arguments": { "key": "value" }
-}
-```
-
-**Task Completion:**
-THOUGHT: [Summary of what you accomplished]
-DONE: The task is complete.
-
-### EXAMPLES
-
-**Example 1: Read a file**
-THOUGHT: I need to inspect the source. I will use `read_file`.
-```json
-{
-  "name": "read_file",
-  "arguments": { "path": "src/main.rs" }
-}
-```
-
-**Example 2: Write code to a file**
-THOUGHT: I will write the calculator logic to src/main.rs using write_file.
-```json
-{
-  "name": "write_file",
-  "arguments": { "path": "src/main.rs", "content": "fn main() {\n    println!(\"Hello\");\n}" }
-}
-```
-
-**Example 3: Add a Rust dependency**
-THOUGHT: I need to add `tokio` for async support. I will use `cargo_add`.
-```json
-{
-  "name": "cargo_add",
-  "arguments": { "crate_name": "tokio", "features": ["full"], "cwd": "project_dir" }
-}
-```
-
-### AVAILABLE TOOLS
-All tools are listed in the [TOOL SCHEMA] section below. Use them responsibly.
-Never invent tool names. If you need a capability that isn't listed, use `ask_user`.
-
-You are running on a real machine with real consequences. Be precise, safe, and professional.
-"#.to_string();
+    let system_prompt = crate::prompts::SYSTEM_PROMPT.to_string();
 
     // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
     let model = if cli.mlx {
@@ -454,7 +375,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
         config.mlx_top_p_execution,
         config.mlx_repeat_penalty_planning,
         config.mlx_repeat_penalty_execution,
-    ).await;
+    ).await?;
     
     if let Err(e) = agent.check_connection().await {
         if !cli.cli {
@@ -609,6 +530,9 @@ You are running on a real machine with real consequences. Be precise, safe, and 
             let secs = uptime % 60;
             let proc_count = sys.processes().len();
             
+            let gpu_freq_str = if let Some(f) = mac_gpu.gpu_freq_mhz { format!(" @ {:.0} MHz", f) } else { "".to_string() };
+            let ane_power_str = if let Some(p) = mac_gpu.ane_power_mw { format!("\n\n🧠 ANE POWER      : {:.0} mW (Neural Engine)", p) } else { "".to_string() };
+
             let mut update_str = format!(
 "🔥 CPU LOAD       : {:.1}% ({} Cores)
 
@@ -616,7 +540,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 
 🤖 AI RAM USE     : {} MB {}
 
-🎨 GPU LOAD       : {}% (Graphics)
+🎨 GPU LOAD       : {}% (Graphics){}{}
 
 💾 SWAP CACHE     : {}/{} MB ({:.1}%)
 
@@ -629,7 +553,7 @@ You are running on a real machine with real consequences. Be precise, safe, and 
 ⚙️ ACTIVE PROCS   : {}
 
 ⏱️ CORE UPTIME    : {}h {}m {}s",
-                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ai_ram_mb, engine_label, gpu_load, used_swap, total_swap, swap_perc,
+                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ai_ram_mb, engine_label, gpu_load, gpu_freq_str, ane_power_str, used_swap, total_swap, swap_perc,
                 total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
             );
 

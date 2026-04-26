@@ -100,7 +100,7 @@ impl AgentTool for DistillKnowledgeTool {
         }
     }
 
-    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: DistillKnowledgeArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let topic = &typed_args.topic;
         let summary = &typed_args.summary;
@@ -118,7 +118,21 @@ impl AgentTool for DistillKnowledgeTool {
         );
 
         std::fs::write(&filepath, &content).into_diagnostic()?;
-        Ok(format!("🧠 Knowledge distilled! Saved '{}' to {}. This will be available in future sessions.", topic, filepath.display()))
+
+        // 🧠 SEMANTIC SYNC (Index the new knowledge item immediately)
+        let backend = context.backend.read().await;
+        if let Ok(embedding) = backend.generate_embeddings(summary).await {
+            let mut brain = context.vector_brain.lock();
+            brain.add_entry(
+                summary.clone(),
+                embedding,
+                format!("brain:{}", filename),
+                std::collections::HashMap::new()
+            );
+            let _ = brain.save_to_disk(&context.brain_path);
+        }
+
+        Ok(format!("🧠 Knowledge distilled! Saved '{}' to {}. This is now conceptually indexed in your neural memory.", topic, filepath.display()))
     }
 }
 
@@ -143,16 +157,28 @@ impl AgentTool for RecallBrainTool {
         }
     }
 
-    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: RecallBrainArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let keyword = &typed_args.keyword;
-        let results = crate::skills::search_brain(keyword);
+        
+        let tx_opt = context.tx.clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Searching neural memory for: '{}'...", keyword)));
+        }
+
+        let backend = context.backend.read().await;
+        let query_vector = backend.generate_embeddings(keyword).await?;
+        
+        let brain = context.vector_brain.lock();
+        let results = brain.search(&query_vector, 5);
+
         if results.is_empty() {
-            Ok(format!("No brain knowledge items found matching '{}'. Use `distill_knowledge` after a significant task to build your knowledge base.", keyword))
+            Ok(format!("No brain knowledge items found matching the concept '{}'. Use `distill_knowledge` after a significant task to build your knowledge base.", keyword))
         } else {
-            let mut out = format!("🧠 Found {} knowledge items matching '{}':\n\n", results.len(), keyword);
-            for (topic, summary) in &results {
-                out.push_str(&format!("--- {} ---\n{}\n\n", topic, summary));
+            let mut out = format!("🧠 Found {} relevant knowledge items for '{}':\n\n", results.len(), keyword);
+            for (entry, score) in results {
+                out.push_str(&format!("--- {} (Confidence: {:.1}%) ---\n{}\n\n", 
+                    entry.source, score * 100.0, entry.text));
             }
             Ok(out)
         }
