@@ -566,6 +566,13 @@ impl Backend {
                         MistralResponse::Chunk(chunk) => {
                             // Forward tool calls if present (future-proofing)
                             if let Some(tool_calls) = &chunk.choices[0].delta.tool_calls {
+                                // If we are in a thought block, a native tool call should end it.
+                                in_thought_block = false;
+                                is_thinking = false;
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::Thinking(None));
+                                }
+
                                 for call in tool_calls {
                                     // Map mistralrs tool call to ollama_rs tool call
                                     let mapped_call = ollama_rs::generation::tools::ToolCall {

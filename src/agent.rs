@@ -571,7 +571,7 @@ impl Agent {
     fn inject_state_context(&self) {
         let is_planning = *self.planning_mode.lock();
         
-        let mode_str = if is_planning { "PLANNING MODE (Read-only research & architecture)" } else { "EXECUTION MODE (Full autonomy granted)" };
+        let mode_str = if is_planning { "PLANNING PHASE (Architectural research & strategy)" } else { "EXECUTION PHASE (Implementation & active engineering)" };
 
         // --- 🧠 COMPETENCY REPORTING ---
         let mut competency_warnings = Vec::new();
@@ -1072,16 +1072,14 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             let mut stored_content = full_content.clone();
             if !native_tool_calls.is_empty() && stored_content.is_empty() {
                 stored_content = "THOUGHT: I am executing a structural tool call.".to_string();
+                // Actively notify the UI if we were silent during the stream
+                if let Some(tx) = self.event_tx.lock().clone() {
+                    let _ = tx.try_send(crate::tui::AgentEvent::StreamToken("⚡ [System]: Executing tool call...".to_string()));
+                }
             }
             
-            // Re-use reasoning in history if the model supports it (like our serialization does)
             let mut msg = ChatMessage::new(MessageRole::Assistant, stored_content);
             msg.tool_calls = native_tool_calls.clone();
-            
-            // Try to set thinking if the field exists (it appears in history.json)
-            // We use a reflective approach or just direct access if we are sure it's there.
-            // Based on history.json, we know 'thinking' is a field in the serialized ChatMessage.
-            // If it fails to compile, we will know for sure.
             msg.thinking = Some(reasoning_content.clone());
             
             self.history.lock().push(msg);
