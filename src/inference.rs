@@ -34,7 +34,7 @@ pub enum Backend {
     #[cfg(feature = "mlx")]
     MLX {
         model: Model,
-        ctx_limit: usize,
+        _ctx_limit: usize,
         embedder: Option<Model>,
     },
 }
@@ -106,7 +106,7 @@ impl Backend {
                     )
                     .with_logging()
                     .with_max_num_seqs(1);
-                    let ctx_limit = if paged_attn { 8192 } else { 16384 };
+                    let ctx_limit = 32768; // Restored to 32K as per user request
 
                     if paged_attn {
                         let paged_attn_cfg = PagedAttentionMetaBuilder::default()
@@ -129,7 +129,7 @@ impl Backend {
 
                     Ok((Backend::MLX { 
                         model: mlx_model, 
-                        ctx_limit,
+                        _ctx_limit: ctx_limit,
                         embedder: embed_model 
                     }, model))
                 }
@@ -419,7 +419,7 @@ impl Backend {
                 }
             }
             #[cfg(feature = "mlx")]
-            Backend::MLX { model: mistralrs, ctx_limit, .. } => {
+            Backend::MLX { model: mistralrs, _ctx_limit: _, .. } => {
                 let on_tool_call = on_tool_call;
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -449,6 +449,9 @@ impl Backend {
                     request_builder = request_builder.add_message(TextMessageRole::System, merged_system);
                 }
 
+                let mut total_tool_calls = 0;
+                let mut total_tool_results = 0;
+
                 for msg in other_messages {
                     match msg.role {
                         MessageRole::User => {
@@ -456,12 +459,12 @@ impl Backend {
                         }
                         MessageRole::Assistant => {
                             if !msg.tool_calls.is_empty() {
-                                // Convert Ollama ToolCalls to Mistral ToolCallResponses
                                 let mut mistral_calls = Vec::new();
                                 for (i, c) in msg.tool_calls.iter().enumerate() {
+                                    let global_idx = total_tool_calls + i;
                                     mistral_calls.push(mistralrs::ToolCallResponse {
                                         index: i,
-                                        id: format!("call_{}", i), // Synthetic ID for ollama-rs compatibility
+                                        id: format!("call_{}", global_idx),
                                         tp: mistralrs::ToolCallType::Function,
                                         function: mistralrs::CalledFunction {
                                             name: c.function.name.clone(),
@@ -469,6 +472,7 @@ impl Backend {
                                         },
                                     });
                                 }
+                                total_tool_calls += msg.tool_calls.len();
                                 
                                 request_builder = request_builder.add_message_with_tool_call(
                                     TextMessageRole::Assistant,
@@ -480,9 +484,9 @@ impl Backend {
                             }
                         }
                         MessageRole::Tool => {
-                            // Link tool results back to synthetic IDs (assuming sequential order for now)
-                            let call_id = "call_0".to_string(); 
+                            let call_id = format!("call_{}", total_tool_results);
                             request_builder = request_builder.add_tool_message(msg.content, call_id);
+                            total_tool_results += 1;
                         }
                         _ => {
                             request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
@@ -533,7 +537,7 @@ impl Backend {
                 sampling_params.top_p = Some(sampling.top_p.into());
                 sampling_params.top_k = Some(40);
                 sampling_params.repetition_penalty = Some(sampling.repeat_penalty as f32);
-                sampling_params.max_len = Some(*ctx_limit);
+                sampling_params.max_len = Some(8192);
                 request_builder = request_builder.set_sampling(sampling_params);
 
                 let tx_opt = event_tx.lock().clone();
@@ -612,11 +616,8 @@ impl Backend {
                                 // --- 🧠 STREAMING REASONING EXTRACTION (MLX Cross-Chunk) ---
                                 let mut current_pos = 0;
                                 
-                                // Detect implicit thinking at the absolute start of response (MLX Standalone)
-                                // We do this BEFORE consuming first_token so we can catch "Alright..." etc.
                                 if first_token && !text.trim().is_empty() {
-                                    let trimmed_start = text.trim_start();
-                                    let lower = trimmed_start.to_lowercase();
+                                    let lower = text.trim().to_lowercase();
                                     let implicit_phrases = [
                                         "alright", "okay", "so,", "hmm", "thinking", "let me", "sure", 
                                         "certainly", "absolutely", "i'll", "let's", "i need to", "first,",
@@ -626,11 +627,10 @@ impl Backend {
                                         in_thought_block = true;
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                            let _ = tx.try_send(AgentEvent::SubagentStatus(Some("⚡ MLX Engine: Thinking...".to_string())));
                                         }
                                     }
-                                }
-
-                                if first_token {
+                                    
                                     if text.len() >= 10 || !text.starts_with("<") {
                                         first_token = false;
                                         if !text.contains("<think>") {
@@ -710,26 +710,44 @@ impl Backend {
                                                 end_idx += 1;
                                             }
                                             current_pos += end_idx;
-                                        } else if let Some(last_lt) = text[current_pos..].rfind('<') {
-                                            let pot_tag = &text[current_pos + last_lt..];
-                                            if "<think>".starts_with(pot_tag) {
-                                                let before = &text[current_pos..current_pos + last_lt];
-                                                if !before.is_empty() {
-                                                    full_content.push_str(before);
-                                                    if let Some(tx) = event_tx.lock().clone() {
-                                                        let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                        } else if let Some(found_idx) = {
+                                            // Check for partial tags (<think>) or partial markers (THOUGHT:)
+                                            let upper = text[current_pos..].to_uppercase();
+                                            let markers = ["THOUGHT:", "PLAN:", "REASONING:", "ANALYSIS:"];
+                                            let mut best_partial = None;
+                                            
+                                            // 1. Check for partial <think>
+                                            if let Some(last_lt) = text[current_pos..].rfind('<') {
+                                                let pot_tag = &text[current_pos + last_lt..];
+                                                if "<think>".starts_with(pot_tag) {
+                                                    best_partial = Some((last_lt, pot_tag.len()));
+                                                }
+                                            }
+
+                                            // 2. Check for partial markers
+                                            for marker in markers {
+                                                for i in 1..marker.len() {
+                                                    let partial = &marker[..i];
+                                                    if upper.ends_with(partial) {
+                                                        let pos = upper.len() - i;
+                                                        if best_partial.map_or(true, |(p, _)| pos < p) {
+                                                            best_partial = Some((pos, i));
+                                                        }
                                                     }
                                                 }
-                                                tag_residue = pot_tag.to_string();
-                                                break;
-                                            } else {
-                                                let remaining = &text[current_pos..];
-                                                full_content.push_str(remaining);
-                                                if let Some(tx) = event_tx.lock().clone() {
-                                                    let _ = tx.try_send(AgentEvent::StreamToken(remaining.to_string()));
-                                                }
-                                                break;
                                             }
+                                            best_partial
+                                        } {
+                                            let (found_idx_rel, _len) = found_idx;
+                                            let before = &text[current_pos..current_pos + found_idx_rel];
+                                            if !before.is_empty() {
+                                                full_content.push_str(before);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                                }
+                                            }
+                                            tag_residue = text[current_pos + found_idx_rel..].to_string();
+                                            break;
                                         } else {
                                             let remaining = &text[current_pos..];
                                             full_content.push_str(remaining);

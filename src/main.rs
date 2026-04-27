@@ -103,6 +103,7 @@ struct AppConfig {
     pub mlx_top_p_execution: Option<f32>,
     pub mlx_repeat_penalty_planning: Option<f32>,
     pub mlx_repeat_penalty_execution: Option<f32>,
+    pub planning_enabled: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -148,6 +149,7 @@ impl Default for AppConfig {
             mlx_top_p_execution: Some(0.9),
             mlx_repeat_penalty_planning: Some(1.05),
             mlx_repeat_penalty_execution: Some(1.05),
+            planning_enabled: Some(true),
         }
     }
 }
@@ -165,12 +167,24 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
             unix => {
                 let prefixes = ["/home", "/Users"];
                 for prefix in prefixes {
+                    // Check standard XDG path
                     let p = std::path::PathBuf::from(prefix)
                         .join(&sudo_user)
                         .join(".config")
                         .join("tempest_ai")
                         .join("config.toml");
                     paths_to_try.push(p);
+
+                    // Check macOS Application Support path
+                    if prefix == "/Users" {
+                        let p_mac = std::path::PathBuf::from(prefix)
+                            .join(&sudo_user)
+                            .join("Library")
+                            .join("Application Support")
+                            .join("tempest_ai")
+                            .join("config.toml");
+                        paths_to_try.push(p_mac);
+                    }
                 }
             },
             _ => {}
@@ -382,6 +396,7 @@ async fn main() -> Result<()> {
         config.mlx_repeat_penalty_planning,
         config.mlx_repeat_penalty_execution,
         cli.paged_attn || config.paged_attn.unwrap_or(false),
+        config.planning_enabled.unwrap_or(true),
     ).await?;
     
     if let Err(e) = agent.check_connection().await {
@@ -400,7 +415,11 @@ async fn main() -> Result<()> {
     }
     let _ = agent.initialize_atlas(false).await;
     if !cli.cli {
-        println!("{} Startup sequence complete. Launching TUI...", "✅".green());
+        println!("{} Startup sequence complete. Warming up engine...", "✅".green());
+    }
+    let _ = agent.warmup().await;
+    if !cli.cli {
+        println!("{} Launching TUI...", "🚀".green());
     }
 
     if cli.cli {

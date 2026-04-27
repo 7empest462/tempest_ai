@@ -129,6 +129,7 @@ pub struct Agent {
     pub mlx_repeat_penalty_planning: Option<f32>,
     pub mlx_repeat_penalty_execution: Option<f32>,
     pub paged_attn: bool,
+    pub planning_enabled: bool,
 }
 
 pub struct AgentStream<'a> {
@@ -163,6 +164,38 @@ impl<'a> AgentStream<'a> {
                 self.agent.inject_state_context();
                 let ctx_limit = self.agent.calculate_optimal_ctx().await;
                 self.agent.run_sentinel_stage(ctx_limit).await?;
+                if !self.agent.planning_enabled {
+                    // Bypass planning: Jump straight to Execution Turn
+                    self.agent.switch_phase(AgentPhase::Execution).await?;
+                    let output = self.agent.planner_turn(self.stop.clone()).await?;
+                    
+                    self.state = AgentStreamState::Thinking { 
+                        accumulated: output.reasoning.clone() 
+                    };
+
+                    let mut all_tool_calls = Vec::new();
+                    for native_call in output.native_tool_calls {
+                        all_tool_calls.push(serde_json::json!({
+                            "tool": native_call.function.name,
+                            "arguments": native_call.function.arguments,
+                        }));
+                    }
+                    if all_tool_calls.is_empty() {
+                        if let Ok(legacy_calls) = self.agent.extract_tool_calls(&output.content) {
+                            all_tool_calls.extend(legacy_calls);
+                        }
+                    }
+
+                    if !all_tool_calls.is_empty() {
+                        self.state = AgentStreamState::PendingTools { tool_calls: all_tool_calls };
+                    } else if !output.content.trim().is_empty() {
+                        self.state = AgentStreamState::StreamingContent { content: output.content };
+                    } else {
+                        self.state = AgentStreamState::Done;
+                    }
+                    return Ok(());
+                }
+
                 self.agent.switch_phase(AgentPhase::Planning).await?;
                 
                 let planner_output = self.agent.planner_turn(self.stop.clone()).await?;
@@ -333,6 +366,7 @@ impl Agent {
         mlx_repeat_penalty_planning: Option<f32>,
         mlx_repeat_penalty_execution: Option<f32>,
         paged_attn: bool,
+        planning_enabled: bool,
     ) -> Result<Self> {
         let event_tx = Arc::new(Mutex::new(None));
         let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn).await?;
@@ -490,6 +524,7 @@ impl Agent {
             mlx_repeat_penalty_planning,
             mlx_repeat_penalty_execution,
             paged_attn,
+            planning_enabled,
             system_prompt: {
                 let mut final_system_prompt = system_prompt.clone();
                 if mode == AgentMode::MLX {
@@ -527,9 +562,9 @@ impl Agent {
     async fn calculate_optimal_ctx(&self) -> u64 {
         let model = self.model.lock().to_lowercase();
         
-        // If we are using MLX, the current config is locked to 16,384 for performance/VRAM safety on 16GB Macs.
+        // Restored to 32K as per user request
         if matches!(&*self.backend.read().await, Backend::MLX { .. }) {
-            return 16384;
+            return 32768;
         }
 
         if model.contains("20b") || model.contains("27b") || model.contains("30b") || model.contains("deepseek-r1:32b") {
@@ -645,7 +680,17 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         let history_path = std::path::Path::new(&self.history_path);
         if history_path.exists() {
             let data = std::fs::read_to_string(history_path).into_diagnostic()?;
-            if let Ok(history) = serde_json::from_str::<Vec<ChatMessage>>(&data) {
+            if let Ok(mut history) = serde_json::from_str::<Vec<ChatMessage>>(&data) {
+                // PRUNING: Ensure the last message isn't a dangling tool call.
+                // MLX will deadlock if an Assistant message has tool calls without following results.
+                while let Some(last) = history.last() {
+                    if last.role == MessageRole::Assistant && !last.tool_calls.is_empty() {
+                        history.pop();
+                    } else {
+                        break;
+                    }
+                }
+
                 let mut h_lock = self.history.lock();
                 for msg in history {
                     if msg.role != MessageRole::System {
@@ -858,7 +903,11 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
     async fn run_sentinel_stage(&self, ctx_limit: u64) -> Result<()> {
         let rep_stack = self.tool_repetition_stack.lock().clone();
-        let action_opt = self.sentinel.analyze_state(&self.history.lock(), ctx_limit, &rep_stack);
+        let history = self.history.lock().clone();
+        let sentinel = self.sentinel.clone();
+        let action_opt = tokio::task::spawn_blocking(move || {
+            sentinel.analyze_state(&history, ctx_limit, &rep_stack)
+        }).await.into_diagnostic()?;
 
         if let Some(action) = action_opt {
             let tx_opt = self.event_tx.lock().clone();
@@ -1383,20 +1432,79 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
     }
 
     pub async fn run_tui_mode(&self, mut user_rx: tokio::sync::mpsc::Receiver<String>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
+        let mut current_task: Option<tokio::task::JoinHandle<()>> = None;
+
         while let Some(user_msg) = user_rx.recv().await {
+             // 🧟 ZOMBIE KILLER: If a turn is already running, abort it before starting a new one.
+             if let Some(task) = current_task.take() {
+                 task.abort();
+             }
+
              // Always reset stop flag before starting a new turn
              stop.store(false, std::sync::atomic::Ordering::Relaxed);
 
-             if let Err(e) = self.run(user_msg, stop.clone()).await {
+             if user_msg == "/clear" {
+                 self.clear_history();
                  let tx_opt = self.event_tx.lock().clone();
                  if let Some(tx) = tx_opt {
-                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Error: {}", e))).await;
+                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🧹 Session Hard Reset: History and Task cleared.".to_string())).await;
                  }
+                 continue;
              }
+
+             let agent_clone = self.clone();
+             let stop_clone = stop.clone();
+             let msg_clone = user_msg.clone();
+
+             current_task = Some(tokio::spawn(async move {
+                 if let Err(e) = agent_clone.run(msg_clone, stop_clone).await {
+                     let tx_opt = agent_clone.event_tx.lock().clone();
+                     if let Some(tx) = tx_opt {
+                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Error: {}", e))).await;
+                     }
+                 }
+             }));
              
-             // Ensure stop is reset after completion
-             stop.store(false, std::sync::atomic::Ordering::Relaxed);
+             // Reset stop is not needed here as it's per-task now
         }
+        Ok(())
+    }
+
+    /// Warm up the engine by sending a single dummy token request.
+    /// This ensures the model is loaded into VRAM and the GPU is initialized before the user speaks.
+    pub async fn warmup(&self) -> Result<()> {
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🔥 Warming up MLX engine...".to_string())).await;
+        }
+
+        // Silent inference pulse
+        let dummy_history = vec![ollama_rs::generation::chat::ChatMessage::new(
+            ollama_rs::generation::chat::MessageRole::User,
+            "warmup".to_string()
+        )];
+        
+        // We use a tiny max_len for the warmup pulse
+        let _ = self.backend.read().await.stream_chat(
+            "warmup-model".to_string(),
+            dummy_history,
+            crate::inference::SamplingConfig {
+                temperature: 0.1,
+                top_p: 0.9,
+                repeat_penalty: 1.1,
+                context_size: 1024,
+            },
+            Arc::new(parking_lot::Mutex::new(None)),           // event_tx
+            Arc::new(std::sync::atomic::AtomicBool::new(true)), // stop
+            "warmup".to_string(), // system prompt
+            None, // on_tool_call
+            None, // tool_registry
+        ).await;
+
+        if let Some(tx) = self.event_tx.lock().clone() {
+            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("✅ Engine ready.".to_string())).await;
+        }
+
         Ok(())
     }
 

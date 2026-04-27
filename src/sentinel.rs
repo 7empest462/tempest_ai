@@ -155,16 +155,18 @@ impl SentinelManager {
             }
         }
 
-        // 3. Thermal Guard
-        {
-            let mut state = self.state.lock().unwrap();
-            state.components.refresh(true);
-            for comp in &state.components {
-                let temp = comp.temperature().unwrap_or(0.0);
-                if temp > 80.0 {
-                    action.message.push_str(&format!("⚠️ [SENTINEL - THERMAL GUARD]: {} is HOT ({:.1}°C).\n", comp.label(), temp));
-                    
-                    break;
+        // 3. Thermal Guard (Optional/Non-blocking)
+        if let Ok(mut state) = self.state.try_lock() {
+            // Only refresh sensors every 10 turns to avoid blocking UI/Engine
+            state.stagnation_counter += 1;
+            if state.stagnation_counter > 0 && state.stagnation_counter % 10 == 0 {
+                state.components.refresh(true);
+                for comp in &state.components {
+                    let temp = comp.temperature().unwrap_or(0.0);
+                    if temp > 80.0 {
+                        action.message.push_str(&format!("⚠️ [SENTINEL - THERMAL GUARD]: {} is HOT ({:.1}°C).\n", comp.label(), temp));
+                        break;
+                    }
                 }
             }
         }
