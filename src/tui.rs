@@ -586,9 +586,11 @@ fn ui(f: &mut Frame, app: &mut App) {
                 "Privilege Escalator" => "[P]",
                 "Compiler Guard" => "[G]",
                 "Build Watcher" => "[B]",
-                "Thermal Guard" => "[T]",
+                "Thermal Guard" => "[TH]",
                 "Hallucination Guard" => "[H]",
-                _ => "[?]",
+                "Tool Guard" => "[T]",
+                "Loop Breaker" => "[L]",
+                _ => "[S]",
             };
             spans.push(Span::styled(format!("{} ", tag), Style::default().fg(Color::Cyan)));
         }

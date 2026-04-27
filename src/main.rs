@@ -62,6 +62,10 @@ struct Cli {
     /// MLX Quantization variant (e.g. Q4_K_M, Q8_0)
     #[arg(long)]
     quant: Option<String>,
+
+    /// Enable Paged Attention for the MLX Backend (Experimental)
+    #[arg(long)]
+    paged_attn: bool,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -80,6 +84,7 @@ struct AppConfig {
     pub sub_agent_model: Option<String>,
     pub mlx_model: Option<String>,
     pub mlx_quant: Option<String>,
+    pub paged_attn: Option<bool>,
     pub planner_model: Option<String>,
     pub executor_model: Option<String>,
     pub verifier_model: Option<String>,
@@ -124,6 +129,7 @@ impl Default for AppConfig {
             sub_agent_model: Some("llama3.2:1b".to_string()),
             mlx_model: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
             mlx_quant: Some("Q8_0".to_string()),
+            paged_attn: None,
             planner_model: Some("deepseek-r1:14b".to_string()),
             executor_model: Some("qwen2.5-coder:7b".to_string()),
             verifier_model: Some("deepseek-r1:7b".to_string()),
@@ -375,6 +381,7 @@ async fn main() -> Result<()> {
         config.mlx_top_p_execution,
         config.mlx_repeat_penalty_planning,
         config.mlx_repeat_penalty_execution,
+        cli.paged_attn || config.paged_attn.unwrap_or(false),
     ).await?;
     
     if let Err(e) = agent.check_connection().await {

@@ -128,6 +128,7 @@ pub struct Agent {
     pub mlx_top_p_execution: Option<f32>,
     pub mlx_repeat_penalty_planning: Option<f32>,
     pub mlx_repeat_penalty_execution: Option<f32>,
+    pub paged_attn: bool,
 }
 
 pub struct AgentStream<'a> {
@@ -205,8 +206,15 @@ impl<'a> AgentStream<'a> {
                     tool_calls: calls.clone(), 
                     results: Vec::new() 
                 };
+                let calls_json = tool_calls.clone();
+                let mut structured_calls = Vec::new();
+                for val in calls_json {
+                    if let Ok(call) = serde_json::from_value::<ollama_rs::generation::tools::ToolCall>(val) {
+                        structured_calls.push(call);
+                    }
+                }
                 
-                let execution_results = self.agent.executor_dispatch(calls).await?;
+                let execution_results = self.agent.executor_dispatch(structured_calls).await?;
                 let mut tool_results = Vec::new();
                 for (name, result, success) in execution_results {
                     tool_results.push(ToolResult { tool_name: name, result, is_success: success });
@@ -227,12 +235,58 @@ impl<'a> AgentStream<'a> {
                 self.state = AgentStreamState::Thinking { accumulated: String::new() };
             }
             AgentStreamState::StreamingContent { content } => {
-                let contains_raw_code = content.contains("```rust") || content.contains("```python") || content.contains("```javascript") || content.contains("```sh");
-                if contains_raw_code {
-                    let reprimand = "⚠️ [SENTINEL REPRIMAND]: You are writing code directly into the chat pane. Rewrite using tools NOW.".to_string();
-                    self.agent.history.lock().push(ChatMessage::new(MessageRole::User, reprimand));
+                let content = content.clone();
+                // Expanded detection to catch .py, .json, and naked blocks
+                let contains_raw_code = content.contains("```rust") || 
+                                      content.contains("```python") || 
+                                      content.contains("```py") || 
+                                      content.contains("```javascript") || 
+                                      content.contains("```js") || 
+                                      content.contains("```sh") || 
+                                      content.contains("```bash") || 
+                                      content.contains("```json") ||
+                                      (content.contains("```") && content.len() > 20); // Catch naked blocks with actual content
+
+                let lower_content = content.to_lowercase();
+                let is_delegating = lower_content.contains("you generate") || 
+                                    lower_content.contains("you write") || 
+                                    lower_content.contains("you create") || 
+                                    lower_content.contains("let me know when you") ||
+                                    (lower_content.contains("please use the tool") && !lower_content.contains("i will"));
+
+                if contains_raw_code || is_delegating {
+                    let reprimand = if is_delegating {
+                        "⚠️ [ROLE REMINDER]: Assistant, YOU are the engineer with the tools. The User cannot help you with file operations. Please re-issue your response and use the correct `write_file` or `run_command` JSON tool call yourself.".to_string()
+                    } else {
+                        "🛑 CRITICAL ERROR: Your previous response was REJECTED because it contained raw markdown code blocks. YOU ARE FORBIDDEN from using backticks for code. Use the `write_file` tool call ONLY. Please re-think your strategy and use the tool now.".to_string()
+                    };
+                    
+                    let sentinel_name = if is_delegating { "Identity Guard" } else { "Tool Guard" };
+                    let log_msg = if is_delegating { "Blocked delegation to user" } else { "Blocked raw code output" };
+
+                    let tx_opt = self.agent.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
+                            active: vec![sentinel_name.to_string()],
+                            log: log_msg.to_string() 
+                        });
+                    }
+
+                    // System role prevents AI from blaming the User
+                    self.agent.history.lock().push(ChatMessage::new(MessageRole::System, reprimand));
                     self.agent.save_history()?;
+                    
+                    // BREAK THE HABIT: Clear accumulated reasoning so it doesn't just repeat the same thought
                     self.state = AgentStreamState::Thinking { accumulated: String::new() };
+                } else if content.len() < 10 && !self.agent.history.lock().is_empty() {
+                    let last_reasoning = self.agent.history.lock().last().and_then(|m| m.thinking.as_ref()).map(|s| s.len()).unwrap_or(0);
+                    if last_reasoning > 100 {
+                         let nudge = "⚠️ [SILENT FAILURE]: You reasoned about an action but didn't output a tool call. YOU must output the JSON tool call now to finish the task.".to_string();
+                         self.agent.history.lock().push(ChatMessage::new(MessageRole::System, nudge));
+                         self.state = AgentStreamState::Thinking { accumulated: String::new() };
+                    } else {
+                        self.state = AgentStreamState::Done;
+                    }
                 } else {
                     self.state = AgentStreamState::Done;
                 }
@@ -278,9 +332,10 @@ impl Agent {
         mlx_top_p_execution: Option<f32>,
         mlx_repeat_penalty_planning: Option<f32>,
         mlx_repeat_penalty_execution: Option<f32>,
+        paged_attn: bool,
     ) -> Result<Self> {
         let event_tx = Arc::new(Mutex::new(None));
-        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone()).await?;
+        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
@@ -392,7 +447,6 @@ impl Agent {
             history: Arc::new(Mutex::new(vec![])),
             tools: tools_map,
             tool_registry,
-            system_prompt,
             recent_tool_calls: Arc::new(DashMap::new()),
             history_path,
             brain_path,
@@ -435,6 +489,19 @@ impl Agent {
             mlx_top_p_execution,
             mlx_repeat_penalty_planning,
             mlx_repeat_penalty_execution,
+            paged_attn,
+            system_prompt: {
+                let mut final_system_prompt = system_prompt.clone();
+                if mode == AgentMode::MLX {
+                    final_system_prompt.push_str("\n\n⚠️ AGENT OPERATIONAL RULES:
+1. YOU ARE THE ACTOR: You possess the tools (`write_file`, `run_command`).
+2. CODE DELIVERY: You are FORBIDDEN from using Markdown code blocks (```python) in your responses. 
+3. THE JSON IS YOUR WORK: Your only way to 'do' work is by outputting a JSON tool call. A JSON tool call is NOT 'raw code'; it is your mandatory delivery mechanism.
+4. If you have code to provide, YOU MUST output the `write_file` tool call. If you don't, the user gets nothing.
+5. NEVER ask the user to write code. You are the engineer; they are the supervisor.");
+                }
+                final_system_prompt
+            },
         })
     }
 
@@ -522,9 +589,18 @@ impl Agent {
             format!("\n### COMPETENCY WARNINGS ###\n{}\n", competency_warnings.join("\n"))
         };
 
+        let whisperer_str = if self.mode == AgentMode::MLX {
+            "\n\n⚠️ AGENT IDENTITY REMINDER: You are the Assistant. YOU possess the tools. The User is a HUMAN. 
+You are FORBIDDEN from outputting raw markdown code blocks. YOU MUST use `write_file` or `SEARCH/REPLACE` arrows.
+SYNTAX RESPONSIBILITY: When writing files, YOU MUST use valid code syntax (e.g., print() for Python). Plain English in a code file is a SyntaxError.
+VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your work using `read_file` or `run_command`."
+        } else {
+            ""
+        };
+
         let state_msg = format!(
-            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- DIRECTIVE: You have FULL AUTONOMY to execute tools. Write code using write_file tool calls ONLY. Never dump raw code blocks into chat.{}\n- ADVISORY: If you see high failure rates, stop and verify your assumptions using read_file or list_dir before retrying.",
-            mode_str, competency_str
+            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- DIRECTIVE: You have FULL AUTONOMY to execute tools. Write code using write_file tool calls ONLY. Never dump raw code blocks into chat.{}{}\n- ADVISORY: If you see high failure rates, stop and verify your assumptions using read_file or list_dir before retrying.",
+            mode_str, competency_str, whisperer_str
         );
 
         let mut h_lock = self.history.lock();
@@ -644,7 +720,8 @@ impl Agent {
             crate::inference::AgentMode::MLX,
             preset.repo,
             preset.quant,
-            self.event_tx.clone()
+            self.event_tx.clone(),
+            self.paged_attn
         ).await?;
         
         {
@@ -929,15 +1006,7 @@ impl Agent {
 
         let tool_task = tokio::spawn(async move {
             while let Some(call) = tool_rx.recv().await {
-                let tool_name = call.function.name.clone();
-                let args_val = serde_json::to_value(&call.function.arguments).unwrap_or(serde_json::Value::Null);
-                
-                let req = serde_json::json!({
-                    "name": tool_name,
-                    "arguments": args_val,
-                });
-
-                let res = agent_for_task.process_single_tool_call(req).await;
+                let res = agent_for_task.process_single_tool_call(call).await;
                 executed_mid_stream_for_task.lock().push(res);
             }
         });
@@ -1026,16 +1095,44 @@ impl Agent {
         })
     }
 
-    async fn executor_dispatch(&self, tool_calls: Vec<Value>) -> Result<Vec<(String, String, bool)>> {
+    pub async fn executor_dispatch(&self, tool_calls: Vec<ollama_rs::generation::tools::ToolCall>) -> Result<Vec<(String, String, bool)>> {
         let mut results = Vec::new();
         let mut parallel_batch = Vec::new();
 
-        for tool_req in tool_calls {
-            let tool_name = tool_req.get("name")
-                .or_else(|| tool_req.get("tool"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            
+        // 🛡️ REPETITION SENTINEL: Block identical back-to-back tool calls
+        let mut filtered_calls = Vec::new();
+        {
+            let mut stack = self.tool_repetition_stack.lock();
+            for call in tool_calls {
+                let call_key = format!("{}:{}", call.function.name, call.function.arguments);
+                
+                // If this EXACT call was the last one made, block it to break the loop
+                if stack.iter().any(|(last_key, _)| last_key == &call_key) {
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
+                            active: vec!["Loop Breaker".to_string()],
+                            log: format!("Blocked duplicate {}", call.function.name) 
+                        });
+                    }
+
+                    results.push((
+                        call.function.name.clone(),
+                        "⚠️ [REPETITION ALERT]: You have already performed this exact action with these arguments. DO NOT REPEAT. If you are finished, acknowledge and stop.".to_string(),
+                        false
+                    ));
+                    continue;
+                }
+                
+                // Track this call for future repetition checks (keep last 3)
+                stack.insert(0, (call_key, call.function.name.clone()));
+                if stack.len() > 3 { stack.pop(); }
+                filtered_calls.push(call);
+            }
+        }
+
+        for tool_call in filtered_calls {
+            let tool_name = tool_call.function.name.as_str();
             let is_modifying = self.tools.get(tool_name).map(|t| t.is_modifying()).unwrap_or(false);
 
             if is_modifying {
@@ -1047,7 +1144,7 @@ impl Agent {
                 }
 
                 // Execute the modifying tool sequentially for safety
-                let result = self.process_single_tool_call(tool_req).await;
+                let result = self.process_single_tool_call(tool_call).await;
                 results.push(result);
                 
                 // BREAK AFTER ONE MODIFYING TOOL
@@ -1055,7 +1152,7 @@ impl Agent {
                 break;
             } else {
                 // Add to parallel batch for simultaneous execution
-                parallel_batch.push(self.process_single_tool_call(tool_req));
+                parallel_batch.push(self.process_single_tool_call(tool_call));
             }
         }
 
@@ -1068,15 +1165,8 @@ impl Agent {
         Ok(results)
     }
 
-    async fn process_single_tool_call(&self, tool_req: Value) -> (String, String, bool) {
-        let tool_name = tool_req.get("tool")
-            .or_else(|| tool_req.get("action"))
-            .or_else(|| tool_req.get("name"))
-            .or_else(|| tool_req.get("function_name"))
-            .or_else(|| tool_req.get("function"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+    async fn process_single_tool_call(&self, tool_call: ollama_rs::generation::tools::ToolCall) -> (String, String, bool) {
+        let tool_name = tool_call.function.name.clone();
 
         // 🧠 FUZZY TOOL REPAIR
         let tool_name = match tool_name.to_lowercase().as_str() {
@@ -1091,12 +1181,7 @@ impl Agent {
             _ => tool_name,
         };
             
-        let mut args = tool_req.get("arguments")
-            .or_else(|| tool_req.get("args"))
-            .or_else(|| tool_req.get("params"))
-            .or_else(|| tool_req.get("parameters"))
-            .cloned()
-            .unwrap_or(Value::Null);
+        let mut args = tool_call.function.arguments.clone();
 
         // 🧠 FUZZY ARGUMENT REPAIR
         // Track for sentinel loop detection
@@ -1359,6 +1444,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         ).await.unwrap();
 
         assert_eq!(agent.sub_agent_model, "test-sub-model");

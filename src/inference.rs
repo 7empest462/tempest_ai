@@ -34,6 +34,7 @@ pub enum Backend {
     #[cfg(feature = "mlx")]
     MLX {
         model: Model,
+        ctx_limit: usize,
         embedder: Option<Model>,
     },
 }
@@ -61,7 +62,7 @@ impl Backend {
         }
     }
 
-    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>) -> Result<(Self, String)> {
+    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, paged_attn: bool) -> Result<(Self, String)> {
         match mode {
             AgentMode::Ollama => {
                 Ok((Backend::Ollama(Ollama::default()), model))
@@ -98,29 +99,39 @@ impl Backend {
                     };
 
                     let gguf_file = format!("{}-{}.gguf", filename_prefix, quant);
-                    let paged_attn_cfg = PagedAttentionMetaBuilder::default()
-                        .with_block_size(32)
-                        .with_gpu_memory(MemoryGpuConfig::ContextSize(16384))
-                        .build()
-                        .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
-
-                    let mlx_model = GgufModelBuilder::new(
+                    
+                    let mut builder = GgufModelBuilder::new(
                         &repo, 
                         vec![gguf_file.clone()]
                     )
-                    .with_paged_attn(paged_attn_cfg)
                     .with_logging()
-                    .with_max_num_seqs(1)
-                    .build()
-                    .await
-                    .map_err(|e| miette!("Failed to load MLX model: {}", e))?;
+                    .with_max_num_seqs(1);
+                    let ctx_limit = if paged_attn { 8192 } else { 16384 };
+
+                    if paged_attn {
+                        let paged_attn_cfg = PagedAttentionMetaBuilder::default()
+                            .with_block_size(16)                    // Smaller blocks = much less fragmentation on Metal
+                            .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
+                            .build()
+                            .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
+                        builder = builder.with_paged_attn(paged_attn_cfg);
+                    }
+
+                    let mlx_model = builder
+                        .build()
+                        .await
+                        .map_err(|e| miette!("Failed to load MLX model: {}", e))?;
 
                     let embed_model = EmbeddingModelBuilder::new("sentence-transformers/all-MiniLM-L6-v2")
                         .build()
                         .await
                         .ok(); // Fallback to None if embedding model fails to load
 
-                    Ok((Backend::MLX { model: mlx_model, embedder: embed_model }, model))
+                    Ok((Backend::MLX { 
+                        model: mlx_model, 
+                        ctx_limit,
+                        embedder: embed_model 
+                    }, model))
                 }
                 #[cfg(not(feature = "mlx"))]
                 {
@@ -390,7 +401,6 @@ impl Backend {
                             native_tool_calls.push(call);
                         }
                     }
-
                     // --- 🛡️ REPETITION SENTINEL ---
                     let trimmed = chunk.message.content.trim();
                     if !trimmed.is_empty() && trimmed.len() > 3 {
@@ -409,7 +419,7 @@ impl Backend {
                 }
             }
             #[cfg(feature = "mlx")]
-            Backend::MLX { model: mistralrs, .. } => {
+            Backend::MLX { model: mistralrs, ctx_limit, .. } => {
                 let on_tool_call = on_tool_call;
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -435,13 +445,7 @@ impl Backend {
                 let is_reasoning_model = model_lower.contains("deepseek") || model_lower.contains("r1");
 
                 let merged_system = system_content.join("\n\n");
-                
-                // If it's a reasoning model, we often get better results merging system into the first user msg
-                if is_reasoning_model && !other_messages.is_empty() {
-                    let first_msg = other_messages.remove(0);
-                    let combined = format!("### SYSTEM DIRECTIVE ###\n{}\n\n### USER REQUEST ###\n{}", merged_system, first_msg.content);
-                    request_builder = request_builder.add_message(TextMessageRole::User, combined);
-                } else if !merged_system.is_empty() {
+                if !merged_system.is_empty() {
                     request_builder = request_builder.add_message(TextMessageRole::System, merged_system);
                 }
 
@@ -529,7 +533,7 @@ impl Backend {
                 sampling_params.top_p = Some(sampling.top_p.into());
                 sampling_params.top_k = Some(40);
                 sampling_params.repetition_penalty = Some(sampling.repeat_penalty as f32);
-                sampling_params.max_len = Some(16384);
+                sampling_params.max_len = Some(*ctx_limit);
                 request_builder = request_builder.set_sampling(sampling_params);
 
                 let tx_opt = event_tx.lock().clone();
@@ -803,6 +807,7 @@ impl Backend {
                                                 reasoning_content.push_str(reasoning);
                                                 if let Some(tx) = event_tx.lock().clone() {
                                                     let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Reasoning... ({} chars)", reasoning_content.len()))));
                                                 }
                                                 in_thought_block = false;
                                                 current_pos += newline_idx;
@@ -811,17 +816,27 @@ impl Backend {
                                                 reasoning_content.push_str(reasoning);
                                                 if let Some(tx) = event_tx.lock().clone() {
                                                     let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Reasoning... ({} chars)", reasoning_content.len()))));
                                                 }
                                                 current_pos += newline_idx + 2;
                                             }
                                         } else {
-                                            let remaining = &text[current_pos..];
-                                            reasoning_content.push_str(remaining);
+                                            let remaining = text[current_pos..].to_string();
+                                            reasoning_content.push_str(&remaining);
                                             if let Some(tx) = event_tx.lock().clone() {
-                                                let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(remaining));
+                                                let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Reasoning... ({} chars)", reasoning_content.len()))));
                                             }
                                             break;
                                         }
+                                    } else {
+                                        let action = text[current_pos..].to_string();
+                                        full_content.push_str(&action);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::StreamToken(action));
+                                            let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Generating Action... ({} chars)", full_content.len()))));
+                                        }
+                                        break;
                                     }
                                 }
                                 
@@ -858,33 +873,124 @@ impl Backend {
             for cap in re_json.captures_iter(&full_content) {
                 if let Some(json_str) = cap.get(1) {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.as_str()) {
-                        if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
-                            let arguments = val.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                        // Extract name from root or nested function object
+                        let tool_name = val.get("name")
+                            .or_else(|| val.get("tool"))
+                            .or_else(|| val.get("action"))
+                            .or_else(|| val.get("function").and_then(|f| f.get("name")))
+                            .and_then(|v| v.as_str());
+
+                        if let Some(n) = tool_name {
+                            // Fuzzy Tool Name Repair
+                            let fixed_name = match n.to_lowercase().as_str() {
+                                "extract_and_write" | "write" | "save" => "write_file".to_string(),
+                                "read" | "cat" | "view" => "read_file".to_string(),
+                                "shell" | "exec" | "terminal" => "run_command".to_string(),
+                                _ => n.to_string(),
+                            };
+
+                            let arguments = val.get("arguments")
+                                .or_else(|| val.get("args"))
+                                .or_else(|| val.get("function").and_then(|f| f.get("arguments")))
+                                .cloned()
+                                .unwrap_or(serde_json::json!({}));
+
                             native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                 function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name: name.to_string(),
+                                    name: fixed_name,
                                     arguments,
                                 }
                             });
                         }
                     }
-                }
+                                                }
             }
             
             // Second pass: Catch naked JSON blocks if no code blocks were found
             if native_tool_calls.is_empty() {
-                // Look for { "name": "...", "arguments": { ... } }
-                let re_naked = Regex::new(r#"(?s)\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}"#).unwrap();
-                for cap in re_naked.captures_iter(&full_content) {
+                // UNIVERSAL NESTED TOOL CATCHER: Handles flat OR nested "function" structures.
+                // Catch: { "name": "..." } OR { "function": { "name": "..." } }
+                let re_native = Regex::new(r#"(?s)(?:```json\s*)?\{\s*(?:"function"\s*:\s*\{\s*)?"?\s*(?:name|tool|action|function)"?\s*:\s*"([^"]+)"\s*,\s*"?arguments"?\s*:\s*(\{.*?\})\s*\}?\s*\}(?:\s*```)?"#).unwrap();
+                for cap in re_native.captures_iter(&full_content) {
                     let name = cap.get(1).map(|m| m.as_str().to_string());
                     let args_str = cap.get(2).map(|m| m.as_str());
                     
-                    if let (Some(name), Some(args_str)) = (name, args_str) {
-                        if let Ok(arguments) = serde_json::from_str::<serde_json::Value>(args_str) {
+                    if let (Some(n), Some(a)) = (name, args_str) {
+                        // Fuzzy Tool Name Repair (catch common LLM hallucinations)
+                        let fixed_name = match n.to_lowercase().as_str() {
+                            "extract_and_write" | "write" | "save" => "write_file".to_string(),
+                            "read" | "cat" | "view" => "read_file".to_string(),
+                            "shell" | "exec" | "terminal" => "run_command".to_string(),
+                            _ => n,
+                        };
+
+                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(a) {
                             native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                 function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name,
-                                    arguments,
+                                    name: fixed_name,
+                                    arguments: args,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Third pass: Catch SEARCH/REPLACE diff blocks (hallucinated Aider-style tools)
+            if native_tool_calls.is_empty() {
+                let re_diff = Regex::new(r"(?s)<<<<<<<\s*SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>>\s*REPLACE").unwrap();
+                for cap in re_diff.captures_iter(&full_content) {
+                    let search = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+                    let replace = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+                    
+                    // Heuristic: Try to find a filename mentioned in the 150 characters before the block
+                    let block_start = cap.get(0).unwrap().start();
+                    let preceding = &full_content[block_start.saturating_sub(150)..block_start];
+                    let re_file = Regex::new(r"([a-zA-Z0-9_\-\./]+\.[a-z]+)").unwrap();
+                    let path = re_file.find_iter(preceding)
+                        .last()
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_else(|| "unknown_file.txt".to_string());
+
+                    native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                        function: ollama_rs::generation::tools::ToolCallFunction {
+                            name: "edit_file_with_diff".to_string(),
+                            arguments: serde_json::json!({
+                                "path": path,
+                                "diff": format!("<<<<<<< SEARCH\n{}\n=======\n{}\n>>>>>>> REPLACE", search, replace)
+                            }),
+                        }
+                    });
+                }
+            }
+
+            // Fourth pass: Catch raw Markdown code blocks (the "Hail Mary" catcher)
+            if native_tool_calls.is_empty() {
+                let re_markdown = Regex::new(r"(?s)```[a-zA-Z]*\n(.*?)\n```").unwrap();
+                for cap in re_markdown.captures_iter(&full_content) {
+                    let code = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+                    if code.trim().len() < 10 { continue; }
+
+                    // Heuristic: Search for a filename in the last 200 characters before the block
+                    let block_start = cap.get(0).unwrap().start();
+                    let context = if block_start > 200 {
+                        &full_content[block_start-200..block_start]
+                    } else {
+                        &full_content[..block_start]
+                    };
+                    
+                    let re_file = Regex::new(r"([a-zA-Z0-9_\-\./]+\.[a-z]+)").unwrap();
+                    if let Some(path_match) = re_file.find_iter(context).last() {
+                        let path = path_match.as_str().to_string();
+                        // Ignore common false positives like "json" or "python" as paths
+                        if path != "json" && path != "python" && path != "rust" && path != "bash" {
+                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                    name: "write_file".to_string(),
+                                    arguments: serde_json::json!({
+                                        "path": path,
+                                        "content": code
+                                    }),
                                 }
                             });
                         }
