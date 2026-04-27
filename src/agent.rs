@@ -896,6 +896,11 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             };
 
             h_lock.push(ChatMessage::new(MessageRole::User, safe_prompt));
+
+            // Ensure we always have at least one User message
+            if h_lock.iter().filter(|m| m.role == MessageRole::User).count() == 0 {
+                h_lock.push(ChatMessage::new(MessageRole::User, initial_user_prompt.to_string()));
+            }
         }
         let _ = self.save_history();
         Ok(())

@@ -433,11 +433,11 @@ impl Backend {
                 let mut system_content = Vec::new();
                 let mut other_messages = Vec::new();
                 
-                for msg in history {
+                for msg in &history {
                     if msg.role == MessageRole::System {
-                        system_content.push(msg.content);
+                        system_content.push(msg.content.clone());
                     } else {
-                        other_messages.push(msg);
+                        other_messages.push(msg.clone());
                     }
                 }
                 
@@ -445,51 +445,67 @@ impl Backend {
                 let is_reasoning_model = model_lower.contains("deepseek") || model_lower.contains("r1");
 
                 let merged_system = system_content.join("\n\n");
-                if !merged_system.is_empty() {
-                    request_builder = request_builder.add_message(TextMessageRole::System, merged_system);
-                }
 
-                let mut total_tool_calls = 0;
-                let mut total_tool_results = 0;
+                // === CRITICAL FIRST-TURN SAFETY GUARD (fixes silent start with Ministral 8B) ===
+                if other_messages.is_empty() || other_messages.iter().all(|m| m.role != MessageRole::User) {
+                    // Force at least one User message — this is the most common cause of "stream never starts"
+                    let user_content = history.last()
+                        .filter(|m| m.role == MessageRole::User)
+                        .map(|m| m.content.clone())
+                        .unwrap_or_else(|| "Hello, please begin.".to_string());
 
-                for msg in other_messages {
-                    match msg.role {
-                        MessageRole::User => {
-                            request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
-                        }
-                        MessageRole::Assistant => {
-                            if !msg.tool_calls.is_empty() {
-                                let mut mistral_calls = Vec::new();
-                                for (i, c) in msg.tool_calls.iter().enumerate() {
-                                    let global_idx = total_tool_calls + i;
-                                    mistral_calls.push(mistralrs::ToolCallResponse {
-                                        index: i,
-                                        id: format!("call_{}", global_idx),
-                                        tp: mistralrs::ToolCallType::Function,
-                                        function: mistralrs::CalledFunction {
-                                            name: c.function.name.clone(),
-                                            arguments: c.function.arguments.to_string(),
-                                        },
-                                    });
-                                }
-                                total_tool_calls += msg.tool_calls.len();
-                                
-                                request_builder = request_builder.add_message_with_tool_call(
-                                    TextMessageRole::Assistant,
-                                    msg.content,
-                                    mistral_calls
-                                );
-                            } else {
-                                request_builder = request_builder.add_message(TextMessageRole::Assistant, msg.content);
+                    if !merged_system.is_empty() {
+                        request_builder = request_builder.add_message(TextMessageRole::System, merged_system);
+                    }
+                    request_builder = request_builder.add_message(TextMessageRole::User, user_content);
+                } else {
+                    // Normal path
+                    if !merged_system.is_empty() {
+                        request_builder = request_builder.add_message(TextMessageRole::System, merged_system);
+                    }
+
+                    let mut total_tool_calls = 0;
+                    let mut total_tool_results = 0;
+
+                    for msg in other_messages {
+                        match msg.role {
+                            MessageRole::User => {
+                                request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
                             }
-                        }
-                        MessageRole::Tool => {
-                            let call_id = format!("call_{}", total_tool_results);
-                            request_builder = request_builder.add_tool_message(msg.content, call_id);
-                            total_tool_results += 1;
-                        }
-                        _ => {
-                            request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
+                            MessageRole::Assistant => {
+                                if !msg.tool_calls.is_empty() {
+                                    let mut mistral_calls = Vec::new();
+                                    for (i, c) in msg.tool_calls.iter().enumerate() {
+                                        let global_idx = total_tool_calls + i;
+                                        mistral_calls.push(mistralrs::ToolCallResponse {
+                                            index: i,
+                                            id: format!("call_{}", global_idx),
+                                            tp: mistralrs::ToolCallType::Function,
+                                            function: mistralrs::CalledFunction {
+                                                name: c.function.name.clone(),
+                                                arguments: c.function.arguments.to_string(),
+                                            },
+                                        });
+                                    }
+                                    total_tool_calls += msg.tool_calls.len();
+                                    
+                                    request_builder = request_builder.add_message_with_tool_call(
+                                        TextMessageRole::Assistant,
+                                        msg.content,
+                                        mistral_calls
+                                    );
+                                } else {
+                                    request_builder = request_builder.add_message(TextMessageRole::Assistant, msg.content);
+                                }
+                            }
+                            MessageRole::Tool => {
+                                let call_id = format!("call_{}", total_tool_results);
+                                request_builder = request_builder.add_tool_message(msg.content, call_id);
+                                total_tool_results += 1;
+                            }
+                            _ => {
+                                request_builder = request_builder.add_message(TextMessageRole::User, msg.content);
+                            }
                         }
                     }
                 }
