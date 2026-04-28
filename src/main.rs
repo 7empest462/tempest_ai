@@ -592,7 +592,7 @@ async fn main() -> Result<()> {
 
 ----------------------------------
 
-🌐 TRUNK [en0]    : {} B ▼ | {} B ▲
+🛰️ NETWORK [en0]    : {} B ▼ | {} B ▲
 
 🌡️ AVG THERMALS   : {:.1} °C (Max: {:.1} °C)
 
