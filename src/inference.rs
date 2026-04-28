@@ -654,7 +654,7 @@ impl Backend {
                                         "certainly", "absolutely", "i'll", "let's", "i need to", "first,",
                                         "alright,", "okay,"
                                     ];
-                                    if implicit_phrases.iter().any(|&p| lower.starts_with(p)) {
+                                    if !is_reasoning_model && implicit_phrases.iter().any(|&p| lower.starts_with(p)) {
                                         in_thought_block = true;
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
@@ -804,22 +804,6 @@ impl Backend {
                                                     let _ = tx.try_send(AgentEvent::SubagentStatus(None));
                                                 }
                                             }
-                                        } else if let Some(json_idx) = text[current_pos..].find("```json") {
-                                            let reasoning = &text[current_pos..current_pos + json_idx];
-                                            reasoning_content.push_str(reasoning);
-                                            if let Some(tx) = event_tx.lock().clone() {
-                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
-                                            }
-                                            is_thinking = false;
-                                            current_pos += json_idx;
-                                        } else if let Some(done_idx) = text[current_pos..].find("DONE:") {
-                                            let reasoning = &text[current_pos..current_pos + done_idx];
-                                            reasoning_content.push_str(reasoning);
-                                            if let Some(tx) = event_tx.lock().clone() {
-                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
-                                            }
-                                            is_thinking = false;
-                                            current_pos += done_idx;
                                         } else if let Some(last_lt) = text[current_pos..].rfind('<') {
                                             let pot_tag = &text[current_pos + last_lt..];
                                             if "</think>".starts_with(pot_tag) {
@@ -842,30 +826,9 @@ impl Backend {
                                             }
                                         } else {
                                             let remaining = &text[current_pos..];
-                                            let mut save_residue = 0;
-                                            
-                                            // Check for partial ```json
-                                            for i in 1..=7 {
-                                                if remaining.ends_with(&"```json"[..i]) { save_residue = i; }
-                                            }
-                                            // Check for partial DONE:
-                                            for i in 1..=5 {
-                                                if remaining.ends_with(&"DONE:"[..i]) { save_residue = i; }
-                                            }
-
-                                            if save_residue > 0 {
-                                                let safe_len = remaining.len() - save_residue;
-                                                let safe_part = &remaining[..safe_len];
-                                                reasoning_content.push_str(safe_part);
-                                                if let Some(tx) = event_tx.lock().clone() {
-                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(safe_part.to_string()));
-                                                }
-                                                tag_residue = remaining[safe_len..].to_string();
-                                            } else {
-                                                reasoning_content.push_str(remaining);
-                                                if let Some(tx) = event_tx.lock().clone() {
-                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
-                                                }
+                                            reasoning_content.push_str(remaining);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
                                             }
                                             break;
                                         }

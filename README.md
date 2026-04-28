@@ -48,7 +48,8 @@ Tempest features a persistent SQLite-backed **Conceptual Brain** and a backgroun
 Tempest is protected by autonomous supervisors and a high-fidelity reasoning engine:
 - **Native MLX Engine**: Direct Metal integration for Apple Silicon (M1-M4) with optimized KV-cache management.
 - **DeepSeek-R1 Qwen3-8B Default**: Tuned specifically for the `DeepSeek-R1-0528-Qwen3-8B` distillation at `Q6_K` quantization for optimal memory and reasoning balance.
-- **Dynamic Reasoning Streams**: Native separation of `<think>` blocks from conversational output. The engine allows the model to freely chat with the user in the main pane while safely routing its internal logic to the reasoning pane.
+- **State-Aware Stream Parser**: Hardened transition logic that separates internal `<think>` reasoning from conversational output. The parser handles native `reasoning_content` streams while providing manual tag-based fallbacks for GGUF models.
+- **Conversational Fluidity**: Relaxed agent constraints allow the model to pivot seamlessly between autonomous tool execution and natural chat, enabling a collaborative "pair-programming" experience.
 - **High-Fidelity Dashboard**: Professional TUI with real-time GPU load and accurate Unified Memory tracking.
 - **Context Runway & Thermal Guard**: Predictive token management that prevents context overflow, and hardware temperature monitoring to autonomously trigger safety pauses.
 
