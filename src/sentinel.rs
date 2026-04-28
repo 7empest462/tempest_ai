@@ -51,7 +51,7 @@ impl SentinelManager {
 
     /// Analyzes the current state and returns an action. 
     /// Now always returns Some to ensure the TUI HUD stays populated.
-    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64, repetition_stack: &[(String, String)]) -> Option<SentinelAction> {
+    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64, repetition_stack: &[(String, String, Option<String>)]) -> Option<SentinelAction> {
         let mut action = SentinelAction {
             message: String::new(),
             needs_compaction: false,

@@ -62,7 +62,7 @@ impl Backend {
         }
     }
 
-    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, paged_attn: bool) -> Result<(Self, String)> {
+    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, paged_attn: bool, ctx_limit: usize) -> Result<(Self, String)> {
         match mode {
             AgentMode::Ollama => {
                 Ok((Backend::Ollama(Ollama::default()), model))
@@ -81,9 +81,13 @@ impl Backend {
                     
                     let tx_opt = event_tx.lock().clone();
                     if let Some(tx) = tx_opt {
-                        let _ = tx.send(AgentEvent::SubagentStatus(Some("⚡ [MLX]: Allocating Metal KV Cache (16k context)...".to_string()))).await;
+                        let _ = tx.send(AgentEvent::SubagentStatus(Some(format!("⚡ [MLX]: Allocating Metal KV Cache ({}k context)...", ctx_limit / 1024)))).await;
                     } else {
-                        println!("{} [MLX]: Allocating Paged Attention KV Cache (M4 Optimized)...", "⚡".yellow());
+                        if paged_attn {
+                            println!("{} [MLX]: Allocating Paged Attention KV Cache (M4 Optimized)...", "⚡".yellow());
+                        } else {
+                            println!("{} [MLX]: Allocating Metal KV Cache ({}k context)...", "⚡".yellow(), ctx_limit / 1024);
+                        }
                     }
 
                     let (repo, filename_prefix) = if model.contains("/") {
@@ -106,7 +110,6 @@ impl Backend {
                     )
                     .with_logging()
                     .with_max_num_seqs(1);
-                    let ctx_limit = 32768; // Restored to 32K as per user request
 
                     if paged_attn {
                         let paged_attn_cfg = PagedAttentionMetaBuilder::default()
@@ -176,7 +179,33 @@ impl Backend {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
                 }
                 
-                let mut stream = ollama.send_chat_messages_stream(request).await.into_diagnostic()?;
+                let mut stream = None;
+                let mut last_err = None;
+                for attempt in 1..=3 {
+                    match ollama.send_chat_messages_stream(request.clone()).await {
+                        Ok(s) => {
+                            stream = Some(s);
+                            break;
+                        }
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            last_err = Some(e);
+                            if attempt < 3 {
+                                let wait_secs = 2u64.pow(attempt as u32 - 1);
+                                let tx_opt = event_tx.lock().clone();
+                                if let Some(tx) = tx_opt {
+                                    let _ = tx.send(AgentEvent::SystemUpdate(format!("🔄 Ollama connection failed. Retrying in {}s... ({})", wait_secs, err_msg))).await;
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                            }
+                        }
+                    }
+                }
+
+                let mut stream = stream.ok_or_else(|| {
+                    let msg = last_err.map(|e| e.to_string()).unwrap_or_else(|| "Unknown connection error".to_string());
+                    miette!("Failed to connect to Ollama after 3 attempts: {}", msg)
+                })?;
                 let mut is_thinking = false;
                 let mut first_token = true;
                 let mut last_segments: Vec<String> = Vec::new();

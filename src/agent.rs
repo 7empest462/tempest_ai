@@ -109,10 +109,11 @@ pub struct Agent {
     pub recent_failures: Arc<DashMap<String, usize>>,
     pub sentinel: crate::sentinel::SentinelManager,
     pub tool_stats: Arc<DashMap<String, (usize, usize)>>,
-    pub tool_repetition_stack: Arc<Mutex<Vec<(String, String)>>>,
+    pub tool_repetition_stack: Arc<Mutex<Vec<(String, String, Option<String>)>>>,
     pub planner_model: Option<String>,
     pub executor_model: Option<String>,
     pub verifier_model: Option<String>,
+    pub safe_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub mlx_presets: Arc<DashMap<String, crate::MlxPreset>>,
     pub temp_planning: f32,
     pub temp_execution: f32,
@@ -130,6 +131,8 @@ pub struct Agent {
     pub mlx_repeat_penalty_execution: Option<f32>,
     pub paged_attn: bool,
     pub planning_enabled: bool,
+    pub checkpoint_mgr: crate::checkpoint::SharedCheckpointManager,
+    pub mcp_clients: Arc<DashMap<String, Arc<tokio::sync::Mutex<crate::mcp::McpClient>>>>,
 }
 
 pub struct AgentStream<'a> {
@@ -402,7 +405,7 @@ impl Agent {
         planning_enabled: bool,
     ) -> Result<Self> {
         let event_tx = Arc::new(Mutex::new(None));
-        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn).await?;
+        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
@@ -466,10 +469,12 @@ impl Agent {
             Arc::new(crate::tools::memory::MemorySearchTool::new(memory_store.clone())),
             Arc::new(crate::tools::system::SystemdManagerTool),
             Arc::new(crate::tools::system::CurrentProcessTool),
-            Arc::new(crate::tools::system::SystemTelemetryTool),
+
             Arc::new(crate::tools::privilege::RequestPrivilegesTool),
             Arc::new(crate::tools::rust::CargoAddTool),
             Arc::new(crate::tools::rust::CrateSearchTool),
+            Arc::new(crate::tools::ast::AstOutlineTool),
+            Arc::new(crate::tools::ast::AstEditTool),
         ];
 
         let tools_map = Arc::new(DashMap::new());
@@ -531,6 +536,7 @@ impl Agent {
             event_tx,
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
             sentinel: crate::sentinel::SentinelManager::new(),
+            safe_mode: Arc::new(AtomicBool::new(false)),
 
             tool_stats: Arc::new(DashMap::new()),
             tool_repetition_stack: Arc::new(Mutex::new(Vec::new())),
@@ -558,6 +564,8 @@ impl Agent {
             mlx_repeat_penalty_execution,
             paged_attn,
             planning_enabled,
+            checkpoint_mgr: crate::checkpoint::new_shared(50),
+            mcp_clients: Arc::new(DashMap::new()),
             system_prompt: {
                 let mut final_system_prompt = system_prompt.clone();
                 if mode == AgentMode::MLX {
@@ -592,25 +600,10 @@ impl Agent {
         ).await
     }
     
+    /// Returns the configured context window size.
+    /// Driven entirely by config (ctx_execution in config.toml, default 32768).
     async fn calculate_optimal_ctx(&self) -> u64 {
-        let model = self.model.lock().to_lowercase();
-        
-        // Restored to 32K as per user request
-        if matches!(&*self.backend.read().await, Backend::MLX { .. }) {
-            return 32768;
-        }
-
-        if model.contains("20b") || model.contains("27b") || model.contains("30b") || model.contains("deepseek-r1:32b") {
-            2048
-        } else if model.contains("13b") || model.contains("16b") || model.contains("12b") {
-            4096
-        } else if model.contains("14b") {
-            12288
-        } else if model.contains("7b") || model.contains("8b") || model.contains("9b") {
-            32768
-        } else {
-             12288
-        }
+        self.ctx_execution
     }
 
     pub async fn check_connection(&self) -> Result<()> {
@@ -715,7 +708,6 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             let data = std::fs::read_to_string(history_path).into_diagnostic()?;
             if let Ok(mut history) = serde_json::from_str::<Vec<ChatMessage>>(&data) {
                 // PRUNING: Ensure the last message isn't a dangling tool call.
-                // MLX will deadlock if an Assistant message has tool calls without following results.
                 while let Some(last) = history.last() {
                     if last.role == MessageRole::Assistant && !last.tool_calls.is_empty() {
                         history.pop();
@@ -735,11 +727,127 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         Ok(())
     }
 
+    pub async fn resume_session(&self) -> Result<()> {
+        let history_len = self.history.lock().len();
+        if history_len > 0 {
+            // Pulse the environment to ground the agent
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let mut recent_files = Vec::new();
+            
+            // Heuristic: Find 5 most recently modified files in the CWD (shallow)
+            if let Ok(entries) = std::fs::read_dir(&cwd) {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        !name.starts_with('.') && name != "Cargo.lock" && name != "history.json"
+                    })
+                    .collect();
+                
+                files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+                files.reverse();
+                
+                for entry in files.iter().take(5) {
+                    recent_files.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+
+            let recent_str = if recent_files.is_empty() { 
+                "No recent files detected.".to_string() 
+            } else { 
+                recent_files.join(", ") 
+            };
+
+            let pulse = format!(
+                "🔄 [SESSION RESUME]: You are continuing a previous session.\n\
+                 - Current Working Directory: {}\n\
+                 - Recent Files in Workspace: {}\n\n\
+                 Please briefly acknowledge that you've resumed the context and are ready to continue.",
+                cwd.display(),
+                recent_str
+            );
+
+            let mut h_lock = self.history.lock();
+            h_lock.push(ChatMessage::new(MessageRole::System, pulse));
+            
+            let tx_opt = self.event_tx.lock().clone();
+            if let Some(tx) = tx_opt {
+                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("✨ Session Resumed: Environment grounded.".to_string()));
+            }
+        }
+        Ok(())
+    }
+
     pub fn save_history(&self) -> Result<()> {
         let history = self.history.lock();
         let path = std::path::Path::new(&self.history_path);
         let file = std::fs::File::create(path).into_diagnostic()?;
         serde_json::to_writer_pretty(file, &*history).into_diagnostic()?;
+        Ok(())
+    }
+
+    /// Initializes and connects to external MCP servers based on the provided configuration.
+    pub async fn initialize_mcp(&self, configs: Vec<crate::McpServerConfig>) -> Result<()> {
+        for config in configs {
+            let tx_opt = self.event_tx.lock().clone();
+            if let Some(tx) = tx_opt.as_ref() {
+                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🔌 Connecting to MCP Server: {}...", config.name)));
+            }
+
+            match crate::mcp::McpClient::new(
+                config.name.clone(),
+                &config.command,
+                &config.args,
+                &config.env.clone().unwrap_or_default()
+            ).await {
+                Ok(mut client) => {
+                    if let Err(e) = client.initialize().await {
+                        if let Some(tx) = tx_opt.as_ref() {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("❌ MCP Init Failed ({}): {}", config.name, e)));
+                        }
+                        continue;
+                    }
+
+                    match client.list_tools().await {
+                        Ok(tools) => {
+                            let client_arc = Arc::new(tokio::sync::Mutex::new(client));
+                            self.mcp_clients.insert(config.name.clone(), client_arc.clone());
+
+                            for tool in tools {
+                                // Dynamic tool registration with 'static str leaking
+                                let namespaced_name = format!("{}_{}", config.name, tool.name);
+                                let leaked_name: &'static str = Box::leak(namespaced_name.into_boxed_str());
+                                let leaked_desc: &'static str = Box::leak(tool.description.into_boxed_str());
+
+                                let proxy = crate::mcp::McpToolProxy {
+                                    client: client_arc.clone(),
+                                    name: leaked_name,
+                                    description: leaked_desc,
+                                    input_schema: tool.input_schema.clone(),
+                                };
+
+                                self.tools.insert(leaked_name.to_string(), Arc::new(proxy));
+                                
+                                if let Some(tx) = tx_opt.as_ref() {
+                                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("✅ Registered MCP Tool: {}", leaked_name)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(tx) = tx_opt.as_ref() {
+                                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("❌ MCP Tools Failed ({}): {}", config.name, e)));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Some(tx) = tx_opt.as_ref() {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("❌ MCP Connection Failed ({}): {}", config.name, e)));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -799,7 +907,8 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             preset.repo,
             preset.quant,
             self.event_tx.clone(),
-            self.paged_attn
+            self.paged_attn,
+            self.ctx_execution as usize
         ).await?;
         
         {
@@ -830,6 +939,26 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
         let prompt_trimmed = initial_user_prompt.trim();
         if prompt_trimmed.starts_with('/') {
+            if prompt_trimmed == "/help" {
+                let manual = std::fs::read_to_string("MANUAL.md")
+                    .unwrap_or_else(|_| "Error: MANUAL.md not found. Please refer to the repository documentation.".to_string());
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(manual));
+                }
+                return Ok(());
+            }
+
+            if prompt_trimmed == "/safemode" {
+                let current = self.safe_mode.load(std::sync::atomic::Ordering::SeqCst);
+                self.safe_mode.store(!current, std::sync::atomic::Ordering::SeqCst);
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🛡️ Safe Mode: {}", if !current { "ON" } else { "OFF" })));
+                }
+                return Ok(());
+            }
+            
             let cmd = if prompt_trimmed.starts_with("/switch ") {
                 prompt_trimmed.strip_prefix("/switch ").unwrap().trim()
             } else {
@@ -1051,13 +1180,13 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
         if let Some(key) = detected_loop_key {
             let mut h_lock = self.history.lock();
-            let directive = format!("\n\n⚠️ [SENTINEL REORIENTATION DIRECTIVE]: You are looping on '{}'. I am forcing a 'list_dir'.", key);
+            let directive = format!("\n\n⚠️ [SENTINEL REORIENTATION DIRECTIVE]: You are looping on '{}'. I am forcing a state-synchronization check of the CURRENT WORKING DIRECTORY.", key);
             h_lock.push(ChatMessage::new(MessageRole::System, directive));
             
             if let Ok(entries) = std::fs::read_dir(".") {
                 let files: Vec<_> = entries.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
-                let resync = format!("SENTINEL FORCED SYNC:\n- {}", files.join("\n- "));
-                h_lock.push(ChatMessage::new(MessageRole::User, resync));
+                let resync = format!("SYSTEM NOTIFICATION: This is an automated forced-sync of your CURRENT WORKING DIRECTORY (it is not a message from the user).\n\nCONTENTS:\n- {}", files.join("\n- "));
+                h_lock.push(ChatMessage::new(MessageRole::System, resync));
             }
             self.recent_failures.clear();
         }
@@ -1090,9 +1219,17 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         let agent_for_task = self.clone();
 
         let tool_task = tokio::spawn(async move {
+            let mut join_set = tokio::task::JoinSet::new();
             while let Some(call) = tool_rx.recv().await {
-                let res = agent_for_task.process_single_tool_call(call).await;
-                executed_mid_stream_for_task.lock().push(res);
+                let agent_clone = agent_for_task.clone();
+                join_set.spawn(async move {
+                    agent_clone.process_single_tool_call(call).await
+                });
+            }
+            while let Some(res) = join_set.join_next().await {
+                if let Ok(r) = res {
+                    executed_mid_stream_for_task.lock().push(r);
+                }
             }
         });
 
@@ -1178,6 +1315,20 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         })
     }
 
+    fn repair_tool_name(&self, name: &str) -> String {
+        match name.to_lowercase().as_str() {
+            "ask" | "ask_user_input" | "prompt_user" | "user_input" => "ask_user".to_string(),
+            "stock_price" | "get_stock" | "check_stock" | "stock" => "get_stock_price".to_string(),
+            "search" | "google_search" | "web_search" => "search_web".to_string(),
+            "read" | "fetch_url" | "web_read" => "read_url".to_string(),
+            "recall" | "recall_knowledge" | "memory" | "brain" => "recall_brain".to_string(),
+            "distill" | "save_knowledge" | "save_brain" => "distill_knowledge".to_string(),
+            "shell" | "exec" | "command" => "run_command".to_string(),
+            "notify" | "alert" | "status" => "no_op".to_string(),
+            _ => name.to_string(),
+        }
+    }
+
     pub async fn executor_dispatch(&self, tool_calls: Vec<ollama_rs::generation::tools::ToolCall>) -> Result<Vec<(String, String, bool)>> {
         let mut results = Vec::new();
         let mut parallel_batch = Vec::new();
@@ -1187,10 +1338,11 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         {
             let mut stack = self.tool_repetition_stack.lock();
             for call in tool_calls {
-                let call_key = format!("{}:{}", call.function.name, call.function.arguments);
+                let repaired_name = self.repair_tool_name(&call.function.name);
+                let call_key = format!("{}:{}", repaired_name, call.function.arguments);
                 
                 // If this EXACT call was the last one made, block it to break the loop
-                if stack.iter().any(|(last_key, _)| last_key == &call_key) {
+                if let Some((_, _, last_res)) = stack.iter().find(|(last_key, _, _)| last_key == &call_key) {
                     let tx_opt = self.event_tx.lock().clone();
                     if let Some(tx) = tx_opt {
                         let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
@@ -1199,17 +1351,23 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                         });
                     }
 
+                    let informative_error = if let Some(res) = last_res {
+                        format!("⚠️ [REPETITION ALERT]: You have already performed this exact action with these arguments. DO NOT REPEAT.\n\nSYSTEM RECALL: Here is the result of your PREVIOUS execution (provided so you don't have to call it again):\n---\n{}\n---", res)
+                    } else {
+                        "⚠️ [REPETITION ALERT]: You have already performed this exact action with these arguments. DO NOT REPEAT. If you are finished, acknowledge and stop.".to_string()
+                    };
+
                     results.push((
                         call.function.name.clone(),
-                        "⚠️ [REPETITION ALERT]: You have already performed this exact action with these arguments. DO NOT REPEAT. If you are finished, acknowledge and stop.".to_string(),
+                        informative_error,
                         false
                     ));
                     continue;
                 }
                 
-                // Track this call for future repetition checks (keep last 3)
-                stack.insert(0, (call_key, call.function.name.clone()));
-                if stack.len() > 3 { stack.pop(); }
+                // Track this call for future repetition checks (keep last 10 for better coverage)
+                stack.insert(0, (call_key, repaired_name, None));
+                if stack.len() > 10 { stack.pop(); }
                 filtered_calls.push(call);
             }
         }
@@ -1226,8 +1384,41 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                     parallel_batch = Vec::new();
                 }
 
+                // ⏪ CHECKPOINT: Snapshot files before modification
+                {
+                    let mut cp = self.checkpoint_mgr.lock();
+                    cp.begin_checkpoint(&format!("Tool: {}", tool_name));
+                    
+                    // Extract target file path from arguments for snapshotting
+                    if let Some(path_str) = tool_call.function.arguments
+                        .get("path")
+                        .or(tool_call.function.arguments.get("file_path"))
+                        .and_then(|v| v.as_str()) 
+                    {
+                        let expanded = shellexpand::tilde(path_str).to_string();
+                        cp.snapshot_file(std::path::Path::new(&expanded));
+                    }
+                }
+
                 // Execute the modifying tool sequentially for safety
                 let result = self.process_single_tool_call(tool_call).await;
+                
+                // Commit checkpoint only if the tool succeeded
+                if result.2 {
+                    let cp_id = self.checkpoint_mgr.lock().commit_checkpoint();
+                    if let Some(id) = cp_id {
+                        let cp_count = self.checkpoint_mgr.lock().checkpoint_count();
+                        let tx_opt = self.event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                format!("⏪ Checkpoint saved (ID: {}...) — /undo available ({} total)", &id[..8], cp_count)
+                            ));
+                        }
+                    }
+                } else {
+                    self.checkpoint_mgr.lock().discard_pending();
+                }
+                
                 results.push(result);
                 
                 // BREAK AFTER ONE MODIFYING TOOL
@@ -1249,32 +1440,11 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
     }
 
     async fn process_single_tool_call(&self, tool_call: ollama_rs::generation::tools::ToolCall) -> (String, String, bool) {
-        let tool_name = tool_call.function.name.clone();
-
-        // 🧠 FUZZY TOOL REPAIR
-        let tool_name = match tool_name.to_lowercase().as_str() {
-            "ask" | "ask_user_input" | "prompt_user" | "user_input" => "ask_user".to_string(),
-            "stock_price" | "get_stock" | "check_stock" | "stock" => "get_stock_price".to_string(),
-            "search" | "google_search" | "web_search" => "search_web".to_string(),
-            "read" | "fetch_url" | "web_read" => "read_url".to_string(),
-            "recall" | "recall_knowledge" | "memory" | "brain" => "recall_brain".to_string(),
-            "distill" | "save_knowledge" | "save_brain" => "distill_knowledge".to_string(),
-            "shell" | "exec" | "command" => "run_command".to_string(),
-            "notify" | "alert" | "status" => "no_op".to_string(),
-            _ => tool_name,
-        };
+        let tool_name = self.repair_tool_name(&tool_call.function.name);
             
         let mut args = tool_call.function.arguments.clone();
 
-        // 🧠 FUZZY ARGUMENT REPAIR
-        // Track for sentinel loop detection
-        {
-            let mut stack = self.tool_repetition_stack.lock();
-            stack.push((tool_name.clone(), args.to_string()));
-            if stack.len() > 10 {
-                stack.remove(0);
-            }
-        }
+        // Fuzzy Repair Logic continues below...
 
         if tool_name == "get_stock_price" {
             if let Some(obj) = args.as_object_mut() {
@@ -1300,65 +1470,92 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         }
 
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
-            // --- TRANSPARENT APPROVAL GATE for modifying tools ---
-            // The AI never knows this exists. If rejected, it sees a generic error.
             if tool.is_modifying() {
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
+                // --- TRANSPARENT APPROVAL GATE ---
+                if self.safe_mode.load(std::sync::atomic::Ordering::SeqCst) {
                     let preview = tool.get_approval_preview(&args).await;
-                    
                     let mut prompt = String::new();
                     if let Some(p) = preview {
                         prompt.push_str(&p);
                         prompt.push_str("\n\n");
                     } else {
-                        let args_preview = serde_json::to_string(&args)
-                            .unwrap_or_default()
-                            .chars().take(100).collect::<String>();
-                        prompt.push_str(&format!("Arguments: {}\n", args_preview));
+                        // ... auto-generate fallback preview ...
+                        let target_path = args.get("path")
+                            .or(args.get("file_path"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| shellexpand::tilde(s).to_string());
+                        
+                        let new_content = args.get("content")
+                            .or(args.get("new_content"))
+                            .and_then(|v| v.as_str());
+                        
+                        if let (Some(path), Some(content)) = (&target_path, new_content) {
+                            let path_buf = std::path::PathBuf::from(path);
+                            let modifications = vec![(path_buf, content.to_string())];
+                            let diff_preview = crate::checkpoint::generate_batch_diff(&modifications);
+                            prompt.push_str(&diff_preview);
+                            prompt.push('\n');
+                        } else {
+                            let args_preview = serde_json::to_string(&args)
+                                .unwrap_or_default()
+                                .chars().take(200).collect::<String>();
+                            prompt.push_str(&format!("Arguments: {}\n", args_preview));
+                        }
                     }
                     
+                    let cp_count = self.checkpoint_mgr.lock().checkpoint_count();
                     prompt.push_str(&format!(
-                        "APPROVE {}? [ENTER/ESC]",
-                        tool_name.to_uppercase()
+                        "APPROVE {}? [ENTER/ESC]  (⏪ {} checkpoints available)",
+                        tool_name.to_uppercase(),
+                        cp_count
                     ));
 
-                    let _ = tx.send(crate::tui::AgentEvent::RequestInput(
-                        tool_name.clone(), 
-                        prompt
-                    )).await;
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(crate::tui::AgentEvent::RequestInput(
+                            tool_name.clone(), 
+                            prompt
+                        )).await;
+                    }
 
-                    // Wait for user response through the existing tool_rx channel
+                    // Wait for user response
                     let mut rx_lock = self.tool_rx.lock().await;
                     if let Some(rx) = rx_lock.as_mut() {
                         match tokio::time::timeout(
-                            tokio::time::Duration::from_secs(300), // 5 min timeout
+                            tokio::time::Duration::from_secs(300),
                             rx.recv()
                         ).await {
                             Ok(Some(crate::tui::ToolResponse::Text(ans))) => {
                                 let lower = ans.trim().to_lowercase();
                                 if lower != "y" && lower != "yes" {
-                                    // User rejected — AI sees a generic error, not "BLOCKED"
                                     return (tool_name.clone(), 
-                                        format!("Error: Tool '{}' could not be executed at this time. Try a different approach.", tool_name), 
+                                        format!("Error: Tool '{}' could not be executed at this time.", tool_name), 
                                         false);
                                 }
-                                // User approved — fall through silently
                             }
                             _ => {
-                                // Timeout or channel error — auto-reject for safety
                                 return (tool_name.clone(),
-                                    format!("Error: Tool '{}' timed out waiting for system resources.", tool_name),
+                                    format!("Error: Tool '{}' timed out.", tool_name),
                                     false);
                             }
                         }
                     }
+                } else {
+                    // PASSIVE LOGGING for High-Velocity Mode
+                    let preview = tool.get_approval_preview(&args).await;
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        if let Some(p) = preview {
+                            let _ = tx.send(crate::tui::AgentEvent::CommandOutput(format!("🚀 [AUTO-MODIFY]: {}\n{}", tool_name, p))).await;
+                        } else {
+                            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🚀 [AUTO-MODIFY]: Executing {}", tool_name))).await;
+                        }
+                    }
                 }
-                // If no TUI (CLI mode), auto-approve
             }
 
             let mut last_result = (tool_name.clone(), "Error: Tool execution failed and could not be retried.".to_string(), false);
-            let max_attempts = 3;
+            let max_attempts = 5;
 
             for attempt in 1..=max_attempts {
                 let start = std::time::Instant::now();
@@ -1394,16 +1591,31 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                         }
 
                         if classification == crate::error_classifier::ErrorClass::Retryable && attempt < max_attempts {
-                            let wait_secs = 2u64.pow(attempt as u32 - 1);
+                            // Exponential backoff with jitter
+                            let wait_duration = {
+                                use rand::Rng;
+                                let base_wait = 2u64.pow(attempt as u32 - 1);
+                                let jitter_ms = rand::rng().random_range(0..1000);
+                                tokio::time::Duration::from_millis(base_wait * 1000 + jitter_ms)
+                            };
+                            
                             let tx_opt = self.event_tx.lock().clone();
                             if let Some(tx) = tx_opt {
-                                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                                    format!("🔄 Retrying {} ({}/{}) - Wait {}s: {}", tool_name, attempt, max_attempts, wait_secs, err_msg)
-                                ));
+                                let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(
+                                    format!("🔄 [{}/{}] Retrying {} in {:.1}s: {}", attempt, max_attempts, tool_name, wait_duration.as_secs_f32(), err_msg)
+                                )).await;
                             }
-                            tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                            tokio::time::sleep(wait_duration).await;
                             last_result = (tool_name.clone(), format!("Error (Failed after {} attempts): {}", attempt, err_msg), false);
                             continue;
+                        } else if classification == crate::error_classifier::ErrorClass::Recoverable {
+                            let tip = if err_msg.to_lowercase().contains("permission") || err_msg.to_lowercase().contains("sudo") {
+                                "\n\nSYSTEM TIP: This looks like a permission issue. You may need to ask the user for elevated privileges (root/sudo) or use a different path."
+                            } else {
+                                "\n\nSYSTEM TIP: This failure might be recoverable by changing your strategy or asking the user for clarification."
+                            };
+                            last_result = (tool_name.to_string(), format!("Error: {}{}", err_msg, tip), false);
+                            break;
                         } else {
                             last_result = (tool_name.to_string(), format!("Error: {}", err_msg), false);
                             break;
@@ -1412,7 +1624,15 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                 }
             }
 
-            last_result
+            let final_res = last_result;
+            let call_key = format!("{}:{}", tool_name, args);
+            {
+                let mut stack = self.tool_repetition_stack.lock();
+                if let Some(entry) = stack.iter_mut().find(|(k, _, _)| k == &call_key) {
+                    entry.2 = Some(final_res.1.clone());
+                }
+            }
+            final_res
         } else {
             (
                 tool_name.to_string(), 
@@ -1442,7 +1662,8 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             recent_tool_calls: self.recent_tool_calls.clone(),
             brain_path: self.brain_path.clone(),
             is_root: self.is_root.clone(),
-            all_tools: self.tool_registry.clone(),
+            all_tools: self.tools.iter().map(|kv| kv.value().tool_info()).collect(),
+            checkpoint_mgr: self.checkpoint_mgr.clone(),
         }
     }
 
@@ -1484,6 +1705,33 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                  let tx_opt = self.event_tx.lock().clone();
                  if let Some(tx) = tx_opt {
                      let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("🧹 Session Hard Reset: History and Task cleared.".to_string())).await;
+                 }
+                 continue;
+             }
+
+             if user_msg == "/undo" {
+                 let result = self.checkpoint_mgr.lock().undo();
+                 let tx_opt = self.event_tx.lock().clone();
+                 if let Some(tx) = tx_opt {
+                     match result {
+                         Ok(summary) => {
+                             let _ = tx.send(crate::tui::AgentEvent::StreamToken(summary)).await;
+                             let _ = tx.send(crate::tui::AgentEvent::StreamToken(String::new())).await;
+                         }
+                         Err(msg) => {
+                             let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("⚠️ {}", msg))).await;
+                         }
+                     }
+                 }
+                 continue;
+             }
+
+             if user_msg == "/checkpoints" {
+                 let summary = self.checkpoint_mgr.lock().list_checkpoints();
+                 let tx_opt = self.event_tx.lock().clone();
+                 if let Some(tx) = tx_opt {
+                     let _ = tx.send(crate::tui::AgentEvent::StreamToken(summary)).await;
+                     let _ = tx.send(crate::tui::AgentEvent::StreamToken(String::new())).await;
                  }
                  continue;
              }
@@ -1588,6 +1836,7 @@ mod tests {
             None,
             None,
             false,
+            true,
         ).await.unwrap();
 
         assert_eq!(agent.sub_agent_model, "test-sub-model");

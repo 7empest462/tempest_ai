@@ -24,6 +24,7 @@ pub struct ToolContext {
     #[allow(dead_code)] pub brain_path: std::path::PathBuf,
     pub is_root: Arc<AtomicBool>,
     pub all_tools: Vec<ToolInfo>,
+    #[allow(dead_code)] pub checkpoint_mgr: crate::checkpoint::SharedCheckpointManager,
 }
 
 use ollama_rs::generation::tools::ToolInfo;
@@ -66,3 +67,4 @@ pub mod service_manager;
 pub mod developer;
 pub mod privilege;
 pub mod rust;
+pub mod ast;

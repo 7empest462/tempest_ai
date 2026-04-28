@@ -29,6 +29,7 @@ pub enum AgentEvent {
     SubagentStatus(Option<String>),
     ContextStatus { used: usize, total: u64 },
     SentinelUpdate { active: Vec<String>, log: String },
+    CommandOutput(String),
 }
 
 pub enum ToolResponse {
@@ -69,6 +70,7 @@ pub struct App {
     pub engine_status: Option<String>,
     pub focused_pane: FocusedPane,
     pub show_reasoning: bool,
+    pub command_output: Vec<String>,
 }
 
 impl App {
@@ -102,6 +104,7 @@ impl App {
             engine_status: None,
             focused_pane: FocusedPane::Chat,
             show_reasoning: false,
+            command_output: Vec::new(),
         }
     }
 
@@ -348,15 +351,16 @@ pub async fn run_tui(
                 AgentEvent::ReasoningToken(token) => {
                     app.show_reasoning = true;
                     if token.is_empty() { continue; } // Marker for reasoning start
-                    for c in token.chars() {
-                        if c == '\n' {
-                            app.reasoning_lines += 1;
-                        }
-                    }
                     app.reasoning_buffer.push_str(&token);
-                    
-                    if app.reasoning_lines > 20 {
-                        app.reasoning_scroll = (app.reasoning_lines as u16).saturating_sub(15);
+                    app.reasoning_lines = app.reasoning_buffer.lines().count();
+                    if app.auto_scroll {
+                        app.reasoning_scroll = app.reasoning_lines.saturating_sub(10) as u16;
+                    }
+                }
+                AgentEvent::CommandOutput(line) => {
+                    app.command_output.push(line);
+                    if app.command_output.len() > 100 {
+                        app.command_output.remove(0);
                     }
                 }
                 AgentEvent::SentinelUpdate { active, log } => {
@@ -565,6 +569,17 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::raw("🔧 Executing: "),
             Span::styled(tool, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]));
+
+        // Show last 3 lines of command output if it's a run_command tool
+        if tool == "run_command" && !app.command_output.is_empty() {
+            let start_idx = app.command_output.len().saturating_sub(3);
+            for line in &app.command_output[start_idx..] {
+                status_lines.push(Line::from(vec![
+                    Span::styled("  > ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(line, Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+                ]));
+            }
+        }
     }
 
     if let Some(thinking) = &app.thinking_msg {

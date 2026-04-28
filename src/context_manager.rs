@@ -5,16 +5,24 @@ use ollama_rs::{
 };
 use miette::Result;
 
-/// Estimates the number of tokens in a list of messages using a heuristic (char count / 3).
+/// Count tokens for a single string using the cached BPE tokenizer.
+fn count_tokens(text: &str) -> usize {
+    // tiktoken::get_encoding returns &'static CoreBpe, so no caching needed
+    let enc = tiktoken::get_encoding("qwen2")
+        .or(tiktoken::get_encoding("deepseek_v3"))
+        .unwrap_or(tiktoken::get_encoding("cl100k_base").unwrap());
+    enc.count(text)
+}
+
+/// Counts tokens using tiktoken's real BPE tokenizer (qwen2 encoding).
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    let mut total_chars = 0;
+    let mut total = 0;
     for msg in messages {
-        total_chars += msg.content.len();
-        // Add overhead for role name and structure
-        total_chars += 20; 
+        total += count_tokens(&msg.content);
+        // Per-message overhead: role token + structural delimiters
+        total += 4;
     }
-    // Standard LLM tokenizer heuristic: ~4 chars per token
-    total_chars / 4
+    total
 }
 
 /// Returns true if the estimated token count exceeds the threshold (85% of limit).

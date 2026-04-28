@@ -4,7 +4,7 @@ mod error;
 mod memory;
 mod tools;
 mod hardware;
-mod telemetry;
+
 mod daemon;
 mod tui;
 mod vector_brain;
@@ -15,6 +15,8 @@ mod rules;
 mod sentinel;
 mod inference;
 mod prompts;
+mod checkpoint;
+mod mcp;
 
 use agent::Agent;
 use clap::Parser;
@@ -23,9 +25,15 @@ use miette::{Result, IntoDiagnostic};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-/// Tempest AI — An autonomous AI pair-programmer and system assistant
+/// Tempest AI — An autonomous AI pair-programmer and system assistant.
+/// 
+/// Once started, you can use Slash Commands in the TUI:
+///   /help      - Show the full user manual
+///   /undo      - Revert the last file modifications
+///   /safemode  - Toggle blocking approvals (ON/OFF)
+///   /switch    - Hot-swap the inference model
 #[derive(Parser, Debug)]
-#[command(name = "tempest_ai", version, about)]
+#[command(name = "tempest_ai", version, about, after_help = "For full documentation, run Tempest and type /help in the TUI.")]
 struct Cli {
     /// Ollama model to use (overrides config and OLLAMA_MODEL env var)
     #[arg(short, long)]
@@ -74,6 +82,14 @@ pub struct MlxPreset {
     pub quant: String,
 }
 
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Option<std::collections::HashMap<String, String>>,
+}
+
 #[allow(dead_code)]
 #[derive(serde::Deserialize, Debug)]
 struct AppConfig {
@@ -88,6 +104,7 @@ struct AppConfig {
     pub planner_model: Option<String>,
     pub executor_model: Option<String>,
     pub verifier_model: Option<String>,
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
     pub mlx_presets: Option<std::collections::HashMap<String, MlxPreset>>,
     pub temp_planning: Option<f32>,
     pub temp_execution: Option<f32>,
@@ -150,6 +167,7 @@ impl Default for AppConfig {
             mlx_repeat_penalty_planning: Some(1.05),
             mlx_repeat_penalty_execution: Some(1.05),
             planning_enabled: Some(true),
+            mcp_servers: None,
         }
     }
 }
@@ -410,6 +428,8 @@ async fn main() -> Result<()> {
     }
     
     let _ = agent.load_history();
+    let _ = agent.initialize_mcp(config.mcp_servers.unwrap_or_default()).await;
+    let _ = agent.resume_session().await;
     if !cli.cli {
         println!("{} Indexing local workspace and skills...", "🧠".cyan());
     }
@@ -640,6 +660,25 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                 if p == "/clear" {
                     agent.clear_history();
                     println!("{} History wiped.", "🧹".yellow());
+                    continue;
+                }
+                if p == "/undo" {
+                    match agent.checkpoint_mgr.lock().undo() {
+                        Ok(summary) => println!("{}", summary),
+                        Err(msg) => println!("{} {}", "⚠️".yellow(), msg),
+                    }
+                    continue;
+                }
+                if p == "/checkpoints" {
+                    println!("{}", agent.checkpoint_mgr.lock().list_checkpoints());
+                    continue;
+                }
+                if p == "/help" {
+                    println!("{}", "Commands:".bold());
+                    println!("  /clear       — Wipe conversation history");
+                    println!("  /undo        — Revert the last file modification");
+                    println!("  /checkpoints — List available undo checkpoints");
+                    println!("  /quit        — Exit Tempest");
                     continue;
                 }
                 
