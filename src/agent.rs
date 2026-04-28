@@ -242,8 +242,41 @@ impl<'a> AgentStream<'a> {
                 let calls_json = tool_calls.clone();
                 let mut structured_calls = Vec::new();
                 for val in calls_json {
-                    if let Ok(call) = serde_json::from_value::<ollama_rs::generation::tools::ToolCall>(val) {
+                    // 1. Try parsing directly (native Ollama structure)
+                    if let Ok(call) = serde_json::from_value::<ollama_rs::generation::tools::ToolCall>(val.clone()) {
                         structured_calls.push(call);
+                        continue;
+                    }
+                    
+                    // 2. Normalize flat structures
+                    let name = val.get("name").or(val.get("tool")).or(val.get("function")).and_then(|v| v.as_str());
+                    let mut args = val.get("arguments").or(val.get("args")).cloned();
+                    
+                    // If arguments block is missing, the model flat-packed them at the root
+                    if args.is_none() {
+                        let mut packed_args = serde_json::Map::new();
+                        if let Some(obj) = val.as_object() {
+                            for (k, v) in obj {
+                                if k != "name" && k != "tool" && k != "function" && k != "function_name" {
+                                    packed_args.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                        args = Some(serde_json::Value::Object(packed_args));
+                    }
+                    
+                    let final_args = args.unwrap_or_else(|| serde_json::json!({}));
+                    
+                    if let Some(n) = name {
+                        let wrapped = serde_json::json!({
+                            "function": {
+                                "name": n,
+                                "arguments": final_args
+                            }
+                        });
+                        if let Ok(call) = serde_json::from_value::<ollama_rs::generation::tools::ToolCall>(wrapped) {
+                            structured_calls.push(call);
+                        }
                     }
                 }
                 
@@ -813,6 +846,7 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         }
 
         self.initialize_session(&initial_user_prompt).await?;
+        // Warmup function removed to prevent MLX engine deadlock on empty prompts.
         
         let mut stream = AgentStream::new(self, stop.clone());
         let max_iterations = 30;
@@ -860,6 +894,10 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                 }
             }
 
+            full_system_prompt.push_str("\n\nCRITICAL RULES REMINDER (re-read every turn):\n\
+             1. TOOL USAGE: ALL code MUST go through `write_file`. NEVER output raw code blocks into chat.\n\
+             2. MOMENTUM: If you receive a tool result, move to the next logical step immediately. Do NOT ask for permission.");
+
             full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
             if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
                 full_system_prompt.push_str(&schema_json);
@@ -888,7 +926,7 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
             let safe_prompt = if h_lock.len() > 1 {
                 format!(
-                    "### ⚠️ USER OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new request.\n\nNEW USER REQUEST:\n{}",
+                    "### ⚠️ SYSTEM OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new directive.\n\nNEW SYSTEM DIRECTIVE:\n{}",
                     initial_user_prompt
                 )
             } else {
@@ -1043,15 +1081,8 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         let runway_report = crate::context_manager::generate_runway_report(used, ctx_limit);
         history_snapshot.push(ChatMessage::new(MessageRole::System, runway_report));
 
-        let pos = history_snapshot.len().saturating_sub(2); // Insert before the directive
-        history_snapshot.insert(pos, ChatMessage::new(
-            MessageRole::System,
-            "CRITICAL RULES REMINDER (re-read every turn):\n\
-             1. ABSOLUTE BAN ON PREAMBLE: Never start with 'Sure', 'Here is', 'Okay', or 'I can do that'.\n\
-             2. REASONING FORMAT: Begin your response IMMEDIATELY with THOUGHT: (standard models) or <think> (reasoning models).\n\
-             3. TOOL USAGE: ALL code MUST go through `write_file`. NEVER output raw code blocks into chat.\n\
-             4. MOMENTUM: If you receive a tool result, move to the next logical step immediately. Do NOT ask for permission.".to_string()
-        ));
+        // Remove the mid-history System insertion that was violating alternating role rules.
+        // We'll rely on the unified system merge in inference.rs to keep these rules active.
         
         let executed_mid_stream = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let (tool_tx, mut tool_rx) = tokio::sync::mpsc::unbounded_channel::<ollama_rs::generation::tools::ToolCall>();
@@ -1506,7 +1537,8 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             None, // tool_registry
         ).await;
 
-        if let Some(tx) = self.event_tx.lock().clone() {
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
             let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("✅ Engine ready.".to_string())).await;
         }
 

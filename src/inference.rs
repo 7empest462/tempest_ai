@@ -431,12 +431,22 @@ impl Backend {
 
                 let mut request_builder = RequestBuilder::new();
                 let mut system_content = Vec::new();
-                let mut other_messages = Vec::new();
+                let mut other_messages: Vec<ollama_rs::generation::chat::ChatMessage> = Vec::new();
                 
                 for msg in &history {
                     if msg.role == MessageRole::System {
                         system_content.push(msg.content.clone());
                     } else {
+                        // --- 🛡️ STRICT ROLE ALTERNATION (COMPRESSOR) ---
+                        // Ministral 8B panics if roles do not strictly alternate (e.g., User -> User).
+                        // If the previous message has the same role, merge them.
+                        if let Some(last) = other_messages.last_mut() {
+                            if last.role == msg.role {
+                                last.content.push_str("\n\n");
+                                last.content.push_str(&msg.content);
+                                continue;
+                            }
+                        }
                         other_messages.push(msg.clone());
                     }
                 }
@@ -567,8 +577,13 @@ impl Backend {
                     let _ = tx.try_send(AgentEvent::SubagentStatus(Some("⚡ MLX Engine: Stream established, waiting for first token...".to_string())));
                 }
 
+                // --- FIRST-TURN METAL WARMUP FIX ---
+                if history.len() >= 5 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                }
+
                 let mut first_token = true;
-                let mut is_thinking = is_reasoning_model; 
+                let mut is_thinking = false; 
                 let mut tag_residue = String::new();
                 let mut in_thought_block = false;
 
@@ -578,10 +593,11 @@ impl Backend {
                     }
                 }
                 let mut last_segments: Vec<String> = Vec::new();
-                let mut should_break = false;
                 
                 while let Some(response) = stream.next().await {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) || should_break { break; }
+
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
+
                     match response {
                         MistralResponse::Chunk(chunk) => {
                             // Forward tool calls if present (future-proofing)
@@ -625,11 +641,10 @@ impl Backend {
                             }
 
                             if let Some(content) = &chunk.choices[0].delta.content {
-                                 let mut text = tag_residue.clone();
+                                let mut text = tag_residue.clone();
                                 text.push_str(content);
                                 tag_residue.clear();
 
-                                // --- 🧠 STREAMING REASONING EXTRACTION (MLX Cross-Chunk) ---
                                 let mut current_pos = 0;
                                 
                                 if first_token && !text.trim().is_empty() {
@@ -657,7 +672,7 @@ impl Backend {
                                         }
                                     }
                                 }
-
+                                    
                                 while current_pos < text.len() {
                                     if !is_thinking && !in_thought_block {
                                         if let Some(start_idx) = text[current_pos..].find("<think>") {
@@ -669,6 +684,7 @@ impl Backend {
                                                 }
                                             }
                                             is_thinking = true;
+                                            current_pos += start_idx + 7;
                                         } else if let Some(found_pos) = {
                                             let upper = text[current_pos..].to_uppercase();
                                             ["THOUGHT:", "PLAN:", "REASONING:", "ANALYSIS:"].iter()
@@ -715,7 +731,6 @@ impl Backend {
 
                                             if !is_implicit_thinking {
                                                 in_thought_block = true;
-                                                
                                                 if let Some(tx) = event_tx.lock().clone() {
                                                     let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
                                                 }
@@ -773,7 +788,7 @@ impl Backend {
                                             break;
                                         }
                                     } else if is_thinking {
-                                    if let Some(end_idx) = text[current_pos..].find("</think>") {
+                                        if let Some(end_idx) = text[current_pos..].find("</think>") {
                                             let reasoning = &text[current_pos..current_pos + end_idx];
                                             reasoning_content.push_str(reasoning);
                                             if let Some(tx) = event_tx.lock().clone() {
@@ -789,6 +804,22 @@ impl Backend {
                                                     let _ = tx.try_send(AgentEvent::SubagentStatus(None));
                                                 }
                                             }
+                                        } else if let Some(json_idx) = text[current_pos..].find("```json") {
+                                            let reasoning = &text[current_pos..current_pos + json_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            is_thinking = false;
+                                            current_pos += json_idx;
+                                        } else if let Some(done_idx) = text[current_pos..].find("DONE:") {
+                                            let reasoning = &text[current_pos..current_pos + done_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            is_thinking = false;
+                                            current_pos += done_idx;
                                         } else if let Some(last_lt) = text[current_pos..].rfind('<') {
                                             let pot_tag = &text[current_pos + last_lt..];
                                             if "</think>".starts_with(pot_tag) {
@@ -811,9 +842,30 @@ impl Backend {
                                             }
                                         } else {
                                             let remaining = &text[current_pos..];
-                                            reasoning_content.push_str(remaining);
-                                            if let Some(tx) = event_tx.lock().clone() {
-                                                let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                            let mut save_residue = 0;
+                                            
+                                            // Check for partial ```json
+                                            for i in 1..=7 {
+                                                if remaining.ends_with(&"```json"[..i]) { save_residue = i; }
+                                            }
+                                            // Check for partial DONE:
+                                            for i in 1..=5 {
+                                                if remaining.ends_with(&"DONE:"[..i]) { save_residue = i; }
+                                            }
+
+                                            if save_residue > 0 {
+                                                let safe_len = remaining.len() - save_residue;
+                                                let safe_part = &remaining[..safe_len];
+                                                reasoning_content.push_str(safe_part);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(safe_part.to_string()));
+                                                }
+                                                tag_residue = remaining[safe_len..].to_string();
+                                            } else {
+                                                reasoning_content.push_str(remaining);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                                }
                                             }
                                             break;
                                         }
@@ -862,25 +914,39 @@ impl Backend {
                                                 current_pos += newline_idx + 2;
                                             }
                                         } else {
-                                            let remaining = text[current_pos..].to_string();
-                                            reasoning_content.push_str(&remaining);
-                                            if let Some(tx) = event_tx.lock().clone() {
-                                                let _ = tx.try_send(AgentEvent::ReasoningToken(remaining));
-                                                let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Reasoning... ({} chars)", reasoning_content.len()))));
+                                            let remaining = &text[current_pos..];
+                                            let mut save_residue = 0;
+                                            
+                                            // Check for partial ```json
+                                            for i in 1..=7 {
+                                                if remaining.ends_with(&"```json"[..i]) { save_residue = i; }
+                                            }
+                                            // Check for partial DONE:
+                                            for i in 1..=5 {
+                                                if remaining.ends_with(&"DONE:"[..i]) { save_residue = i; }
+                                            }
+
+                                            if save_residue > 0 {
+                                                let safe_len = remaining.len() - save_residue;
+                                                let safe_part = &remaining[..safe_len];
+                                                reasoning_content.push_str(safe_part);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(safe_part.to_string()));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Reasoning... ({} chars)", reasoning_content.len()))));
+                                                }
+                                                tag_residue = remaining[safe_len..].to_string();
+                                            } else {
+                                                reasoning_content.push_str(remaining);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Reasoning... ({} chars)", reasoning_content.len()))));
+                                                }
                                             }
                                             break;
                                         }
-                                    } else {
-                                        let action = text[current_pos..].to_string();
-                                        full_content.push_str(&action);
-                                        if let Some(tx) = event_tx.lock().clone() {
-                                            let _ = tx.try_send(AgentEvent::StreamToken(action));
-                                            let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!("⚡ MLX Engine: Generating Action... ({} chars)", full_content.len()))));
-                                        }
-                                        break;
                                     }
                                 }
-                                
+
                                 // --- 🛡️ REPETITION SENTINEL (MLX) ---
                                 let trimmed = content.trim();
                                 if !trimmed.is_empty() && trimmed.len() > 3 {
@@ -892,7 +958,7 @@ impl Backend {
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::StreamToken(warning.to_string()));
                                         }
-                                        should_break = true;
+                                        break;
                                     }
                                 }
                             }

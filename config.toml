@@ -14,13 +14,16 @@ verifier_model = "deepseek-r1:7b"
 # ==========================================
 # The model currently loaded in memory for the MLX backend.
 # Use /switch <name> in the TUI to hot-swap between presets.
-mlx_model = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
-mlx_quant = "Q8_0"
+mlx_model = "bartowski/deepseek-ai_DeepSeek-R1-0528-Qwen3-8B-GGUF"
+mlx_quant = "Q6_K"
 
 # Available MLX presets
-[mlx_presets.r1]
-repo = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
+[mlx_presets.ministral]
+repo = "bartowski/Ministral-8B-Instruct-2410-GGUF"
 quant = "Q8_0"
+[mlx_presets.r1]
+repo = "bartowski/deepseek-ai_DeepSeek-R1-0528-Qwen3-8B-GGUF"
+quant = "Q6_K"
 
 [mlx_presets.qwen_big]
 repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
@@ -41,7 +44,7 @@ top_p_execution = 0.92
 repeat_penalty_planning = 1.18
 repeat_penalty_execution = 1.12
 ctx_planning = 16384
-ctx_execution = 32768
+ctx_execution = 16384
 
 # ==========================================
 # ⚡ MLX SAMPLING PARAMETERS
