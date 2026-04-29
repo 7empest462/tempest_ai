@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Robert Simens. All Rights Reserved.
+// Licensed under the Tempest AI Source-Available License.
+// See LICENSE in the project root for full license information.
+
 // src/mcp_protocol.rs
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

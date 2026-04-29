@@ -1,3 +1,9 @@
+/**
+ * Copyright (c) 2026 Robert Simens. All Rights Reserved.
+ * Licensed under the Tempest AI Source-Available License.
+ * See LICENSE in the project root for full license information.
+ */
+
 import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';

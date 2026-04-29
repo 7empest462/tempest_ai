@@ -1,3 +1,9 @@
+/**
+ * Copyright (c) 2026 Robert Simens. All Rights Reserved.
+ * Licensed under the Tempest AI Source-Available License.
+ * See LICENSE in the project root for full license information.
+ */
+
 // src/utils/tempestBridge.ts
 import * as vscode from 'vscode';
 import { TempestRequest, TempestResponse, TempestChatChunk } from '../types/tempest';
