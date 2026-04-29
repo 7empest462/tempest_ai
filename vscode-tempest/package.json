@@ -1,0 +1,56 @@
+{
+    "name": "vscode-tempest",
+    "displayName": "Tempest AI",
+    "description": "Hardware-Aware Autonomous Engineering Assistant",
+    "version": "0.1.2",
+    "license": "SEE LICENSE IN ROOT",
+    "engines": {
+        "vscode": "^1.90.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "AI"
+    ],
+    "main": "./out/extension.js",
+    "activationEvents": [
+        "onView:tempest.chatView"
+    ],
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "tempest-sidebar",
+                    "title": "Tempest AI",
+                    "icon": "resources/icon.svg"
+                }
+          
+          ]
+        },
+        "views": {
+            "tempest-sidebar": [
+                {
+                    "type": "webview",
+                    "id": "tempest.chatView",
+                    "name": "Tempest Chat",
+                    "icon": "resources/icon.svg"
+                }
+            ]
+        },
+        "commands": [
+            {
+                "command": "tempest.focus",
+                "title": "Tempest: Focus Sidebar"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/vscode": "^1.90.0",
+        "typescript": "^5.4.5"
+    }
+}

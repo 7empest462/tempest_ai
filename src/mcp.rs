@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::time::{timeout, Duration};
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -17,7 +18,6 @@ pub struct McpTool {
 }
 
 pub struct McpClient {
-    #[allow(dead_code)]
     pub name: String,
     #[allow(dead_code)]
     child: Child,
@@ -51,9 +51,10 @@ impl McpClient {
     }
 
     pub async fn initialize(&mut self) -> Result<()> {
+        let id = self.request_id;
         let request = json!({
             "jsonrpc": "2.0",
-            "id": self.request_id,
+            "id": id,
             "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
@@ -66,20 +67,21 @@ impl McpClient {
         });
         self.request_id += 1;
         self.send_request(request).await?;
-        let _response = self.read_response().await?;
+        let _response = self.read_response_with_id(id).await?;
         Ok(())
     }
 
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
+        let id = self.request_id;
         let request = json!({
             "jsonrpc": "2.0",
-            "id": self.request_id,
+            "id": id,
             "method": "tools/list",
             "params": {}
         });
         self.request_id += 1;
         self.send_request(request).await?;
-        let response = self.read_response().await?;
+        let response = self.read_response_with_id(id).await?;
         
         let tools_val = response.get("result").and_then(|r| r.get("tools")).ok_or_else(|| miette!("Invalid tools/list response"))?;
         let tools: Vec<McpTool> = serde_json::from_value(tools_val.clone()).into_diagnostic()?;
@@ -87,9 +89,10 @@ impl McpClient {
     }
 
     pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<String> {
+        let id = self.request_id;
         let request = json!({
             "jsonrpc": "2.0",
-            "id": self.request_id,
+            "id": id,
             "method": "tools/call",
             "params": {
                 "name": name,
@@ -98,7 +101,7 @@ impl McpClient {
         });
         self.request_id += 1;
         self.send_request(request).await?;
-        let response = self.read_response().await?;
+        let response = self.read_response_with_id(id).await?;
         
         if let Some(error) = response.get("error") {
             return Err(miette!("MCP Error: {}", error));
@@ -121,15 +124,62 @@ impl McpClient {
     async fn send_request(&mut self, request: Value) -> Result<()> {
         let mut line = serde_json::to_string(&request).into_diagnostic()?;
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await.into_diagnostic()?;
-        self.stdin.flush().await.into_diagnostic()?;
+        timeout(Duration::from_secs(5), self.stdin.write_all(line.as_bytes()))
+            .await
+            .map_err(|_| miette!("Timeout writing to MCP server stdin"))?
+            .into_diagnostic()?;
+        
+        timeout(Duration::from_secs(2), self.stdin.flush())
+            .await
+            .map_err(|_| miette!("Timeout flushing MCP server stdin"))?
+            .into_diagnostic()?;
         Ok(())
     }
 
-    async fn read_response(&mut self) -> Result<Value> {
-        let mut line = String::new();
-        self.reader.read_line(&mut line).await.into_diagnostic()?;
-        serde_json::from_str(&line).into_diagnostic()
+    async fn read_response_with_id(&mut self, expected_id: i64) -> Result<Value> {
+        loop {
+            let mut line = String::new();
+            let bytes_read = timeout(Duration::from_secs(30), self.reader.read_line(&mut line))
+                .await
+                .map_err(|_| miette!("Timeout reading from MCP server '{}' stdout", self.name))?
+                .into_diagnostic()?;
+
+            if bytes_read == 0 {
+                return Err(miette!("MCP server '{}' closed stdout unexpectedly (EOF)", self.name));
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Attempt to parse line as JSON-RPC
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(val) => {
+                    if val.get("jsonrpc").is_some() {
+                        if let Some(resp_id) = val.get("id").and_then(|i| i.as_i64()) {
+                            if resp_id == expected_id {
+                                return Ok(val);
+                            } else {
+                                // Potentially a notification or out-of-order response
+                                eprintln!("Warning [MCP {}]: Received unexpected ID {} (expected {})", self.name, resp_id, expected_id);
+                                continue;
+                            }
+                        } else if val.get("method").is_some() {
+                            // This is likely a notification (no ID)
+                            continue;
+                        }
+                    }
+                    // Not a standard JSON-RPC object or wrong ID, but valid JSON
+                    continue;
+                }
+                Err(_) => {
+                    // Stdout pollution (debug logs, warnings, etc.)
+                    // In a real TUI, we might want to pipe this to a "System" log window
+                    continue;
+                }
+            }
+        }
     }
 }
 
@@ -145,12 +195,13 @@ impl AgentTool for McpToolProxy {
     fn name(&self) -> &'static str { self.name }
     fn description(&self) -> &'static str { self.description }
     fn tool_info(&self) -> ToolInfo {
+        // We assume input_schema is pre-validated during registration
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name.to_string(),
                 description: self.description.to_string(),
-                parameters: serde_json::from_value(self.input_schema.clone()).unwrap_or_else(|_| schemars::generate::SchemaSettings::draft07().into_generator().into_root_schema_for::<()>()),
+                parameters: serde_json::from_value(self.input_schema.clone()).unwrap(),
             },
         }
     }
@@ -158,6 +209,13 @@ impl AgentTool for McpToolProxy {
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let mut client = self.client.lock().await;
         let original_name = self.name.split('_').skip(1).collect::<Vec<_>>().join("_");
-        client.call_tool(&original_name, args.clone()).await
+        
+        match client.call_tool(&original_name, args.clone()).await {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                // Return the error back to the LLM so it can handle/retry/fix parameters
+                Ok(format!("❌ MCP Tool Error ({}): {}", self.name, e))
+            }
+        }
     }
 }

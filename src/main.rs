@@ -17,6 +17,8 @@ mod inference;
 mod prompts;
 mod checkpoint;
 mod mcp;
+mod mcp_server;
+mod mcp_protocol;
 
 use agent::Agent;
 use clap::Parser;
@@ -74,6 +76,10 @@ struct Cli {
     /// Enable Paged Attention for the MLX Backend (Experimental)
     #[arg(long)]
     paged_attn: bool,
+
+    /// Start as a headless MCP Server (JSON-RPC over stdio) for IDE integration
+    #[arg(long)]
+    mcp_server: bool,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -438,8 +444,13 @@ async fn main() -> Result<()> {
         println!("{} Startup sequence complete. Warming up engine...", "✅".green());
     }
     let _ = agent.warmup().await;
-    if !cli.cli {
+    if !cli.cli && !cli.mcp_server {
         println!("{} Launching TUI...", "🚀".green());
+    }
+
+    if cli.mcp_server {
+        let mut server = crate::mcp_server::McpServer::new(agent);
+        return server.run().await;
     }
 
     if cli.cli {

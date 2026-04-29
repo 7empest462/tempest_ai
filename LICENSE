@@ -1,21 +1,77 @@
-MIT License
+Tempest AI Source-Available License
+Version 1.0
 
-Copyright (c) 2026 Rob Simens
+Copyright (c) 2026 Robert Simens. All Rights Reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. GRANT OF RIGHTS
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+   Subject to the terms of this License, the copyright holder grants you a
+   non-exclusive, non-transferable, royalty-free license to:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+   a) Download, install, and use the Software for personal, educational,
+      or internal business purposes.
+   b) View, study, and modify the source code for your own personal or
+      internal use.
+   c) Contribute improvements back to the official project via pull
+      requests or patches, with the understanding that such contributions
+      are licensed under this same License and the copyright holder retains
+      the right to use them in any way, including commercially.
+
+2. RESTRICTIONS
+
+   You MAY NOT, without prior written permission from the copyright holder:
+
+   a) Sell, sublicense, lease, or otherwise commercially distribute the
+      Software, or any modified version of it, whether as a standalone
+      product or bundled with other software.
+   b) Offer the Software, or any modified or derivative version of it, as
+      a hosted service, managed service, SaaS product, or API to third
+      parties.
+   c) Remove, alter, or obscure this License notice, any copyright notices,
+      or any branding associated with the Software.
+   d) Represent or imply that you are the author or owner of the Software.
+   e) Use the Software to create a competing product or service that
+      substantially replicates the functionality of the Software.
+
+3. OWNERSHIP & COMMERCIAL RIGHTS
+
+   All commercial rights, including but not limited to the right to sell,
+   license commercially, or transfer ownership of the Software, are
+   exclusively reserved by the copyright holder, Robert Simens.
+
+   The copyright holder retains full ownership of the Software and all
+   intellectual property rights therein, including any contributions
+   accepted into the official project.
+
+4. ATTRIBUTION
+
+   Any permitted use of the Software must retain all copyright notices and
+   this License in all copies or substantial portions of the Software.
+
+5. DISCLAIMER OF WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+6. LIMITATION OF LIABILITY
+
+   IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES
+   OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+   ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+   OTHER DEALINGS IN THE SOFTWARE.
+
+7. TERMINATION
+
+   This License is effective until terminated. Your rights under this
+   License will terminate automatically without notice if you fail to
+   comply with any of its terms. Upon termination, you must destroy all
+   copies of the Software in your possession.
+
+8. CONTACT
+
+   For commercial licensing inquiries, partnership opportunities, or
+   acquisition discussions, contact the copyright holder directly.
+
+   Robert Simens
+   https://github.com/7empest462

@@ -108,12 +108,13 @@ pub struct Agent {
     pub rules: crate::rules::RuleEngine,
     pub recent_failures: Arc<DashMap<String, usize>>,
     pub sentinel: crate::sentinel::SentinelManager,
+    pub editor_context: Arc<Mutex<Option<Value>>>,
+    pub safe_mode: Arc<AtomicBool>,
     pub tool_stats: Arc<DashMap<String, (usize, usize)>>,
     pub tool_repetition_stack: Arc<Mutex<Vec<(String, String, Option<String>)>>>,
     pub planner_model: Option<String>,
     pub executor_model: Option<String>,
     pub verifier_model: Option<String>,
-    pub safe_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub mlx_presets: Arc<DashMap<String, crate::MlxPreset>>,
     pub temp_planning: f32,
     pub temp_execution: f32,
@@ -375,6 +376,45 @@ impl<'a> AgentStream<'a> {
 }
 
 impl Agent {
+    pub fn get_tools(&self) -> &DashMap<String, Arc<dyn crate::tools::AgentTool>> {
+        &self.tools
+    }
+
+    pub async fn execute_tool_by_name(&self, name: &str, arguments: &serde_json::Value) -> Result<String> {
+        let tool_entry = self.tools.get(name).ok_or_else(|| miette!("Tool not found: {}", name))?;
+        let tool = tool_entry.value();
+        
+        let ollama = match &*self.backend.read().await {
+            crate::inference::Backend::Ollama(o) => o.clone(),
+            #[cfg(feature = "mlx")]
+            crate::inference::Backend::MLX { .. } => ollama_rs::Ollama::default(),
+        };
+
+        let context = crate::tools::ToolContext {
+            ollama,
+            backend: self.backend.clone(),
+            model: self.model.lock().clone(),
+            sub_agent_model: self.sub_agent_model.clone(),
+            history: self.history.clone(),
+            task_context: self.task_context.clone(),
+            vector_brain: self.vector_brain.clone(),
+            telemetry: self.telemetry.clone(),
+            tx: self.event_tx.lock().clone(),
+            tool_rx: self.tool_rx.clone(),
+            recent_tool_calls: self.recent_tool_calls.clone(),
+            brain_path: self.brain_path.clone(),
+            is_root: self.is_root.clone(),
+            all_tools: self.tool_registry.clone(),
+            checkpoint_mgr: self.checkpoint_mgr.clone(),
+        };
+        
+        tool.execute(arguments, context).await
+    }
+
+    pub fn get_model(&self) -> String {
+        self.model.lock().clone()
+    }
+
     pub async fn new(
         mode: AgentMode, 
         model: String, 
@@ -536,6 +576,7 @@ impl Agent {
             event_tx,
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
             sentinel: crate::sentinel::SentinelManager::new(),
+            editor_context: Arc::new(Mutex::new(None)),
             safe_mode: Arc::new(AtomicBool::new(false)),
 
             tool_stats: Arc::new(DashMap::new()),
@@ -815,6 +856,14 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                             self.mcp_clients.insert(config.name.clone(), client_arc.clone());
 
                             for tool in tools {
+                                // Hardening: Validate schema before registration
+                                if !tool.input_schema.is_object() {
+                                    if let Some(tx) = tx_opt.as_ref() {
+                                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("⚠️ Skipping MCP Tool {}: Malformed Schema (Not an object)", tool.name)));
+                                    }
+                                    continue;
+                                }
+
                                 // Dynamic tool registration with 'static str leaking
                                 let namespaced_name = format!("{}_{}", config.name, tool.name);
                                 let leaked_name: &'static str = Box::leak(namespaced_name.into_boxed_str());
@@ -1053,13 +1102,39 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
             self.recent_failures.clear();
 
+            // Build the user message with editor context injected directly
+            let mut user_message = String::new();
+            
+            if let Some(ctx) = self.editor_context.lock().as_ref() {
+                let file_name = ctx.get("file_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let file_path = ctx.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+                let language = ctx.get("language_id").and_then(|v| v.as_str()).unwrap_or("text");
+                let visible_code = ctx.get("visible_code").and_then(|v| v.as_str()).unwrap_or("");
+                let has_selection = ctx.get("has_selection").and_then(|v| v.as_bool()).unwrap_or(false);
+                let cursor_line = ctx.get("cursor_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                
+                if !visible_code.is_empty() {
+                    user_message.push_str(&format!(
+                        "[EDITOR CONTEXT]\nFile: {} ({})\nPath: {}\nCursor at line: {}\n{}\n```{}\n{}\n```\n\n[USER QUESTION]\n",
+                        file_name,
+                        language,
+                        file_path,
+                        cursor_line,
+                        if has_selection { "The user HIGHLIGHTED/SELECTED the following code:" } else { "Code visible around the cursor:" },
+                        language,
+                        visible_code
+                    ));
+                }
+            }
+
             let safe_prompt = if h_lock.len() > 1 {
                 format!(
-                    "### ⚠️ SYSTEM OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new directive.\n\nNEW SYSTEM DIRECTIVE:\n{}",
+                    "### ⚠️ SYSTEM OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new directive.\n\nNEW SYSTEM DIRECTIVE:\n{}{}",
+                    user_message,
                     initial_user_prompt
                 )
             } else {
-                initial_user_prompt.to_string()
+                format!("{}{}", user_message, initial_user_prompt)
             };
 
             h_lock.push(ChatMessage::new(MessageRole::User, safe_prompt));
