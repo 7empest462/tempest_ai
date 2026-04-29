@@ -145,8 +145,8 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     
                     if (json.method === 'tempest/thought') {
                         this._view?.webview.postMessage({ type: 'tempestThought', value: json.params.text });
-                    } else if (json.method === 'tempest/status') {
-                        this._view?.webview.postMessage({ type: 'tempestStatus', value: json.params.text });
+                    } else if (json.method === 'tempest/edit') {
+                        this._applyEditorEdit(json.params.path, json.params.content);
                     } else if (json.result && json.result.content && json.result.content[0]) {
                         this._view?.webview.postMessage({ type: 'tempestResponse', value: json.result.content[0].text });
                     }
@@ -159,6 +159,23 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         this._tempestProcess.stderr?.on('data', (data: Buffer) => {
             console.error(`Tempest Error: ${data}`);
         });
+    }
+
+    private async _applyEditorEdit(filePath: string, content: string) {
+        const uri = vscode.Uri.file(filePath);
+        const edit = new vscode.WorkspaceEdit();
+        
+        // Replace entire content for now (we can optimize this to line-diffs later)
+        const fullRange = new vscode.Range(
+            new vscode.Position(0, 0),
+            new vscode.Position(100000, 0) // Broad range to cover most files
+        );
+        
+        edit.replace(uri, fullRange, content);
+        const success = await vscode.workspace.applyEdit(edit);
+        if (success) {
+            vscode.window.showTextDocument(uri);
+        }
     }
 
     private _sendToTempest(message: string) {

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Robert Simens. All Rights Reserved.
+// Licensed under the Tempest AI Source-Available License.
+// See the LICENSE file in the project root for full license text.
+
 use miette::{Result, IntoDiagnostic};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -30,6 +34,7 @@ pub enum AgentEvent {
     ContextStatus { used: usize, total: u64 },
     SentinelUpdate { active: Vec<String>, log: String },
     CommandOutput(String),
+    EditorEdit { path: String, content: String },
 }
 
 pub enum ToolResponse {
@@ -378,6 +383,9 @@ pub async fn run_tui(
                 AgentEvent::ContextStatus { used, total } => {
                     app.context_used = used;
                     app.context_total = total;
+                }
+                AgentEvent::EditorEdit { path, .. } => {
+                    app.push_message(format!("📝 [EDITOR SYNC]: Applied changes to {}", path));
                 }
             }
         }

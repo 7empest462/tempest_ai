@@ -154,6 +154,14 @@ impl McpServer {
                                         let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
                                     }
                                 }
+                                crate::tui::AgentEvent::EditorEdit { path, content } => {
+                                    let envelope = json!({ 
+                                        "jsonrpc": "2.0", 
+                                        "method": "tempest/edit", 
+                                        "params": { "path": path, "content": content } 
+                                    });
+                                    let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                                }
                                 _ => {}
                             }
                             let _ = stdout.flush().await;

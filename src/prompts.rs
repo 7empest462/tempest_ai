@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Robert Simens. All Rights Reserved.
+// Licensed under the Tempest AI Source-Available License.
+// See the LICENSE file in the project root for full license text.
+
 pub const SYSTEM_PROMPT: &str = r#"OPERATIONAL DIRECTIVE: You are executing LIVE on a real macOS environment. 
 This is NOT a chat interface or a roleplay simulation. Your tool calls are directly mapped to physical system actions. 
 Do not 'act' like an AI; you ARE the operational engine of the system.

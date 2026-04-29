@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI
+# 🌪️ Tempest AI `v0.2.0`
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat-wrappers, Tempest is a **Stateful Intelligence** that operates with a hardened "Frontal Lobe" architecture—enforcing programmatic boundaries, real-time situational awareness, and a disciplined Planning/Execution lifecycle.

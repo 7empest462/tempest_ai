@@ -150,15 +150,29 @@ impl AgentTool for WriteFileTool {
             }
         }
 
+        let p_clone = path.clone();
+        let c_clone = content.clone();
+        
         // Move blocking file operations to a dedicated thread pool
         tokio::task::spawn_blocking(move || {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).into_diagnostic()?;
+            if let Some(parent) = p_clone.parent() {
+                std::fs::create_dir_all(parent).into_diagnostic()?;
             }
             
-            fs::write(&path, &content).into_diagnostic()?;
-            Ok(format!("Successfully wrote {} bytes to {}. Please verify the file content is correct.{}", content.len(), path.display(), warning))
-        }).await.map_err(|e| miette!("Task join error: {}", e))?
+            std::fs::write(&p_clone, &c_clone).into_diagnostic()?;
+            Ok::<(), miette::Report>(())
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+
+        // --- 🖋️ LIVE EDITOR SYNC ---
+        // If we are in MCP mode (tx is some), send an edit event to the extension
+        if let Some(tx) = _context.tx {
+            let _ = tx.try_send(crate::tui::AgentEvent::EditorEdit { 
+                path: path_owned.clone(), 
+                content: content.clone() 
+            });
+        }
+        
+        Ok(format!("Successfully wrote {} bytes to {}. Please verify the file content is correct.{}", content.len(), path.display(), warning))
     }
 }
 

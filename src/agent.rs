@@ -1410,7 +1410,8 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
     pub async fn executor_dispatch(&self, tool_calls: Vec<ollama_rs::generation::tools::ToolCall>) -> Result<Vec<(String, String, bool)>> {
         let mut results = Vec::new();
-        let mut parallel_batch = Vec::new();
+        let mut current_batch = Vec::new();
+        let mut resource_locks = std::collections::HashSet::new();
 
         // 🛡️ REPETITION SENTINEL: Block identical back-to-back tool calls
         let mut filtered_calls = Vec::new();
@@ -1452,26 +1453,52 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         }
 
         for tool_call in filtered_calls {
-            let tool_name = tool_call.function.name.as_str();
-            let is_modifying = self.tools.get(tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+            let tool_name = tool_call.function.name.clone();
+            let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
+            
+            // Extract target resource (file path) for concurrency checks
+            let resource = tool_call.function.arguments
+                .get("path")
+                .or(tool_call.function.arguments.get("file_path"))
+                .and_then(|v| v.as_str())
+                .map(|s| shellexpand::tilde(s).to_string());
 
-            if is_modifying {
-                // Before running a modifying tool, flush any pending parallel batch
-                if !parallel_batch.is_empty() {
-                    let batch_results = futures::future::join_all(parallel_batch).await;
-                    results.extend(batch_results);
-                    parallel_batch = Vec::new();
+            let mut should_flush = false;
+            
+            if let Some(res) = &resource {
+                if resource_locks.contains(res) {
+                    // Conflict! Must flush current batch before starting this tool
+                    should_flush = true;
+                } else {
+                    resource_locks.insert(res.clone());
                 }
+            } else if is_modifying {
+                // Modifying tool without a clear resource target (e.g. run_command)
+                // Flush to be safe
+                should_flush = true;
+            }
 
-                // ⏪ CHECKPOINT: Snapshot files before modification
-                {
-                    let mut cp = self.checkpoint_mgr.lock();
-                    cp.begin_checkpoint(&format!("Tool: {}", tool_name));
+            if should_flush && !current_batch.is_empty() {
+                let batch_results = futures::future::join_all(current_batch).await;
+                results.extend(batch_results);
+                current_batch = Vec::new();
+                resource_locks.clear();
+                if let Some(res) = &resource { resource_locks.insert(res.clone()); }
+            }
+
+            // Prepare parallel task
+            let self_clone = self.clone();
+            let call_clone = tool_call.clone();
+            
+            let task = async move {
+                let is_mod = self_clone.tools.get(&call_clone.function.name).map(|t| t.is_modifying()).unwrap_or(false);
+                if is_mod {
+                    let mut cp = self_clone.checkpoint_mgr.lock();
+                    cp.begin_checkpoint(&format!("Tool: {}", call_clone.function.name));
                     
-                    // Extract target file path from arguments for snapshotting
-                    if let Some(path_str) = tool_call.function.arguments
+                    if let Some(path_str) = call_clone.function.arguments
                         .get("path")
-                        .or(tool_call.function.arguments.get("file_path"))
+                        .or(call_clone.function.arguments.get("file_path"))
                         .and_then(|v| v.as_str()) 
                     {
                         let expanded = shellexpand::tilde(path_str).to_string();
@@ -1479,39 +1506,33 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                     }
                 }
 
-                // Execute the modifying tool sequentially for safety
-                let result = self.process_single_tool_call(tool_call).await;
+                let res = self_clone.process_single_tool_call(call_clone).await;
                 
-                // Commit checkpoint only if the tool succeeded
-                if result.2 {
-                    let cp_id = self.checkpoint_mgr.lock().commit_checkpoint();
-                    if let Some(id) = cp_id {
-                        let cp_count = self.checkpoint_mgr.lock().checkpoint_count();
-                        let tx_opt = self.event_tx.lock().clone();
-                        if let Some(tx) = tx_opt {
-                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                                format!("⏪ Checkpoint saved (ID: {}...) — /undo available ({} total)", &id[..8], cp_count)
-                            ));
+                if is_mod {
+                    if res.2 {
+                        let cp_id = self_clone.checkpoint_mgr.lock().commit_checkpoint();
+                        if let Some(id) = cp_id {
+                            let cp_count = self_clone.checkpoint_mgr.lock().checkpoint_count();
+                            let tx_opt = self_clone.event_tx.lock().clone();
+                            if let Some(tx) = tx_opt {
+                                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                    format!("⏪ Checkpoint saved (ID: {}...) — /undo available ({} total)", &id[..8], cp_count)
+                                ));
+                            }
                         }
+                    } else {
+                        self_clone.checkpoint_mgr.lock().discard_pending();
                     }
-                } else {
-                    self.checkpoint_mgr.lock().discard_pending();
                 }
-                
-                results.push(result);
-                
-                // BREAK AFTER ONE MODIFYING TOOL
-                // This ensures the AI sees the result of a write/patch before continuing
-                break;
-            } else {
-                // Add to parallel batch for simultaneous execution
-                parallel_batch.push(self.process_single_tool_call(tool_call));
-            }
+                res
+            };
+
+            current_batch.push(task);
         }
 
-        // Flush any remaining parallel batch
-        if !parallel_batch.is_empty() {
-            let batch_results = futures::future::join_all(parallel_batch).await;
+        // Final flush of the remaining batch
+        if !current_batch.is_empty() {
+            let batch_results = futures::future::join_all(current_batch).await;
             results.extend(batch_results);
         }
 
