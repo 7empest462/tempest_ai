@@ -11,7 +11,7 @@ Tempest AI is built for versatility, offering three distinct ways to interact:
 ### 💻 VS Code Sidebar (Recommended)
 The premium engineering experience. A high-fidelity, dark-mode extension that turns your editor into a command center.
 - **🧠 Real-Time Editor Awareness**: Tempest can "see" exactly what you are looking at. It automatically grabs your active file, cursor position, and any code you have highlighted to provide instant, context-aware reasoning.
-- **⚡ Local MLX Engine**: Optimized for Apple Silicon (M1/M2/M3/M4). Utilizes the Metal GPU and Neural Engine for lightning-fast local inference using DeepSeek-R1-8B.
+- **⚡ Ultra-Fast Local Inference**: Supports both **MLX (Apple Silicon)** and **Ollama (NVIDIA/AMD/Intel)**. No data leaves your machine—everything is processed locally on your GPU/NPU.
 - **🧠 Thought Transparency**: Watch Tempest's internal reasoning process unfold in real-time with the dedicated "Thought Process" HUD.
 
 ### 📟 Professional TUI
@@ -26,6 +26,15 @@ An industrial terminal dashboard for full-screen terminal workflows.
 
 ### 🖥️ Standard CLI
 A lightweight, direct command-line interface for rapid tasks, scriptable interactions, and piping workflows.
+
+---
+
+## ⚙️ Engines & Hardware
+Tempest AI is designed to be hardware-agnostic while still squeezing every drop of performance out of your local machine.
+
+- **🍏 MLX Engine (Premium)**: Built specifically for Apple Silicon (M1/M2/M3/M4). Utilizes the Metal GPU and Neural Engine for high-speed, unified-memory inference.
+- **🐋 Ollama Engine (Cross-Platform)**: Fully supports **Linux, Windows, and Intel Macs**. Connect to any model in the Ollama library (DeepSeek-R1, Llama 3, Qwen, etc.) for a flexible, local engineering experience.
+- **🧠 Hybrid Awareness**: Tempest automatically detects your hardware and scales its context window and reasoning loops to match your available VRAM.
 
 ---
 
