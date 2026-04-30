@@ -8,13 +8,15 @@ import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 
+let activeProvider: TempestChatViewProvider | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('Tempest AI is now active!');
 
-    const provider = new TempestChatViewProvider(context.extensionUri);
+    activeProvider = new TempestChatViewProvider(context.extensionUri);
 
     context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(TempestChatViewProvider.viewType, provider)
+        vscode.window.registerWebviewViewProvider(TempestChatViewProvider.viewType, activeProvider)
     );
 
     context.subscriptions.push(
@@ -22,6 +24,12 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.commands.executeCommand('tempest.chatView.focus');
         })
     );
+}
+
+export function deactivate() {
+    if (activeProvider) {
+        activeProvider.dispose();
+    }
 }
 
 class TempestChatViewProvider implements vscode.WebviewViewProvider {
@@ -32,6 +40,16 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
     constructor(private readonly _extensionUri: vscode.Uri) {}
 
     private _disposables: vscode.Disposable[] = [];
+    
+    public dispose() {
+        if (this._tempestProcess) {
+            console.log('[Host] Killing Tempest process...');
+            this._tempestProcess.kill();
+            this._tempestProcess = undefined;
+        }
+        this._disposables.forEach(d => d.dispose());
+        this._disposables = [];
+    }
 
     private _getEditorContext() {
         const editor = vscode.window.activeTextEditor;
@@ -350,6 +368,17 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                         var currentResponseDiv = null;
                         var currentThoughtDiv = null;
 
+                        function formatMarkdown(text) {
+                            // Basic markdown-to-html (bold, code, links, line breaks)
+                            return text
+                                .replace(/&/g, '&amp;')
+                                .replace(/</g, '&lt;')
+                                .replace(/>/g, '&gt;')
+                                .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+                                .replace(/\`(.*?)\`/g, '<code style="background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:3px;">$1</code>')
+                                .replace(/\n/g, '<br/>');
+                        }
+
                         function handleStream(chunk) {
                             if (chunk.reasoning) {
                                 if (!currentThoughtDiv) {
@@ -369,7 +398,10 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                                     currentResponseDiv.innerHTML = '<b>Tempest:</b><br/>';
                                     output.appendChild(currentResponseDiv);
                                 }
-                                currentResponseDiv.innerHTML += chunk.content.replace(/\\n/g, '<br/>');
+                                
+                                // Clean up the raw content and apply basic formatting
+                                const text = chunk.content;
+                                currentResponseDiv.innerHTML += formatMarkdown(text);
                             }
                             output.scrollTop = output.scrollHeight;
                             if (chunk.done) {

@@ -169,43 +169,68 @@ impl Backend {
 
         match self {
             Backend::Ollama(ollama) => {
-                let mut request = ChatMessageRequest::new(model, history).options(options);
-                if let Some(registry) = tool_registry {
-                    request = request.tools(registry);
-                }
-
+                let is_r1 = model.to_lowercase().contains("r1") || model.to_lowercase().contains("deepseek");
                 let tx = event_tx.lock().clone();
                 if let Some(tx) = tx {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
                 }
-                
-                let mut stream = None;
-                let mut last_err = None;
-                for attempt in 1..=3 {
-                    match ollama.send_chat_messages_stream(request.clone()).await {
-                        Ok(s) => {
-                            stream = Some(s);
-                            break;
-                        }
-                        Err(e) => {
-                            let err_msg = e.to_string();
-                            last_err = Some(e);
-                            if attempt < 3 {
-                                let wait_secs = 2u64.pow(attempt as u32 - 1);
-                                let tx_opt = event_tx.lock().clone();
-                                if let Some(tx) = tx_opt {
-                                    let _ = tx.send(AgentEvent::SystemUpdate(format!("🔄 Ollama connection failed. Retrying in {}s... ({})", wait_secs, err_msg))).await;
-                                }
-                                tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+
+                let mut stream = if is_r1 {
+                    // --- 🧠 DEEPSEEK-R1 MANUAL TEMPLATE (OLLAMA) ---
+                    let raw_prompt = build_deepseek_r1_prompt(&history);
+                    let request = ollama_rs::generation::completion::request::GenerationRequest::new(model, raw_prompt)
+                        .options(options);
+                    
+                    let mut s = None;
+                    let mut last_err = None;
+                    for _attempt in 1..=3 {
+                        match ollama.generate_stream(request.clone()).await {
+                            Ok(res) => { s = Some(res); break; }
+                            Err(e) => {
+                                last_err = Some(e);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                             }
                         }
                     }
-                }
+                    let s = s.ok_or_else(|| miette!("Ollama raw stream failed: {:?}", last_err))?;
+                    
+                    // Wrap the generation stream to match the chat stream interface
+                    Box::pin(s.map(|res| {
+                        let chunks = res.map_err(|_| ())?;
+                        let chunk = chunks.first().ok_or(())?;
+                        Ok(ollama_rs::generation::chat::ChatMessageResponse {
+                            model: "".to_string(),
+                            created_at: "".to_string(),
+                            message: ChatMessage {
+                                role: MessageRole::Assistant,
+                                content: chunk.response.clone(),
+                                images: None,
+                                tool_calls: Vec::new(),
+                                thinking: None,
+                            },
+                            done: chunk.done,
+                            final_data: None,
+                            logprobs: None,
+                        })
+                    })) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, ()>> + Send>>
+                } else {
+                    let mut request = ChatMessageRequest::new(model, history).options(options);
+                    if let Some(registry) = tool_registry {
+                        request = request.tools(registry);
+                    }
 
-                let mut stream = stream.ok_or_else(|| {
-                    let msg = last_err.map(|e| e.to_string()).unwrap_or_else(|| "Unknown connection error".to_string());
-                    miette!("Failed to connect to Ollama after 3 attempts: {}", msg)
-                })?;
+                    let mut s = None;
+                    for _ in 1..=3 {
+                        if let Ok(res) = ollama.send_chat_messages_stream(request.clone()).await {
+                            s = Some(res);
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                    let s = s.ok_or_else(|| miette!("Ollama chat stream failed"))?;
+                    Box::pin(s.map(|res| res.map_err(|_| ()))) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, ()>> + Send>>
+                };
+
                 let mut is_thinking = false;
                 let mut first_token = true;
                 let mut last_segments: Vec<String> = Vec::new();
@@ -593,14 +618,26 @@ impl Backend {
                 sampling_params.top_k = Some(40);
                 sampling_params.repetition_penalty = Some(sampling.repeat_penalty as f32);
                 sampling_params.max_len = Some(8192);
-                request_builder = request_builder.set_sampling(sampling_params);
+                request_builder = request_builder.set_sampling(sampling_params.clone());
 
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt.as_ref() {
                     let _ = tx.try_send(AgentEvent::SubagentStatus(Some("⚡ MLX Engine: Dispatching Request to Metal...".to_string())));
                 }
 
-                let mut stream = mistralrs.stream_chat_request(request_builder).await.into_diagnostic()?;
+                let mut stream = if is_reasoning_model {
+                    // --- 🧠 DEEPSEEK-R1 MANUAL TEMPLATE (MLX) ---
+                    // Since mistralrs 0.8.1 RequestBuilder is primarily chat-oriented, 
+                    // we use a single User message with the manual prompt.
+                    // This is a trade-off until raw completion API is verified.
+                    let raw_prompt = build_deepseek_r1_prompt(&history);
+                    let req = RequestBuilder::new()
+                        .add_message(TextMessageRole::User, raw_prompt)
+                        .set_sampling(sampling_params);
+                    mistralrs.stream_chat_request(req).await.into_diagnostic()?
+                } else {
+                    mistralrs.stream_chat_request(request_builder).await.into_diagnostic()?
+                };
                 
                 if let Some(tx) = tx_opt.as_ref() {
                     let _ = tx.try_send(AgentEvent::SubagentStatus(Some("⚡ MLX Engine: Stream established, waiting for first token...".to_string())));
@@ -939,18 +976,44 @@ impl Backend {
                                     }
                                 }
 
-                                // --- 🛡️ REPETITION SENTINEL (MLX) ---
+                                // --- 🛡️ DYNAMIC SENTINELS (MLX) ---
                                 let trimmed = content.trim();
-                                if !trimmed.is_empty() && trimmed.len() > 3 {
-                                    last_segments.push(trimmed.to_string());
-                                    if last_segments.len() > 15 { last_segments.remove(0); }
-                                    if last_segments.iter().filter(|&s| s == trimmed).count() >= 8 {
-                                        let warning = "\n\n⚠️ [REPETITION SENTINEL]: Breaking loop to prevent hallucination plateau.";
+                                if !trimmed.is_empty() {
+                                    // 1. REPETITION SENTINEL
+                                    if trimmed.len() > 3 {
+                                        last_segments.push(trimmed.to_string());
+                                        if last_segments.len() > 15 { last_segments.remove(0); }
+                                        if last_segments.iter().filter(|&s| s == trimmed).count() >= 8 {
+                                            let warning = "\n\n⚠️ [REPETITION SENTINEL]: Breaking loop to prevent hallucination plateau.";
+                                            full_content.push_str(warning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::StreamToken(warning.to_string()));
+                                            }
+                                            break;
+                                        }
+                                    }
+
+                                    // 2. PASSIVITY SENTINEL
+                                    let lower_trimmed = trimmed.to_lowercase();
+                                    if lower_trimmed.contains("would you like me to") || 
+                                       lower_trimmed.contains("shall i") ||
+                                       lower_trimmed.contains("do you want me to") {
+                                        let warning = "\n\n⚠️ [PASSIVITY SENTINEL]: Take action. Do not ask permission for the next logical step.";
                                         full_content.push_str(warning);
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::StreamToken(warning.to_string()));
                                         }
-                                        break;
+                                        // We don't break, just nudge
+                                    }
+
+                                    // 3. CHINESE LEAKAGE SENTINEL
+                                    // Detect any CJK (Chinese, Japanese, Korean) characters
+                                    if trimmed.chars().any(|c| (c >= '\u{4e00}' && c <= '\u{9fff}') || (c >= '\u{3400}' && c <= '\u{4dbf}')) {
+                                        let warning = "\n\n⚠️ [LANGUAGE SENTINEL]: Respond in English only.";
+                                        full_content.push_str(warning);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::StreamToken(warning.to_string()));
+                                        }
                                     }
                                 }
                             }
@@ -1151,4 +1214,46 @@ impl Backend {
             }
         }
     }
+}
+
+fn build_deepseek_r1_prompt(history: &[ChatMessage]) -> String {
+    let mut prompt = String::from("<｜begin of sentence｜>");
+    let mut system_content = Vec::new();
+    for msg in history {
+        if msg.role == MessageRole::System {
+            system_content.push(msg.content.clone());
+        }
+    }
+    if !system_content.is_empty() {
+        prompt.push_str(&system_content.join("\n\n"));
+    }
+    for msg in history {
+        match msg.role {
+            MessageRole::User => {
+                prompt.push_str("<｜User｜>");
+                prompt.push_str(&msg.content);
+            }
+            MessageRole::Assistant => {
+                prompt.push_str("<｜Assistant｜>");
+                if let Some(thinking) = &msg.thinking {
+                    if !thinking.is_empty() {
+                        prompt.push_str("<think>\n");
+                        prompt.push_str(thinking);
+                        prompt.push_str("\n</think>\n");
+                    }
+                }
+                prompt.push_str(&msg.content);
+            }
+            MessageRole::Tool => {
+                prompt.push_str("\n\n[TOOL_RESULT]\n");
+                prompt.push_str(&msg.content);
+                prompt.push_str("\n");
+            }
+            MessageRole::System => {}
+        }
+    }
+    if !prompt.ends_with("<｜Assistant｜>") {
+        prompt.push_str("<｜Assistant｜>");
+    }
+    prompt
 }

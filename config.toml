@@ -55,7 +55,7 @@ mlx_temp_execution = 0.2
 mlx_top_p_planning = 0.95
 mlx_top_p_execution = 0.9
 mlx_repeat_penalty_planning = 1.05
-mlx_repeat_penalty_execution = 1.05
+mlx_repeat_penalty_execution = 1.1
 
 # ==========================================
 # 🧹 BASE SETTINGS

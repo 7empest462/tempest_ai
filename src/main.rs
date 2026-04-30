@@ -286,7 +286,13 @@ async fn main() -> Result<()> {
     let config = load_config(cli.config.as_deref(), !cli.cli);
 
 
-    let system_prompt = crate::prompts::SYSTEM_PROMPT.to_string();
+    let os_name = match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        _ => std::env::consts::OS,
+    };
+    let system_prompt = crate::prompts::SYSTEM_PROMPT.replace("{OS}", os_name);
 
     // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
     let model = if cli.mlx {

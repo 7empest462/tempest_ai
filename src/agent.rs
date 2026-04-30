@@ -705,13 +705,13 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         };
 
         let state_msg = format!(
-            "### TEMPEST INTERNAL STATE ###\n- MODE: {}\n- DIRECTIVE: You have FULL AUTONOMY to execute tools. Write code using write_file tool calls ONLY. Never dump raw code blocks into chat.{}{}\n- ADVISORY: If you see high failure rates, stop and verify your assumptions using read_file or list_dir before retrying.",
-            mode_str, competency_str, whisperer_str
+            "[STATE] {} | DIRECTIVE: AUTONOMY GRANTED. Tool calls ONLY. No raw code.{} | ADVISORY: Verify all path assumptions before retrying.{}",
+            mode_str.to_uppercase(), competency_str, whisperer_str
         );
 
         let mut h_lock = self.history.lock();
         // Remove old state message if it exists to keep context clean
-        h_lock.retain(|m| !m.content.starts_with("### TEMPEST INTERNAL STATE ###"));
+        h_lock.retain(|m| !m.content.starts_with("[STATE]"));
         h_lock.push(ChatMessage::new(MessageRole::System, state_msg));
     }
 
@@ -1118,13 +1118,15 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                 let cursor_line = ctx.get("cursor_line").and_then(|v| v.as_u64()).unwrap_or(0);
                 
                 if !visible_code.is_empty() {
+                    let lines_count = visible_code.lines().count();
                     user_message.push_str(&format!(
-                        "[EDITOR CONTEXT]\nFile: {} ({})\nPath: {}\nCursor at line: {}\n{}\n```{}\n{}\n```\n\n[USER QUESTION]\n",
+                        "[EDITOR] {} ({}, {} lines) | PATH: {} | LINE: {} | {} target:\n```{}\n{}\n```\n\n[USER] ",
                         file_name,
                         language,
+                        lines_count,
                         file_path,
                         cursor_line,
-                        if has_selection { "The user HIGHLIGHTED/SELECTED the following code:" } else { "Code visible around the cursor:" },
+                        if has_selection { "SELECTED" } else { "VISIBLE" },
                         language,
                         visible_code
                     ));
@@ -1302,7 +1304,7 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             while let Some(call) = tool_rx.recv().await {
                 let agent_clone = agent_for_task.clone();
                 join_set.spawn(async move {
-                    agent_clone.process_single_tool_call(call).await
+                    agent_clone.process_single_tool_call(call, false).await
                 });
             }
             while let Some(res) = join_set.join_next().await {
@@ -1372,7 +1374,7 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         if !full_content.trim().is_empty() || !native_tool_calls.is_empty() || !reasoning_content.is_empty() {
             let mut stored_content = full_content.clone();
             if !native_tool_calls.is_empty() && stored_content.is_empty() {
-                stored_content = "THOUGHT: I am executing a structural tool call.".to_string();
+                stored_content = "<think>I am executing a structural tool call.</think>".to_string();
                 // Actively notify the UI if we were silent during the stream
                 if let Some(tx) = self.event_tx.lock().clone() {
                     let _ = tx.try_send(crate::tui::AgentEvent::StreamToken("⚡ [System]: Executing tool call...".to_string()));
@@ -1410,8 +1412,6 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
 
     pub async fn executor_dispatch(&self, tool_calls: Vec<ollama_rs::generation::tools::ToolCall>) -> Result<Vec<(String, String, bool)>> {
         let mut results = Vec::new();
-        let mut current_batch = Vec::new();
-        let mut resource_locks = std::collections::HashSet::new();
 
         // 🛡️ REPETITION SENTINEL: Block identical back-to-back tool calls
         let mut filtered_calls = Vec::new();
@@ -1452,6 +1452,10 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             }
         }
 
+        let mut current_batch: Vec<tokio::task::JoinHandle<(String, String, bool)>> = Vec::new();
+        let mut current_batch_calls = Vec::new();
+        let mut resource_locks = std::collections::HashSet::new();
+
         for tool_call in filtered_calls {
             let tool_name = tool_call.function.name.clone();
             let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
@@ -1467,25 +1471,35 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             
             if let Some(res) = &resource {
                 if resource_locks.contains(res) {
-                    // Conflict! Must flush current batch before starting this tool
                     should_flush = true;
                 } else {
                     resource_locks.insert(res.clone());
                 }
             } else if is_modifying {
-                // Modifying tool without a clear resource target (e.g. run_command)
-                // Flush to be safe
                 should_flush = true;
             }
 
-            if should_flush && !current_batch.is_empty() {
-                let batch_results = futures::future::join_all(current_batch).await;
-                results.extend(batch_results);
+            if should_flush && !current_batch_calls.is_empty() {
+                // --- BATCH APPROVAL GATE ---
+                let approved = self.handle_batch_approval(&current_batch_calls).await;
+                
+                if approved {
+                    let batch_results = futures::future::join_all(current_batch).await;
+                    results.extend(batch_results.into_iter().filter_map(|r| r.ok()));
+                } else {
+                    for call in &current_batch_calls {
+                        results.push((call.function.name.clone(), "Error: Batch execution was rejected by the user.".to_string(), false));
+                    }
+                }
+                
                 current_batch = Vec::new();
+                current_batch_calls = Vec::new();
                 resource_locks.clear();
                 if let Some(res) = &resource { resource_locks.insert(res.clone()); }
             }
 
+            current_batch_calls.push(tool_call.clone());
+            
             // Prepare parallel task
             let self_clone = self.clone();
             let call_clone = tool_call.clone();
@@ -1506,40 +1520,131 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                     }
                 }
 
-                let res = self_clone.process_single_tool_call(call_clone).await;
+                let res = self_clone.process_single_tool_call(call_clone, true).await;
                 
                 if is_mod {
                     if res.2 {
-                        let cp_id = self_clone.checkpoint_mgr.lock().commit_checkpoint();
-                        if let Some(id) = cp_id {
-                            let cp_count = self_clone.checkpoint_mgr.lock().checkpoint_count();
-                            let tx_opt = self_clone.event_tx.lock().clone();
-                            if let Some(tx) = tx_opt {
-                                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                                    format!("⏪ Checkpoint saved (ID: {}...) — /undo available ({} total)", &id[..8], cp_count)
-                                ));
-                            }
-                        }
+                        let _ = self_clone.checkpoint_mgr.lock().commit_checkpoint();
                     } else {
                         self_clone.checkpoint_mgr.lock().discard_pending();
                     }
                 }
                 res
             };
-
-            current_batch.push(task);
+            current_batch.push(tokio::spawn(task));
         }
 
-        // Final flush of the remaining batch
-        if !current_batch.is_empty() {
-            let batch_results = futures::future::join_all(current_batch).await;
-            results.extend(batch_results);
+        if !current_batch_calls.is_empty() {
+            let approved = self.handle_batch_approval(&current_batch_calls).await;
+            if approved {
+                let batch_results = futures::future::join_all(current_batch).await;
+                results.extend(batch_results.into_iter().filter_map(|r| r.ok()));
+            } else {
+                for call in current_batch_calls {
+                    results.push((call.function.name.clone(), "Error: Batch execution was rejected by the user.".to_string(), false));
+                }
+            }
         }
 
         Ok(results)
     }
 
-    async fn process_single_tool_call(&self, tool_call: ollama_rs::generation::tools::ToolCall) -> (String, String, bool) {
+    async fn handle_batch_approval(&self, calls: &[ollama_rs::generation::tools::ToolCall]) -> bool {
+        if !self.safe_mode.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+
+        let mut modifying_previews = Vec::new();
+        let mut tool_names = Vec::new();
+
+        for call in calls {
+            let tool_name = self.repair_tool_name(&call.function.name);
+            if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
+                if tool.is_modifying() {
+                    let args = &call.function.arguments;
+                    let preview = tool.get_approval_preview(args).await;
+                    
+                    let mut prompt_chunk = String::new();
+                    if let Some(p) = preview {
+                        prompt_chunk.push_str(&p);
+                    } else {
+                        let target_path = args.get("path")
+                            .or(args.get("file_path"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| shellexpand::tilde(s).to_string());
+                        
+                        let new_content = args.get("content")
+                            .or(args.get("new_content"))
+                            .and_then(|v| v.as_str());
+                        
+                        if let (Some(path), Some(content)) = (&target_path, new_content) {
+                            let path_buf = std::path::PathBuf::from(path);
+                            let modifications = vec![(path_buf, content.to_string())];
+                            let diff_preview = crate::checkpoint::generate_batch_diff(&modifications);
+                            prompt_chunk.push_str(&diff_preview);
+                        } else {
+                            let args_preview = serde_json::to_string(args)
+                                .unwrap_or_default()
+                                .chars().take(200).collect::<String>();
+                            prompt_chunk.push_str(&format!("Arguments: {}\n", args_preview));
+                        }
+                    }
+                    modifying_previews.push(prompt_chunk);
+                    tool_names.push(tool_name.to_uppercase());
+                }
+            }
+        }
+
+        if modifying_previews.is_empty() {
+            return true;
+        }
+
+        let mut final_prompt = String::new();
+        for chunk in modifying_previews {
+            final_prompt.push_str(&chunk);
+            final_prompt.push_str("\n---\n");
+        }
+
+        let cp_count = self.checkpoint_mgr.lock().checkpoint_count();
+        let batch_label = if tool_names.len() > 1 {
+            format!("BATCH ({} actions: {})", tool_names.len(), tool_names.join(", "))
+        } else {
+            tool_names[0].clone()
+        };
+
+        final_prompt.push_str(&format!(
+            "APPROVE {}? [ENTER/ESC]  (⏪ {} checkpoints available)",
+            batch_label,
+            cp_count
+        ));
+
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(crate::tui::AgentEvent::RequestInput(
+                "BATCH_APPROVAL".to_string(), 
+                final_prompt
+            )).await;
+        }
+
+        // Wait for user response
+        let mut rx_lock = self.tool_rx.lock().await;
+        if let Some(rx) = rx_lock.as_mut() {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(300),
+                rx.recv()
+            ).await {
+                Ok(Some(crate::tui::ToolResponse::Text(ans))) => {
+                    let lower = ans.trim().to_lowercase();
+                    lower == "y" || lower == "yes" || lower.is_empty()
+                }
+                _ => false
+            }
+        } else {
+            false
+        }
+    }
+
+    async fn process_single_tool_call(&self, tool_call: ollama_rs::generation::tools::ToolCall, skip_approval: bool) -> (String, String, bool) {
         let tool_name = self.repair_tool_name(&tool_call.function.name);
             
         let mut args = tool_call.function.arguments.clone();
@@ -1570,86 +1675,24 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         }
 
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
-            if tool.is_modifying() {
-                // --- TRANSPARENT APPROVAL GATE ---
-                if self.safe_mode.load(std::sync::atomic::Ordering::SeqCst) {
-                    let preview = tool.get_approval_preview(&args).await;
-                    let mut prompt = String::new();
+            if tool.is_modifying() && !skip_approval {
+                // Single-tool fallback approval if not already handled by a batch
+                if !self.handle_batch_approval(&[tool_call.clone()]).await {
+                    return (tool_name.clone(), 
+                        format!("Error: Tool '{}' was rejected by the user.", tool_name), 
+                        false);
+                }
+            }
+            
+            // Log modification if in auto-mode
+            if tool.is_modifying() && !self.safe_mode.load(std::sync::atomic::Ordering::SeqCst) {
+                let preview = tool.get_approval_preview(&args).await;
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
                     if let Some(p) = preview {
-                        prompt.push_str(&p);
-                        prompt.push_str("\n\n");
+                        let _ = tx.send(crate::tui::AgentEvent::CommandOutput(format!("🚀 [AUTO-MODIFY]: {}\n{}", tool_name, p))).await;
                     } else {
-                        // ... auto-generate fallback preview ...
-                        let target_path = args.get("path")
-                            .or(args.get("file_path"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| shellexpand::tilde(s).to_string());
-                        
-                        let new_content = args.get("content")
-                            .or(args.get("new_content"))
-                            .and_then(|v| v.as_str());
-                        
-                        if let (Some(path), Some(content)) = (&target_path, new_content) {
-                            let path_buf = std::path::PathBuf::from(path);
-                            let modifications = vec![(path_buf, content.to_string())];
-                            let diff_preview = crate::checkpoint::generate_batch_diff(&modifications);
-                            prompt.push_str(&diff_preview);
-                            prompt.push('\n');
-                        } else {
-                            let args_preview = serde_json::to_string(&args)
-                                .unwrap_or_default()
-                                .chars().take(200).collect::<String>();
-                            prompt.push_str(&format!("Arguments: {}\n", args_preview));
-                        }
-                    }
-                    
-                    let cp_count = self.checkpoint_mgr.lock().checkpoint_count();
-                    prompt.push_str(&format!(
-                        "APPROVE {}? [ENTER/ESC]  (⏪ {} checkpoints available)",
-                        tool_name.to_uppercase(),
-                        cp_count
-                    ));
-
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.send(crate::tui::AgentEvent::RequestInput(
-                            tool_name.clone(), 
-                            prompt
-                        )).await;
-                    }
-
-                    // Wait for user response
-                    let mut rx_lock = self.tool_rx.lock().await;
-                    if let Some(rx) = rx_lock.as_mut() {
-                        match tokio::time::timeout(
-                            tokio::time::Duration::from_secs(300),
-                            rx.recv()
-                        ).await {
-                            Ok(Some(crate::tui::ToolResponse::Text(ans))) => {
-                                let lower = ans.trim().to_lowercase();
-                                if lower != "y" && lower != "yes" {
-                                    return (tool_name.clone(), 
-                                        format!("Error: Tool '{}' could not be executed at this time.", tool_name), 
-                                        false);
-                                }
-                            }
-                            _ => {
-                                return (tool_name.clone(),
-                                    format!("Error: Tool '{}' timed out.", tool_name),
-                                    false);
-                            }
-                        }
-                    }
-                } else {
-                    // PASSIVE LOGGING for High-Velocity Mode
-                    let preview = tool.get_approval_preview(&args).await;
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        if let Some(p) = preview {
-                            let _ = tx.send(crate::tui::AgentEvent::CommandOutput(format!("🚀 [AUTO-MODIFY]: {}\n{}", tool_name, p))).await;
-                        } else {
-                            let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🚀 [AUTO-MODIFY]: Executing {}", tool_name))).await;
-                        }
+                        let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("🚀 [AUTO-MODIFY]: Executing {}", tool_name))).await;
                     }
                 }
             }
