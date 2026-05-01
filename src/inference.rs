@@ -13,7 +13,7 @@ use futures::StreamExt;
 use std::sync::Arc;
 use regex::Regex;
 
-#[cfg(feature = "mlx")]
+#[cfg(target_os = "macos")]
 use mistralrs::{
     GgufModelBuilder, Model, TextMessageRole, 
     Response as MistralResponse, RequestBuilder, SamplingParams,
@@ -31,7 +31,7 @@ pub enum AgentMode {
 
 pub enum Backend {
     Ollama(Ollama),
-    #[cfg(feature = "mlx")]
+    #[cfg(target_os = "macos")]
     MLX {
         model: Model,
         _ctx_limit: usize,
@@ -57,7 +57,7 @@ impl Backend {
     pub fn mode(&self) -> AgentMode {
         match self {
             Backend::Ollama(_) => AgentMode::Ollama,
-            #[cfg(feature = "mlx")]
+            #[cfg(target_os = "macos")]
             Backend::MLX { .. } => AgentMode::MLX,
         }
     }
@@ -68,7 +68,7 @@ impl Backend {
                 Ok((Backend::Ollama(Ollama::default()), model))
             }
             AgentMode::MLX => {
-                #[cfg(feature = "mlx")]
+                #[cfg(target_os = "macos")]
                 {
                     let tx_opt = event_tx.lock().clone();
                     if let Some(tx) = tx_opt {
@@ -139,7 +139,7 @@ impl Backend {
                         embedder: embed_model 
                     }, model))
                 }
-                #[cfg(not(feature = "mlx"))]
+                #[cfg(not(target_os = "macos"))]
                 {
                     Ok((Backend::Ollama(Ollama::default()), model))
                 }
@@ -475,7 +475,7 @@ impl Backend {
                     }
                 }
             }
-            #[cfg(feature = "mlx")]
+            #[cfg(target_os = "macos")]
             Backend::MLX { model: mistralrs, _ctx_limit: _, .. } => {
                 let on_tool_call = on_tool_call;
                 let tx_opt = event_tx.lock().clone();
@@ -1203,7 +1203,7 @@ impl Backend {
                     ollama.generate(request)
                 ).await;
             }
-            #[cfg(feature = "mlx")]
+            #[cfg(target_os = "macos")]
             Backend::MLX { .. } => {
                 // MistralRs doesn't have a 'stop' command, but the OS will reclaim 
                 // all model memory as soon as the main process returns.
@@ -1223,7 +1223,7 @@ impl Backend {
                     .map_err(|e| miette!("Ollama embedding failed: {}", e))?;
                 Ok(res.embeddings.first().cloned().unwrap_or_default())
             }
-            #[cfg(feature = "mlx")]
+            #[cfg(target_os = "macos")]
             Backend::MLX { embedder, .. } => {
                 if let Some(embed) = embedder {
                     let request = EmbeddingRequest::builder().add_prompt(format!("passage: {}", text));

@@ -390,7 +390,7 @@ impl Agent {
         
         let ollama = match &*self.backend.read().await {
             crate::inference::Backend::Ollama(o) => o.clone(),
-            #[cfg(feature = "mlx")]
+            #[cfg(target_os = "macos")]
             crate::inference::Backend::MLX { .. } => ollama_rs::Ollama::default(),
         };
 
@@ -630,7 +630,7 @@ impl Agent {
     pub async fn get_ollama(&self) -> Result<Ollama> {
         match &*self.backend.read().await {
             Backend::Ollama(o) => Ok(o.clone()),
-            #[cfg(feature = "mlx")]
+            #[cfg(target_os = "macos")]
             Backend::MLX { .. } => Err(miette!("Active backend is MLX, not Ollama")),
         }
     }
@@ -2003,7 +2003,7 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         self.backend.read().await.shutdown(self.model.lock().clone()).await;
     }
 
-    #[cfg(feature = "mlx")]
+    #[cfg(target_os = "macos")]
     async fn _unused_placeholder() {}
 }
 

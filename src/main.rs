@@ -391,11 +391,18 @@ async fn main() -> Result<()> {
 
     let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "llama3.2:1b".to_string());
     
-    let mode = if cli.mlx {
-        crate::inference::AgentMode::MLX
-    } else {
-        crate::inference::AgentMode::Ollama
+    let mode = cfg_select! {
+        target_os = "macos" => {
+            if cli.mlx { crate::inference::AgentMode::MLX } else { crate::inference::AgentMode::Ollama }
+        }
+        _ => {
+            crate::inference::AgentMode::Ollama
+        }
     };
+
+    if cli.mlx && cfg!(not(target_os = "macos")) {
+         println!("{} MLX Backend is only available on macOS (Apple Silicon). Defaulting to Ollama...", "⚠️".yellow());
+    }
 
     let quant = cli.quant.or(config.mlx_quant).unwrap_or_else(|| "Q4_K_M".to_string());
 
