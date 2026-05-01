@@ -162,14 +162,14 @@ impl Default for AppConfig {
             executor_model: Some("qwen2.5-coder:7b".to_string()),
             verifier_model: Some("deepseek-r1:7b".to_string()),
             mlx_presets: Some(mlx_presets),
-            temp_planning: Some(0.05),
+            temp_planning: Some(0.6),
             temp_execution: Some(0.25),
             top_p_planning: Some(0.95),
             top_p_execution: Some(0.92),
             repeat_penalty_planning: Some(1.18),
             repeat_penalty_execution: Some(1.12),
             ctx_planning: Some(16384),
-            ctx_execution: Some(32768),
+            ctx_execution: Some(16384),
             mlx_temp_planning: Some(0.6),
             mlx_temp_execution: Some(0.2),
             mlx_top_p_planning: Some(0.95),
@@ -402,6 +402,15 @@ async fn main() -> Result<()> {
     if !cli.cli {
         println!("{} Initializing Tempest AI Agent (Backend: {:?}, Model: {})...", "🚀".blue(), mode, model);
     }
+    
+    // Pre-initialize event channel for MCP mode to capture startup logs
+    let event_tx = Arc::new(parking_lot::Mutex::new(None));
+    let mut event_rx = None;
+    if cli.mcp_server {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        *event_tx.lock() = Some(tx);
+        event_rx = Some(rx);
+    }
 
     let agent = Agent::new(
         mode, 
@@ -431,6 +440,7 @@ async fn main() -> Result<()> {
         config.mlx_repeat_penalty_execution,
         cli.paged_attn || config.paged_attn.unwrap_or(false),
         config.planning_enabled.unwrap_or(true),
+        event_tx,
     ).await?;
     
     if let Err(e) = agent.check_connection().await {
@@ -448,19 +458,23 @@ async fn main() -> Result<()> {
     let _ = agent.resume_session().await;
     if !cli.cli {
         println!("{} Indexing local workspace and skills...", "🧠".cyan());
-    }
-    let _ = agent.initialize_atlas(false).await;
-    if !cli.cli {
+        let agent_init = agent.clone();
+        tokio::spawn(async move {
+            let _ = agent_init.initialize_atlas(false).await;
+            let _ = agent_init.warmup().await;
+        });
         println!("{} Startup sequence complete. Warming up engine...", "✅".green());
     }
-    let _ = agent.warmup().await;
     if !cli.cli && !cli.mcp_server {
         println!("{} Launching TUI...", "🚀".green());
     }
 
     if cli.mcp_server {
-        let mut server = crate::mcp_server::McpServer::new(agent);
-        return server.run().await;
+        let mut server = crate::mcp_server::McpServer::new(agent, event_rx);
+        if let Err(e) = server.run().await {
+            eprintln!("MCP Server error: {}", e);
+        }
+        return Ok(());
     }
 
     if cli.cli {

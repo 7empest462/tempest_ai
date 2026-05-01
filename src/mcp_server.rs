@@ -8,18 +8,98 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::agent::Agent;
 
+use std::sync::Arc;
+use parking_lot::Mutex;
+
 pub struct McpServer {
     agent: Agent,
+    active_chat_id: Arc<Mutex<Option<Value>>>,
+    event_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::tui::AgentEvent>>>>,
 }
 
 impl McpServer {
-    pub fn new(agent: Agent) -> Self {
-        Self { agent }
+    pub fn new(agent: Agent, event_rx: Option<tokio::sync::mpsc::Receiver<crate::tui::AgentEvent>>) -> Self {
+        Self { 
+            agent,
+            active_chat_id: Arc::new(Mutex::new(None)),
+            event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
         let mut reader = BufReader::new(tokio::io::stdin());
         let mut stdout = tokio::io::stdout();
+        
+        let mut rx = self.event_rx.lock().await.take().unwrap_or_else(|| {
+            // Fallback: if no receiver was passed, create a new channel
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            *self.agent.event_tx.lock() = Some(tx);
+            rx
+        });
+        
+        let active_id_clone = self.active_chat_id.clone();
+        let mut stdout_clone = tokio::io::stdout();
+        
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let current_id = active_id_clone.lock().clone();
+                
+                match event {
+                    crate::tui::AgentEvent::SystemUpdate(text) => {
+                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/status", "params": { "text": text } });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                    }
+                    crate::tui::AgentEvent::Thinking(text) => {
+                        let status_text = text.unwrap_or_else(|| "Thinking...".to_string());
+                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/status", "params": { "text": status_text } });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                    }
+                    crate::tui::AgentEvent::SubagentStatus(status) => {
+                        if let Some(text) = status {
+                            let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/status", "params": { "text": text } });
+                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                        }
+                    }
+                    crate::tui::AgentEvent::StreamToken(token) => {
+                        if let Some(id) = current_id {
+                            let resp = TempestResponse::ChatResponse {
+                                payload: ChatPayload { content: token, reasoning: None, is_streaming: true, done: false }
+                            };
+                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
+                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                        }
+                    }
+                    crate::tui::AgentEvent::ReasoningToken(token) => {
+                        if let Some(id) = current_id {
+                            let resp = TempestResponse::ChatResponse {
+                                payload: ChatPayload { content: String::new(), reasoning: Some(token), is_streaming: true, done: false }
+                            };
+                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
+                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                        }
+                    }
+                    crate::tui::AgentEvent::SentinelUpdate { log, .. } => {
+                        if let Some(id) = current_id {
+                            let resp = TempestResponse::ChatResponse {
+                                payload: ChatPayload { content: String::new(), reasoning: Some(log), is_streaming: true, done: false }
+                            };
+                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
+                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                        }
+                    }
+                    crate::tui::AgentEvent::EditorEdit { path, content } => {
+                        let envelope = json!({ 
+                            "jsonrpc": "2.0", 
+                            "method": "tempest/edit", 
+                            "params": { "path": path, "content": content } 
+                        });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                    }
+                    _ => {}
+                }
+                let _ = stdout_clone.flush().await;
+            }
+        });
 
         loop {
             let mut line = String::new();
@@ -34,7 +114,6 @@ impl McpServer {
             let id = request.get("id").cloned();
             let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-            // Handle semantic tempest/* methods
             if method.starts_with("tempest/") {
                 let tempest_req: JsonRpcRequest = match serde_json::from_value(request) {
                     Ok(r) => r,
@@ -52,6 +131,7 @@ impl McpServer {
                 self.handle_tempest_request(id, tempest_req.payload, &mut stdout).await?;
                 continue;
             }
+            // ... (rest of standard MCP methods)
 
             // Fallback to standard MCP
             let response = match method {
@@ -101,83 +181,62 @@ impl McpServer {
         Ok(())
     }
 
-    async fn handle_tempest_request(&self, id: Option<Value>, req: TempestRequest, stdout: &mut tokio::io::Stdout) -> Result<()> {
+    async fn handle_tempest_request(&self, id: Option<Value>, req: TempestRequest, stdout_param: &mut tokio::io::Stdout) -> Result<()> {
         match req {
             TempestRequest::Chat { message, editor_context, .. } => {
-                let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-                *self.agent.event_tx.lock() = Some(tx);
+                println!("DEBUG RUST: Handling tempest/chat - message: '{}'", message);
+
+                // Set active chat ID so the global relay knows where to send tokens
+                *self.active_chat_id.lock() = id.clone();
                 
                 // Update editor context in agent
                 if let Some(ctx) = editor_context {
                     *self.agent.editor_context.lock() = Some(ctx);
+                    println!("DEBUG RUST: Injected editor context");
                 }
 
                 let agent_clone = self.agent.clone();
                 let message_final = message.to_string();
                 let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let mut agent_handle = tokio::spawn(async move { agent_clone.run(message_final, stop_flag).await });
+                let active_chat_id_clone = self.active_chat_id.clone();
+                let id_clone = id.clone();
+                let mut stdout_clone = tokio::io::stdout();
+                
+                // Run the agent asynchronously
+                tokio::spawn(async move {
+                    if let Err(e) = agent_clone.run(message_final, stop_flag).await {
+                        eprintln!("Agent run error: {}", e);
+                    }
+                    
+                    // Send final 'done' response so UI re-enables button
+                    let final_resp = TempestResponse::ChatResponse {
+                        payload: ChatPayload { content: String::new(), reasoning: None, is_streaming: false, done: true }
+                    };
+                    let envelope = json!({ "jsonrpc": "2.0", "id": id_clone, "result": final_resp });
+                    let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                    let _ = stdout_clone.flush().await;
 
-                loop {
-                    tokio::select! {
-                        Some(event) = rx.recv() => {
-                            match event {
-                                crate::tui::AgentEvent::StreamToken(token) => {
-                                    let resp = TempestResponse::ChatResponse {
-                                        payload: ChatPayload { content: token, reasoning: None, is_streaming: true, done: false }
-                                    };
-                                    let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                                    let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                                }
-                                crate::tui::AgentEvent::ReasoningToken(token) => {
-                                    let resp = TempestResponse::ChatResponse {
-                                        payload: ChatPayload { content: String::new(), reasoning: Some(token), is_streaming: true, done: false }
-                                    };
-                                    let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                                    let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                                }
-                                crate::tui::AgentEvent::SentinelUpdate { log, .. } => {
-                                    let resp = TempestResponse::ChatResponse {
-                                        payload: ChatPayload { content: String::new(), reasoning: Some(log), is_streaming: true, done: false }
-                                    };
-                                    let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                                    let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                                }
-                                crate::tui::AgentEvent::SubagentStatus(status) => {
-                                    if let Some(text) = status {
-                                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/status", "params": { "text": text } });
-                                        let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                                    }
-                                }
-                                crate::tui::AgentEvent::Thinking(text) => {
-                                    if let Some(t) = text {
-                                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/thought", "params": { "text": t } });
-                                        let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                                    }
-                                }
-                                crate::tui::AgentEvent::EditorEdit { path, content } => {
-                                    let envelope = json!({ 
-                                        "jsonrpc": "2.0", 
-                                        "method": "tempest/edit", 
-                                        "params": { "path": path, "content": content } 
-                                    });
-                                    let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                                }
-                                _ => {}
-                            }
-                            let _ = stdout.flush().await;
-                        }
-                        res = &mut agent_handle => {
-                            let _res = res.unwrap_or_else(|_| Err(miette!("Agent task panicked")));
-                            let final_resp = TempestResponse::ChatResponse {
-                                payload: ChatPayload { content: String::new(), reasoning: None, is_streaming: false, done: true }
-                            };
-                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": final_resp });
-                            let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                            let _ = stdout.flush().await;
-                            break;
+                    // Clear active chat ID
+                    *active_chat_id_clone.lock() = None;
+                });
+
+                // Send immediate acknowledgment so UI knows request was received
+                let ack = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "method": "tempest/chat",
+                        "payload": {
+                            "content": "",
+                            "reasoning": "Thinking...",
+                            "is_streaming": true,
+                            "done": false
                         }
                     }
-                }
+                });
+
+                let _ = stdout_param.write_all((serde_json::to_string(&ack).unwrap() + "\n").as_bytes()).await;
+                let _ = stdout_param.flush().await;
             }
             TempestRequest::Status => {
                 let model = self.agent.get_model();
@@ -190,8 +249,8 @@ impl McpServer {
                     context_tokens: 0,
                 };
                 let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                let _ = stdout.flush().await;
+                let _ = stdout_param.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                let _ = stdout_param.flush().await;
             }
             TempestRequest::SwitchBackend { backend } => {
                 let resp = TempestResponse::SwitchBackendResponse {
@@ -199,15 +258,15 @@ impl McpServer {
                     message: format!("Switched to {}", backend),
                 };
                 let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                let _ = stdout.flush().await;
+                let _ = stdout_param.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                let _ = stdout_param.flush().await;
             }
             TempestRequest::ClearHistory => {
                 self.agent.clear_history();
                 let resp = TempestResponse::ClearHistoryResponse { success: true };
                 let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                let _ = stdout.flush().await;
+                let _ = stdout_param.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                let _ = stdout_param.flush().await;
             }
             TempestRequest::GetState => {
                 let phase = format!("{:?}", *self.agent.phase.lock());
@@ -217,8 +276,8 @@ impl McpServer {
                     recent_tool_calls: vec![],
                 };
                 let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                let _ = stdout.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                let _ = stdout.flush().await;
+                let _ = stdout_param.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                let _ = stdout_param.flush().await;
             }
         }
         Ok(())

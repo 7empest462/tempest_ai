@@ -447,8 +447,8 @@ impl Agent {
         mlx_repeat_penalty_execution: Option<f32>,
         paged_attn: bool,
         planning_enabled: bool,
+        event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
     ) -> Result<Self> {
-        let event_tx = Arc::new(Mutex::new(None));
         let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
@@ -618,8 +618,9 @@ impl Agent {
 1. YOU ARE THE ACTOR: You possess the tools (`write_file`, `run_command`).
 2. CODE DELIVERY: You are FORBIDDEN from using Markdown code blocks (```python) in your responses. 
 3. THE JSON IS YOUR WORK: Your only way to 'do' work is by outputting a JSON tool call. A JSON tool call is NOT 'raw code'; it is your mandatory delivery mechanism.
-4. If you have code to provide, YOU MUST output the `write_file` tool call. If you don't, the user gets nothing.
-5. NEVER ask the user to write code. You are the engineer; they are the supervisor.");
+4. EDITOR AWARENESS: You have direct visibility into the user's active editor. ALWAYS prioritize the file path and content provided in the `[EDITOR]` block. Never guess a path if one is provided in context.
+5. If you have code to provide, YOU MUST output the `write_file` tool call. If you don't, the user gets nothing.
+6. NEVER ask the user to write code. You are the engineer; they are the supervisor.");
                 }
                 final_system_prompt
             },
@@ -636,12 +637,13 @@ impl Agent {
 
     pub async fn initialize_atlas(&self, force: bool) -> Result<()> {
         let backend = self.backend.read().await;
+        let tx = self.event_tx.lock().clone();
         crate::tools::atlas::run_semantic_indexing(
             &*backend, 
             self.vector_brain.clone(), 
             &self.brain_path, 
             force,
-            self.event_tx.lock().clone()
+            tx
         ).await
     }
     
@@ -1028,8 +1030,14 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
         }
 
         self.initialize_session(&initial_user_prompt).await?;
-        // Warmup function removed to prevent MLX engine deadlock on empty prompts.
         
+        // Immediate Feedback: Signal to the UI that we are starting
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.try_send(crate::tui::AgentEvent::Thinking(Some("Analyzing request...".to_string())));
+            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some("⚡ Tempest Engine: Grounding environment and history...".to_string())));
+        }
+
         let mut stream = AgentStream::new(self, stop.clone());
         let max_iterations = 30;
 
@@ -1063,12 +1071,28 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
             println!("{}", "=".repeat(60).blue());
         }
 
+        let os_name = match std::env::consts::OS {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            "windows" => "Windows",
+            _ => std::env::consts::OS,
+        };
+
         let active_rules = self.rules.get_active_rules(&[]);
         
         {
             let mut h_lock = self.history.lock();
-            let mut full_system_prompt = self.system_prompt.clone();
             
+            // 1. IDENTITY + INVIOLABLE RULES (Base)
+            let mut full_system_prompt = crate::prompts::SYSTEM_PROMPT_BASE.replace("{OS}", os_name);
+            
+            // 2. TOOL SCHEMA (Middle)
+            full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
+            if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
+                full_system_prompt.push_str(&schema_json);
+            }
+
+            // 3. ACTIVE PROJECT RULES (Contextual)
             if !active_rules.is_empty() {
                 full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
                 for rule in active_rules {
@@ -1076,14 +1100,9 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                 }
             }
 
-            full_system_prompt.push_str("\n\nCRITICAL RULES REMINDER (re-read every turn):\n\
-             1. TOOL USAGE: ALL code MUST go through `write_file`. NEVER output raw code blocks into chat.\n\
-             2. MOMENTUM: If you receive a tool result, move to the next logical step immediately. Do NOT ask for permission.");
-
-            full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
-            if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
-                full_system_prompt.push_str(&schema_json);
-            }
+            // 4. OUTPUT FORMAT + CRITICAL RESPONSE RULES + EXAMPLES (Tail)
+            // This is the last thing the model sees, providing the strongest priming.
+            full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_TAIL.replace("{OS}", os_name));
 
             if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
                 h_lock[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
@@ -1103,47 +1122,20 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                     break;
                 }
             }
+            // We store ONLY the user's original prompt in the permanent history.
+            // The editor context is prepended dynamically in 'planner_turn' but is NOT saved to disk.
+            let mut user_msg = ChatMessage::new(MessageRole::User, initial_user_prompt.to_string());
 
-            self.recent_failures.clear();
-
-            // Build the user message with editor context injected directly
-            let mut user_message = String::new();
-            
-            if let Some(ctx) = self.editor_context.lock().as_ref() {
-                let file_name = ctx.get("file_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let file_path = ctx.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-                let language = ctx.get("language_id").and_then(|v| v.as_str()).unwrap_or("text");
-                let visible_code = ctx.get("visible_code").and_then(|v| v.as_str()).unwrap_or("");
-                let has_selection = ctx.get("has_selection").and_then(|v| v.as_bool()).unwrap_or(false);
-                let cursor_line = ctx.get("cursor_line").and_then(|v| v.as_u64()).unwrap_or(0);
-                
-                if !visible_code.is_empty() {
-                    let lines_count = visible_code.lines().count();
-                    user_message.push_str(&format!(
-                        "[EDITOR] {} ({}, {} lines) | PATH: {} | LINE: {} | {} target:\n```{}\n{}\n```\n\n[USER] ",
-                        file_name,
-                        language,
-                        lines_count,
-                        file_path,
-                        cursor_line,
-                        if has_selection { "SELECTED" } else { "VISIBLE" },
-                        language,
-                        visible_code
-                    ));
-                }
+            if h_lock.len() > 1 {
+                user_msg.content = format!(
+                    "### ⚠️ SYSTEM OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new directive.\n\nNEW SYSTEM DIRECTIVE:\n{}",
+                    initial_user_prompt
+                );
             }
 
-            let safe_prompt = if h_lock.len() > 1 {
-                format!(
-                    "### ⚠️ SYSTEM OVERRIDE DIRECTIVE ###\nThe user has explicitly submitted a new command/topic. YOU MUST completely abandon any previous uncompleted tool loops, errors, or planning states. Pivot your absolute focus to fulfilling this new directive.\n\nNEW SYSTEM DIRECTIVE:\n{}{}",
-                    user_message,
-                    initial_user_prompt
-                )
-            } else {
-                format!("{}{}", user_message, initial_user_prompt)
-            };
+            h_lock.push(user_msg);
 
-            h_lock.push(ChatMessage::new(MessageRole::User, safe_prompt));
+            self.recent_failures.clear();
 
             // Ensure we always have at least one User message
             if h_lock.iter().filter(|m| m.role == MessageRole::User).count() == 0 {
@@ -1341,10 +1333,50 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                 context_size: self.ctx_execution,
             }
         };
+        
+        let mut final_history = history_snapshot.clone();
+        
+        // --- 🧠 DYNAMIC CONTEXT INJECTION ---
+        // We prepend the editor context to the LAST user message in this turn's memory ONLY.
+        // This keeps the long-term history (and history.json) clean of redundant code blocks.
+        if let Some(ctx) = self.editor_context.lock().as_ref() {
+            let visible_code = ctx.get("visible_code").and_then(|v| v.as_str()).unwrap_or("");
+            if !visible_code.is_empty() {
+                if let Some(last_user_msg) = final_history.iter_mut().rev().find(|m| m.role == MessageRole::User) {
+                    let file_name = ctx.get("file_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let file_path = ctx.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+                    let language = ctx.get("language_id").and_then(|v| v.as_str()).unwrap_or("text");
+                    let has_selection = ctx.get("has_selection").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let cursor_line = ctx.get("cursor_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let lines_count = visible_code.lines().count();
+
+                    let context_prefix = format!(
+                        "### [EDITOR GROUND TRUTH] ###\n\
+                        - ACTIVE FILE: {}\n\
+                        - FULL PATH: {}\n\
+                        - LANGUAGE: {}\n\
+                        - CURSOR LINE: {}\n\
+                        - STATUS: {} contains {} lines of code\n\
+                        \n\
+                        ```{}\n\
+                        {}\n\
+                        ```\n\
+                        ### [END EDITOR CONTEXT] ###\n\n",
+                        file_name, file_path, language, cursor_line,
+                        if has_selection { "SELECTION" } else { "VISIBLE CODE" },
+                        lines_count, language, visible_code
+                    );
+                    
+                    if !last_user_msg.content.contains("[EDITOR]") {
+                        last_user_msg.content = format!("{} [USER] {}", context_prefix, last_user_msg.content);
+                    }
+                }
+            }
+        }
 
         let output = self.backend.read().await.stream_chat(
             model_name,
-            history_snapshot,
+            final_history,
             sampling,
             self.event_tx.clone(),
             stop,
@@ -1828,6 +1860,36 @@ VERIFICATION IS MANDATORY: After every file modification, YOU MUST verify your w
                 }
             }
         }
+
+        // 🧠 FUZZY TOOL CATCHER: If no formal JSON tool calls found, look for raw code blocks.
+        if calls.is_empty() {
+            let code_re = regex::Regex::new(r"```(?P<lang>\w+)?\n(?P<code>[\s\S]*?)\n```").unwrap();
+            let file_re = regex::Regex::new(r"(?i)(?:file|to|in|at)\s+`?([\w\-\./]+\.(?:py|rs|js|ts|c|cpp|h|go|html|css|json|toml|yaml|yml|md|sh))`?").unwrap();
+            
+            for caps in code_re.captures_iter(content) {
+                let code = caps.name("code").map(|m| m.as_str()).unwrap_or("");
+                let lang = caps.name("lang").map(|m| m.as_str()).unwrap_or("text");
+
+                if lang == "json" || code.is_empty() { continue; }
+
+                // Look for a filename in the preceding 200 characters
+                let block_start = caps.get(0).unwrap().start();
+                let search_start = block_start.saturating_sub(200);
+                let context = &content[search_start..block_start];
+
+                if let Some(f_caps) = file_re.captures_iter(context).last() {
+                    let path = f_caps.get(1).unwrap().as_str();
+                    calls.push(serde_json::json!({
+                        "name": "write_file",
+                        "arguments": {
+                            "path": path,
+                            "content": code
+                        }
+                    }));
+                }
+            }
+        }
+
         Ok(calls)
     }
 
@@ -1980,8 +2042,10 @@ mod tests {
             None,
             false,
             true,
-        ).await.unwrap();
-
+            Arc::new(Mutex::new(None)),
+        ).await;
+        assert!(agent.is_ok());
+        let agent = agent.unwrap();
         assert_eq!(agent.sub_agent_model, "test-sub-model");
         assert!(!agent.tool_registry.is_empty());
         assert!(!agent.tools.is_empty());

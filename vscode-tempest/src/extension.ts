@@ -7,13 +7,25 @@
 import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
+import * as readline from 'readline';
+import * as fs from 'fs';
+import * as os from 'os';
 
 let activeProvider: TempestChatViewProvider | undefined;
+let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Tempest AI is now active!');
 
     activeProvider = new TempestChatViewProvider(context.extensionUri);
+    
+    // Initialize Status Bar
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'tempest.focus';
+    statusBarItem.text = '$(tornado) Tempest: Ready';
+    statusBarItem.tooltip = 'Click to open Tempest Chat';
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(TempestChatViewProvider.viewType, activeProvider)
@@ -22,6 +34,29 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('tempest.focus', () => {
             vscode.commands.executeCommand('tempest.chatView.focus');
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('tempest.clearHistory', async () => {
+            const historyPath = path.join(os.homedir(), 'Library', 'Application Support', 'tempest_ai', 'history.json');
+            
+            // 1. Wipe in-memory logs and kill process
+            if (activeProvider) {
+                activeProvider.refresh(); 
+            }
+
+            // 2. Delete the physical file
+            if (fs.existsSync(historyPath)) {
+                try {
+                    fs.unlinkSync(historyPath);
+                    vscode.window.showInformationMessage('Tempest AI: History wiped and backend reset.');
+                } catch (e) {
+                    vscode.window.showErrorMessage(`Failed to delete history file: ${e}`);
+                }
+            } else {
+                vscode.window.showInformationMessage('Tempest AI: Backend reset (no history file found).');
+            }
         })
     );
 }
@@ -49,38 +84,51 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         }
         this._disposables.forEach(d => d.dispose());
         this._disposables = [];
+        this._logHistory = [];
+        this._isWebviewReady = false;
     }
 
-    private _getEditorContext() {
+    public refresh() {
+        this._logHistory = [];
+        if (this._tempestProcess) {
+            this._tempestProcess.kill();
+            this._tempestProcess = undefined;
+        }
+        if (this._view) {
+            this._view.webview.html = this._getHtmlForWebview(this._view.webview);
+        }
+    }
+
+    private _getEditorContext(): any {
         const editor = vscode.window.activeTextEditor;
-        if (!editor) return null;
+        
+        if (!editor) {
+            return {
+                file_path: "unknown",
+                language: "unknown",
+                content: "",
+                cursor_line: 0
+            };
+        }
 
         const document = editor.document;
         const selection = editor.selection;
-        const selectedText = document.getText(selection);
-
-        // Build a focused code window: selected text OR ±20 lines around cursor
-        let visibleCode = '';
-        if (selectedText.trim().length > 0) {
-            visibleCode = selectedText;
-        } else {
-            const cursorLine = selection.active.line;
-            const startLine = Math.max(0, cursorLine - 20);
-            const endLine = Math.min(document.lineCount - 1, cursorLine + 20);
-            const range = new vscode.Range(startLine, 0, endLine, document.lineAt(endLine).text.length);
-            visibleCode = document.getText(range);
-        }
 
         return {
-            file_path: document.uri.fsPath,
-            file_name: document.uri.fsPath.split('/').pop() || '',
+            file_name: path.basename(document.fileName),
+            file_path: document.fileName,
             language_id: document.languageId,
-            visible_code: visibleCode,
-            has_selection: selectedText.trim().length > 0,
+            content: document.getText(),
+            selected_text: document.getText(selection),
             cursor_line: selection.active.line + 1,
-            total_lines: document.lineCount
+            cursor_column: selection.active.character + 1,
+            visible_code: document.getText() // Map to visible_code for backend compatibility
         };
     }
+
+    private _pendingRequests = new Map<string | number, string>();
+    private _isWebviewReady = false;
+    private _logHistory: string[] = []; // PERSISTENT history
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -88,6 +136,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken,
     ) {
         this._view = webviewView;
+        this._isWebviewReady = false; // Reset for new view
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -95,44 +144,49 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         };
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
-
-        // Clear previous listeners if re-resolving
-        this._disposables.forEach(d => d.dispose());
-        this._disposables = [];
-
-        // Start backend if needed
+        
+        // Start backend if not already running
         if (!this._tempestProcess) {
             this._startTempest();
         }
 
         // Attach message listener
         this._disposables.push(
-            webviewView.webview.onDidReceiveMessage(data => {
-                // console.log(`[Host] Received: ${data.type} (ID: ${data.id})`);
-                switch (data.type) {
-                    case 'tempest-request': {
-                        const params = { ...data.payload.params };
-                        
-                        // Inject editor context for chat requests
-                        if (data.payload.method === 'tempest/chat') {
-                            params.editor_context = this._getEditorContext();
-                        }
+            webviewView.webview.onDidReceiveMessage(async (data) => {
+                if (data.type === 'webview-ready') {
+                    console.log('[Host] Webview signaled READY');
+                    this._isWebviewReady = true;
+                    if (this._logHistory.length > 0) {
+                        this._logHistory.forEach(log => {
+                            webviewView.webview.postMessage({ type: 'tempestThought', value: log });
+                        });
+                    }
+                    return;
+                }
 
-                        const rpc = JSON.stringify({
-                            jsonrpc: "2.0",
-                            id: data.id,
-                            method: data.payload.method,
-                            params: params
-                        }) + "\n";
-                        
-                        if (this._tempestProcess && this._tempestProcess.stdin && this._tempestProcess.stdin.writable) {
-                            // console.log(`[Host] Writing to Rust: ${data.payload.method}`);
-                            this._tempestProcess.stdin.write(rpc);
-                        } else {
-                            console.error('[Host] Rust process not ready or stdin closed');
-                            this._view?.webview.postMessage({ type: 'tempestStatus', value: 'Error: Backend not reachable.' });
-                        }
-                        break;
+                if (data.type === 'tempest-request' && data.id) {
+                    let params = data.payload?.params || {};
+                    const method = data.payload?.method || 'tempest/chat';
+
+                    // === AUTO CONTEXT LOGIC ===
+                    if (params.auto_context === true || method === 'tempest/chat') {
+                        params.editor_context = this._getEditorContext();
+                        console.log('[Host] Injected editor context');
+                    }
+
+                    const rpcObj = {
+                        jsonrpc: "2.0",
+                        id: data.id,
+                        method: method,
+                        params: params
+                    };
+
+                    this._pendingRequests.set(data.id, method);
+
+                    if (this._tempestProcess?.stdin?.writable) {
+                        this._tempestProcess.stdin.write(JSON.stringify(rpcObj) + "\n");
+                    } else {
+                        console.error('[Host] Tempest process stdin not writable');
                     }
                 }
             })
@@ -140,36 +194,90 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private _startTempest() {
-        // Use the absolute path to the release binary we just built
         const binaryPath = '/Volumes/Corsair_Lab/Home/Projects/tempest_ai/target/release/tempest_ai'; 
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || '/tmp';
+
+        console.log(`[Host] Spawning Tempest: ${binaryPath} in ${cwd}`);
         
-        this._tempestProcess = spawn(binaryPath, ['--mcp-server', '--mlx'], {
-            cwd: vscode.workspace.workspaceFolders?.[0].uri.fsPath
+        this._tempestProcess = spawn(binaryPath, ['--mcp-server', '--mlx'], { cwd });
+
+        this._tempestProcess.on('error', (err) => {
+            console.error('[Host] Failed to start Tempest process:', err);
+            if (this._view) {
+                this._view.webview.postMessage({ type: 'tempestThought', value: `\n❌ ERROR: Failed to start backend: ${err.message}\n` });
+            }
         });
 
-        this._tempestProcess.stdout?.on('data', (data: Buffer) => {
-            const message = data.toString();
-            const lines = message.split('\n').filter((l: string) => l.trim().length > 0);
-            for (const line of lines) {
+        this._tempestProcess.on('exit', (code, signal) => {
+            console.log(`[Host] Tempest process exited with code ${code} and signal ${signal}`);
+            if (this._view) {
+                this._view.webview.postMessage({ type: 'tempestThought', value: `\n⚠️ Backend exited (Code: ${code}, Signal: ${signal})\n` });
+            }
+        });
+
+        // Combined listener for Zero-Latency and JSON-RPC
+        const rl = readline.createInterface({
+            input: this._tempestProcess.stdout!,
+            terminal: false
+        });
+
+        rl.on('line', (line: string) => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+
+            // DIAGNOSTIC: Log every single line received to the Debug Console
+            console.log(`[Backend -> Host] ${trimmed}`);
+
+            // Log everything to history regardless of type
+            this._logHistory.push(line + '\n');
+
+            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
                 try {
-                    const json = JSON.parse(line);
-                    if (json.id && (json.result || json.error)) {
-                        this._view?.webview.postMessage({
+                    const json = JSON.parse(trimmed);
+                    const method = json.method || this._pendingRequests.get(json.id);
+                    if (json.id) this._pendingRequests.delete(json.id);
+
+                    if (this._view && this._isWebviewReady) {
+                        this._view.webview.postMessage({
                             type: 'tempest-response',
                             id: json.id,
-                            payload: json.result || json.error
+                            method: method,
+                            payload: json
                         });
+
+                        // Special Case: Bridge notifications to the phase-tracking system
+                        if (method === 'tempest/status') {
+                            const statusText = json.params?.text || '';
+                            let phase = 'READY';
+                            
+                            if (statusText.toLowerCase().includes('thinking')) phase = 'THINKING';
+                            if (statusText.toLowerCase().includes('analyzing')) phase = 'ANALYZING';
+                            if (statusText.toLowerCase().includes('grounding')) phase = 'GROUNDING';
+                            if (statusText.toLowerCase().includes('metal') || statusText.toLowerCase().includes('warm')) phase = 'LOADING';
+                            if (statusText.toLowerCase().includes('ready')) phase = 'READY';
+
+                            this._view.webview.postMessage({
+                                type: 'tempest-response',
+                                payload: { phase: phase }
+                            });
+                        }
                     }
                     
-                    if (json.method === 'tempest/thought') {
-                        this._view?.webview.postMessage({ type: 'tempestThought', value: json.params.text });
-                    } else if (json.method === 'tempest/edit') {
-                        this._applyEditorEdit(json.params.path, json.params.content);
-                    } else if (json.result && json.result.content && json.result.content[0]) {
-                        this._view?.webview.postMessage({ type: 'tempestResponse', value: json.result.content[0].text });
+                    if (method === 'tempest/status') {
+                        statusBarItem.text = `$(tornado) Tempest: ${json.params?.text || 'Ready'}`;
+                    } else if (method === 'tempest/thought') {
+                        statusBarItem.text = `$(sync~spin) Tempest: Thinking...`;
                     }
                 } catch (e) {
-                    this._view?.webview.postMessage({ type: 'tempestStatus', value: line });
+                    // Not valid JSON, treat as raw log below
+                }
+            } else {
+                // Raw log
+                if (this._view && this._isWebviewReady) {
+                    this._view.webview.postMessage({
+                        type: 'tempestThought',
+                        value: line + '\n'
+                    });
                 }
             }
         });
@@ -183,292 +291,304 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         const uri = vscode.Uri.file(filePath);
         const edit = new vscode.WorkspaceEdit();
         
-        // Replace entire content for now (we can optimize this to line-diffs later)
+        // Replace entire content for now
         const fullRange = new vscode.Range(
             new vscode.Position(0, 0),
-            new vscode.Position(100000, 0) // Broad range to cover most files
+            new vscode.Position(100000, 0)
         );
         
         edit.replace(uri, fullRange, content);
-        const success = await vscode.workspace.applyEdit(edit);
-        if (success) {
-            vscode.window.showTextDocument(uri);
-        }
+        await vscode.workspace.applyEdit(edit);
     }
 
-    private _sendToTempest(message: string) {
-        const editor = vscode.window.activeTextEditor;
-        let context = {};
-        
-        if (editor) {
-            const document = editor.document;
-            const selection = editor.selection;
-            context = {
-                activeFile: document.fileName,
-                cursorLine: selection.active.line + 1,
-                cursorChar: selection.active.character,
-                selectionText: document.getText(selection),
-                visibleRange: {
-                    start: editor.visibleRanges[0]?.start.line + 1,
-                    end: editor.visibleRanges[0]?.end.line + 1
-                }
-            };
-        }
-
-        const rpc = JSON.stringify({
-            jsonrpc: "2.0",
-            id: Date.now(),
-            method: "tools/call",
-            params: {
-                name: "chat",
-                arguments: { 
-                    message,
-                    editorContext: context
-                }
-            }
-        }) + "\n";
-        
-        this._tempestProcess?.stdin?.write(rpc);
-    }
-
-    private _getHtmlForWebview(webview: vscode.Webview) {
+    private _getHtmlForWebview(webview: vscode.Webview): string {
         return `<!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    :root {
-                        --bg: #0d1117;
-                        --fg: #c9d1d9;
-                        --accent: #58a6ff;
-                        --border: #30363d;
-                        --bubble-user: #161b22;
-                        --bubble-tempest: #21262d;
-                    }
-                    body { 
-                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                        background-color: var(--bg); 
-                        color: var(--fg); 
-                        font-size: 13px; 
-                        margin: 0;
-                        padding: 0;
-                    }
-                    .chat-container { display: flex; flex-direction: column; height: 100vh; }
-                    #output { 
-                        flex: 1; 
-                        overflow-y: auto; 
-                        padding: 16px; 
-                        display: flex; 
-                        flex-direction: column; 
-                        gap: 12px;
-                    }
-                    .message { 
-                        padding: 10px 14px; 
-                        border-radius: 12px; 
-                        max-width: 90%;
-                        line-height: 1.6;
-                        word-wrap: break-word;
-                    }
-                    .user { 
-                        align-self: flex-end;
-                        background: var(--bubble-user); 
-                        border: 1px solid var(--border);
-                        color: var(--accent);
-                    }
-                    .tempest { 
-                        align-self: flex-start;
-                        background: var(--bubble-tempest); 
-                        border: 1px solid var(--border);
-                    }
-                    .thought { 
-                        color: #8b949e; 
-                        font-style: italic; 
-                        font-size: 12px; 
-                        border-left: 2px solid #30363d; 
-                        padding-left: 10px; 
-                        margin: 8px 0; 
-                        background: rgba(48, 54, 61, 0.2);
-                        padding: 8px;
-                        border-radius: 4px;
-                    }
-                    .status-log { 
-                        font-size: 10px; 
-                        color: #8b949e; 
-                        opacity: 0.8;
-                        border-bottom: 1px solid var(--border);
-                        padding-bottom: 4px;
-                        margin-bottom: 8px;
-                    }
-                    #input-container { 
-                        padding: 16px; 
-                        background: #161b22; 
-                        border-top: 1px solid var(--border);
-                        display: flex;
-                        gap: 10px;
-                    }
-                    #input { 
-                        flex: 1;
-                        padding: 10px 12px; 
-                        background: #0d1117; 
-                        border: 1px solid var(--border); 
-                        color: white; 
-                        outline: none; 
-                        border-radius: 6px;
-                        transition: border-color 0.2s;
-                    }
-                    #input:focus { border-color: var(--accent); }
-                    #send-btn {
-                        background: var(--accent);
-                        color: white;
-                        border: none;
-                        border-radius: 6px;
-                        padding: 0 16px;
-                        font-weight: bold;
-                        cursor: pointer;
-                        transition: opacity 0.2s;
-                    }
-                    #send-btn:hover { opacity: 0.9; }
-                </style>
-            </head>
-            <body>
-                <div class="chat-container">
-                    <div id="output">
-                        <div class="status-log">🌪️ Tempest AI Initialized (Semantic Protocol v1.2)</div>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tempest AI</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.4.0/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --tempest-bg: var(--vscode-sideBar-background);
+            --tempest-fg: var(--vscode-sideBar-foreground);
+            --tempest-accent: #4da6ff;
+            --tempest-success: #00cc88;
+            --tempest-border: var(--vscode-sideBar-border);
+            --tempest-glass: var(--vscode-editor-background);
+        }
+
+        body {
+            margin: 0; padding: 0;
+            background: var(--tempest-bg);
+            color: var(--tempest-fg);
+            font-family: var(--vscode-font-family);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #app { height: 100%; display: flex; flex-direction: column; }
+
+        .tempest-app { height: 100%; display: flex; flex-direction: column; }
+        .header { padding: 12px 16px; border-bottom: 1px solid var(--tempest-border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+        .logo { display: flex; align-items: center; gap: 8px; font-size: 1.2rem; font-weight: 600; }
+        .tornado { font-size: 24px; }
+        .title { background: linear-gradient(90deg, #4da6ff, #00ffaa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .status { font-size: 0.7rem; padding: 2px 8px; border-radius: 12px; font-weight: 500; background: rgba(77, 166, 255, 0.1); color: var(--tempest-accent); }
+        
+        .tabs { display: flex; border-bottom: 1px solid var(--tempest-border); }
+        .tabs button { flex: 1; padding: 10px 0; background: transparent; border: none; color: inherit; cursor: pointer; font-size: 0.85rem; opacity: 0.7; }
+        .tabs button.active { border-bottom: 2px solid var(--tempest-accent); color: var(--tempest-accent); opacity: 1; }
+
+        .chat-tab, .upload-tab { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .chat-output { flex: 1; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+        
+        .message { padding: 8px 12px; border-radius: 6px; max-width: 90%; font-size: 13px; line-height: 1.5; word-break: break-word; }
+        .message.user { align-self: flex-end; background: var(--tempest-accent); color: white; }
+        .message.tempest { align-self: flex-start; background: var(--tempest-glass); border: 1px solid var(--tempest-border); }
+        .message pre { background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; overflow-x: auto; }
+        .message code { font-family: var(--vscode-editor-font-family); }
+
+        .thought-block { margin: 4px 0; padding: 8px; background: rgba(255,255,255,0.03); border-left: 2px solid var(--tempest-accent); font-size: 11px; color: #888; }
+        .thought-header { font-weight: bold; font-size: 9px; margin-bottom: 4px; }
+        .thought-content { white-space: pre-wrap; }
+
+        .input-area { padding: 12px; display: flex; gap: 8px; background: var(--tempest-bg); border-top: 1px solid var(--tempest-border); }
+        .chat-input { flex: 1; padding: 8px 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; font-size: 13px; }
+        .send-btn { width: 32px; height: 32px; background: var(--tempest-accent); color: white; border: none; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+
+        .spinner { display: inline-block; animation: spin 2s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+        /* Pulsing "Thinking" Effect */
+        .thought-block.pulsing { animation: breathe 2s ease-in-out infinite; opacity: 0.8; }
+        @keyframes breathe { 0%, 100% { opacity: 0.4; transform: scale(0.98); } 50% { opacity: 0.9; transform: scale(1.0); } }
+
+        .message.streaming { border-right: 2px solid var(--tempest-accent); animation: blink 0.8s step-end infinite; }
+        @keyframes blink { from, to { border-color: transparent; } 50% { border-color: var(--tempest-accent); } }
+
+        /* Smart Toolbar */
+        .toolbar { display: flex; gap: 6px; padding: 10px; background: rgba(0,0,0,0.2); border-bottom: 1px solid rgba(255,255,255,0.05); flex-wrap: wrap; }
+        .tool-btn { flex: 1; padding: 6px 4px; background: rgba(77, 166, 255, 0.1); color: #ccc; border: 1px solid rgba(77, 166, 255, 0.2); border-radius: 4px; font-size: 11px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+        .tool-btn:hover:not(:disabled) { background: var(--tempest-accent); color: white; border-color: var(--tempest-accent); }
+        .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Upload Styles */
+        .drop-area { flex: 1; margin: 20px; border: 2px dashed #444; border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,0.02); cursor: pointer; }
+        .drop-area.drag-over { border-color: var(--tempest-accent); background: rgba(77, 166, 255, 0.05); }
+        .drop-icon { font-size: 40px; margin-bottom: 12px; }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+
+    <script>
+        const { createApp, ref, onMounted, nextTick } = Vue;
+
+        const App = {
+            template: \`
+                <div class="tempest-app">
+                    <div class="header">
+                        <div class="logo">
+                            <span class="tornado">🌪️</span>
+                            <span class="title">TEMPEST</span>
+                        </div>
+                        <div class="status">
+                            <span v-if="isLoading" class="spinner">🌀</span>
+                            MLX • {{ currentPhase }}
+                        </div>
                     </div>
-                    <div id="input-container">
-                        <input type="text" id="input" placeholder="Ask Tempest..." autofocus />
-                        <button id="send-btn">Send</button>
+
+                    <!-- Smart Toolbar -->
+                    <div class="toolbar">
+                        <button @click="quickAction('Fix all issues in this file and make it cleaner')" class="tool-btn" :disabled="isLoading">🔧 Fix</button>
+                        <button @click="quickAction('Explain what this code does in detail')" class="tool-btn" :disabled="isLoading">📖 Explain</button>
+                        <button @click="quickAction('Refactor this code to be more readable and efficient')" class="tool-btn" :disabled="isLoading">⚡ Refactor</button>
+                        <button @click="quickAction('Add clear comments and documentation to this code')" class="tool-btn" :disabled="isLoading">💬 Comment</button>
+                    </div>
+
+                    <div class="tabs">
+                        <button :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">💬 CHAT</button>
+                        <button :class="{ active: activeTab === 'upload' }" @click="activeTab = 'upload'">📤 UPLOAD</button>
+                    </div>
+
+                    <div v-show="activeTab === 'chat'" class="chat-tab">
+                        <div ref="outputRef" class="chat-output">
+                            <div class="message tempest">⚡ Tempest Bridge Active. System Ready.</div>
+                            
+                            <template v-for="msg in messages" :key="msg.id">
+                                <div v-if="msg.thoughts" class="thought-block">
+                                    <div class="thought-header">THOUGHTS</div>
+                                    <div class="thought-content">{{ msg.thoughts }}</div>
+                                </div>
+                                <div class="message" :class="msg.type" v-html="renderMarkdown(msg.text)"></div>
+                            </template>
+                            
+                            <!-- Current Streaming Message -->
+                            <div v-if="streamingThoughts" class="thought-block">
+                                <div class="thought-header">THOUGHTS</div>
+                                <div class="thought-content">{{ streamingThoughts }}</div>
+                            </div>
+                            <div v-if="streamingText" class="message tempest streaming" v-html="renderMarkdown(streamingText)"></div>
+                            
+                            <!-- Bottom Loading Indicator -->
+                            <div v-if="isLoading && !streamingText" class="thought-block pulsing">
+                                <div class="thought-header">SYSTEM</div>
+                                <div class="thought-content">Agent is thinking...</div>
+                            </div>
+                        </div>
+
+                        <div class="input-area">
+                            <input 
+                                v-model="inputMsg" 
+                                @keydown.enter="send" 
+                                placeholder="Storm your code..." 
+                                class="chat-input"
+                                :disabled="isLoading"
+                            />
+                            <button @click="send" class="send-btn" :disabled="isLoading">
+                                <span v-if="isLoading">🌀</span>
+                                <span v-else>↑</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="activeTab === 'upload'" class="upload-tab">
+                        <div 
+                            class="drop-area" 
+                            :class="{ 'drag-over': isDragging }"
+                            @dragover.prevent="isDragging = true"
+                            @dragleave.prevent="isDragging = false"
+                            @drop.prevent="onDrop"
+                        >
+                            <div class="drop-icon">📤</div>
+                            <h3>Drop files here</h3>
+                            <p>or click to select</p>
+                        </div>
                     </div>
                 </div>
-                <script>
-                    (function() {
-                        var output = document.getElementById('output');
-                        function log(msg, isError) {
-                            var div = document.createElement('div');
-                            div.className = 'status-log';
-                            if (isError) div.style.color = '#ff7b72';
-                            div.innerText = (isError ? '❌ ' : '> ') + msg;
-                            output.appendChild(div);
-                            output.scrollTop = output.scrollHeight;
+            \`,
+            setup() {
+                const vscode = acquireVsCodeApi();
+                const activeTab = ref('chat');
+                const inputMsg = ref('');
+                const messages = ref([]);
+                const streamingText = ref('');
+                const streamingThoughts = ref('');
+                const isLoading = ref(false);
+                const currentPhase = ref('IDLE');
+                const outputRef = ref(null);
+                const isDragging = ref(false);
+
+                const renderMarkdown = (text) => marked.parse(text);
+
+                const scrollToBottom = async () => {
+                    await nextTick();
+                    if (outputRef.value) {
+                        outputRef.value.scrollTop = outputRef.value.scrollHeight;
+                    }
+                };
+
+                const send = () => {
+                    const text = inputMsg.value.trim();
+                    if (!text || isLoading.value) return;
+                    
+                    console.log('[Webview] Sending message:', text);
+                    messages.value.push({ id: Date.now(), type: 'user', text });
+                    inputMsg.value = '';
+                    isLoading.value = true;
+                    currentPhase.value = 'LOADING';
+                    scrollToBottom();
+
+                    vscode.postMessage({
+                        type: 'tempest-request',
+                        id: Date.now(),
+                        payload: {
+                            method: 'tempest/chat',
+                            params: { message: text }
                         }
+                    });
+                };
 
-                        window.onerror = function(msg, url, line) {
-                            log('JS Error: ' + msg + ' (Line: ' + line + ')', true);
-                        };
-
-                        try {
-                            var vscode = acquireVsCodeApi();
-                        } catch (e) {
-                            log('Failed to acquire VS Code API: ' + e.message, true);
-                        }
-
-                        var input = document.getElementById('input');
-                        var sendBtn = document.getElementById('send-btn');
-                        
-                        var currentResponseDiv = null;
-                        var currentThoughtDiv = null;
-
-                        function formatMarkdown(text) {
-                            // Basic markdown-to-html (bold, code, links, line breaks)
-                            return text
-                                .replace(/&/g, '&amp;')
-                                .replace(/</g, '&lt;')
-                                .replace(/>/g, '&gt;')
-                                .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
-                                .replace(/\`(.*?)\`/g, '<code style="background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:3px;">$1</code>')
-                                .replace(/\n/g, '<br/>');
-                        }
-
-                        function handleStream(chunk) {
-                            if (chunk.reasoning) {
-                                if (!currentThoughtDiv) {
-                                    currentThoughtDiv = document.createElement('div');
-                                    currentThoughtDiv.className = 'thought';
-                                    currentThoughtDiv.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;font-size:10px;opacity:0.6;">🧠 THOUGHT PROCESS</div>';
-                                    output.appendChild(currentThoughtDiv);
-                                }
-                                var span = document.createElement('span');
-                                span.innerText = chunk.reasoning;
-                                currentThoughtDiv.appendChild(span);
-                            }
-                            if (chunk.content) {
-                                if (!currentResponseDiv) {
-                                    currentResponseDiv = document.createElement('div');
-                                    currentResponseDiv.className = 'message tempest';
-                                    currentResponseDiv.innerHTML = '<b>Tempest:</b><br/>';
-                                    output.appendChild(currentResponseDiv);
-                                }
-                                
-                                // Clean up the raw content and apply basic formatting
-                                const text = chunk.content;
-                                currentResponseDiv.innerHTML += formatMarkdown(text);
-                            }
-                            output.scrollTop = output.scrollHeight;
-                            if (chunk.done) {
-                                currentResponseDiv = null;
-                                currentThoughtDiv = null;
-                            }
-                        }
-
-                        function sendMessage() {
-                            try {
-                                var val = input.value;
-                                if (!val) return;
-                                input.value = '';
-                                
-                                var userMsg = document.createElement('div');
-                                userMsg.className = 'message user';
-                                userMsg.innerHTML = '<b>You:</b><br/>' + val;
-                                output.appendChild(userMsg);
-                                output.scrollTop = output.scrollHeight;
-
-                                currentResponseDiv = null;
-                                currentThoughtDiv = null;
-
-                                vscode.postMessage({ 
-                                    type: 'tempest-request', 
-                                    id: Date.now(), 
-                                    payload: { method: 'tempest/chat', params: { message: val } } 
-                                });
-                                // log('Message sent to host.'); // Removed to keep UI clean
-                            } catch (e) {
-                                log('sendMessage error: ' + e.message, true);
-                            }
-                        }
-
-                        if (sendBtn) {
-                            sendBtn.addEventListener('click', sendMessage);
-                        }
-                        if (input) {
-                            input.addEventListener('keydown', function(e) {
-                                if (e.key === 'Enter') sendMessage();
-                            });
-                        }
-
-                        window.addEventListener('message', function(event) {
-                            var data = event.data;
-                            if (data.type === 'tempest-response') {
-                                if (data.payload && data.payload.method === 'tempest/chat') {
-                                    handleStream(data.payload.payload);
-                                }
-                            } else if (data.type === 'tempestStatus') {
-                                log(data.value);
-                            } else if (data.type === 'tempestThought') {
-                                if (!currentThoughtDiv) {
-                                    currentThoughtDiv = document.createElement('div');
-                                    currentThoughtDiv.className = 'thought';
-                                    currentThoughtDiv.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;font-size:10px;opacity:0.6;">🧠 THOUGHT PROCESS</div>';
-                                    output.appendChild(currentThoughtDiv);
-                                }
-                                var span = document.createElement('span');
-                                span.innerText = data.value;
-                                currentThoughtDiv.appendChild(span);
-                                output.scrollTop = output.scrollHeight;
-                            }
+                const onDrop = (e) => {
+                    isDragging.value = false;
+                    const files = Array.from(e.dataTransfer.files);
+                    files.forEach(f => {
+                        vscode.postMessage({
+                            type: 'tempest-request',
+                            id: Date.now(),
+                            payload: { method: 'tempest/file_uploaded', params: { fileName: f.name } }
                         });
-                    })();
-                </script>
-            </body>
-            </html>`;
+                    });
+                };
+
+                const quickAction = (action) => {
+                    if (isLoading.value) return;
+                    messages.value.push({ id: Date.now(), type: 'user', text: action });
+                    isLoading.value = true;
+                    currentPhase.value = 'LOADING';
+                    scrollToBottom();
+                    vscode.postMessage({
+                        type: 'tempest-request',
+                        id: Date.now(),
+                        payload: {
+                            method: 'tempest/chat',
+                            params: { message: action, auto_context: true }
+                        }
+                    });
+                };
+
+                onMounted(() => {
+                    window.addEventListener('message', event => {
+                        const data = event.data;
+                        if (data.type === 'tempest-response') {
+                            const findV = (obj, key) => {
+                                if (!obj || typeof obj !== 'object') return null;
+                                if (obj[key] !== undefined) return obj[key];
+                                return findV(obj.payload, key) || findV(obj.result, key);
+                            };
+
+                            const raw = data.payload?.result || data.payload?.params || data.payload;
+                            const reasoning = findV(raw, 'reasoning');
+                            const content = findV(raw, 'content') || findV(raw, 'text') || findV(raw, 'value');
+                            const phase = findV(raw, 'phase');
+                            const done = findV(raw, 'done');
+
+                            if (phase) currentPhase.value = phase;
+                            if (reasoning) streamingThoughts.value += reasoning;
+                            if (content) streamingText.value += content;
+                            
+                            if (done) {
+                                messages.value.push({
+                                    id: Date.now(),
+                                    type: 'tempest',
+                                    text: streamingText.value,
+                                    thoughts: streamingThoughts.value
+                                });
+                                streamingText.value = '';
+                                streamingThoughts.value = '';
+                                isLoading.value = false;
+                                currentPhase.value = 'IDLE';
+                            }
+                            scrollToBottom();
+                        }
+                    });
+                    vscode.postMessage({ type: 'webview-ready' });
+                });
+
+                return { 
+                    activeTab, inputMsg, messages, streamingText, streamingThoughts, 
+                    isLoading, currentPhase, outputRef, isDragging,
+                    send, renderMarkdown, onDrop, quickAction
+                };
+            }
+        };
+
+        createApp(App).mount('#app');
+    </script>
+</body>
+</html>`;
     }
 }

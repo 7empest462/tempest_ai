@@ -8,11 +8,12 @@ Tempest AI is a high-performance, Rust-based autonomous agent designed to be you
 ## 🕹️ Available Interfaces
 Tempest AI is built for versatility, offering three distinct ways to interact:
 
-### 💻 VS Code Sidebar (Recommended)
-The premium engineering experience. A high-fidelity, dark-mode extension that turns your editor into a command center.
-- **🧠 Real-Time Editor Awareness**: Tempest can "see" exactly what you are looking at. It automatically grabs your active file, cursor position, and any code you have highlighted to provide instant, context-aware reasoning.
-- **⚡ Ultra-Fast Local Inference**: Supports both **MLX (Apple Silicon)** and **Ollama (NVIDIA/AMD/Intel)**. No data leaves your machine—everything is processed locally on your GPU/NPU.
-- **🧠 Thought Transparency**: Watch Tempest's internal reasoning process unfold in real-time with the dedicated "Thought Process" HUD.
+### 💻 VS Code Sidebar (V0.3.0 "Storming" Update)
+The premium engineering experience. A modern, **Vue 3-powered** dashboard with a sleek glassmorphism design.
+- **⚡ Smart Toolbar**: Context-aware quick actions—`Fix`, `Explain`, `Refactor`, and `Comment`—that automatically snapshot your active file and cursor position for instant, one-click engineering.
+- **🧠 Hardened Editor Awareness**: Explicit `[EDITOR GROUND TRUTH]` injection ensures the agent prioritizes your active file path and code selection over internal hallucinations.
+- **🌀 Real-Time Feedback Loop**: Watch the "Storm" in motion with a pulsing thought HUD, a blinking streaming cursor, and a dynamic status bar that tracks the agent's phase (**THINKING**, **ANALYZING**, **LOADING**) in real-time.
+- **🍏 Metal-Optimized Streaming**: Optimized for Apple Silicon (M4), ensuring the JSON-RPC bridge remains asynchronous and responsive even during heavy prompt-processing phases.
 
 ### 📟 Professional TUI
 An industrial terminal dashboard for full-screen terminal workflows.

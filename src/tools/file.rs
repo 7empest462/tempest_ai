@@ -145,8 +145,13 @@ impl AgentTool for WriteFileTool {
         if let Ok(meta) = fs::metadata(&path) {
             let old_len = meta.len();
             let new_len = content.len() as u64;
-            if old_len > 1000 && new_len < old_len / 2 {
-                warning = format!("\n\n⚠️  [WARNING]: This write significantly TRUNCATED the file ({} -> {} bytes). Ensure this was intentional.", old_len, new_len);
+            
+            let old_content_res = fs::read_to_string(&path);
+            let old_line_count = old_content_res.as_ref().map(|s| s.lines().count()).unwrap_or(0);
+            let new_line_count = content.lines().count();
+
+            if (old_len > 100 && new_len < old_len / 2) || (old_line_count > 5 && new_line_count == 1) {
+                warning = format!("\n\n⚠️  [WARNING]: This write significantly TRUNCATED or SIMPLIFIED the file ({} -> {} bytes, {} -> {} lines). Ensure this was intentional and you didn't accidentally overwrite code with documentation.", old_len, new_len, old_line_count, new_line_count);
             }
         }
 

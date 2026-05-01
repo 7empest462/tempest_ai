@@ -40,6 +40,10 @@
             {
                 "command": "tempest.focus",
                 "title": "Tempest: Focus Sidebar"
+            },
+            {
+                "command": "tempest.clearHistory",
+                "title": "Tempest AI: Clear History"
             }
         ]
     },

@@ -112,12 +112,15 @@ impl Backend {
                     .with_max_num_seqs(1);
 
                     if paged_attn {
+                        println!("{} MLX: Initializing Paged Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
                         let paged_attn_cfg = PagedAttentionMetaBuilder::default()
-                            .with_block_size(16)                    // Smaller blocks = much less fragmentation on Metal
+                            .with_block_size(16)
                             .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
                             .build()
                             .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
                         builder = builder.with_paged_attn(paged_attn_cfg);
+                    } else {
+                        println!("{} MLX: Initializing Standard Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
                     }
 
                     let mlx_model = builder
@@ -627,13 +630,11 @@ impl Backend {
 
                 let mut stream = if is_reasoning_model {
                     // --- 🧠 DEEPSEEK-R1 MANUAL TEMPLATE (MLX) ---
-                    // Since mistralrs 0.8.1 RequestBuilder is primarily chat-oriented, 
-                    // we use a single User message with the manual prompt.
-                    // This is a trade-off until raw completion API is verified.
                     let raw_prompt = build_deepseek_r1_prompt(&history);
                     let req = RequestBuilder::new()
                         .add_message(TextMessageRole::User, raw_prompt)
                         .set_sampling(sampling_params);
+                    
                     mistralrs.stream_chat_request(req).await.into_diagnostic()?
                 } else {
                     mistralrs.stream_chat_request(request_builder).await.into_diagnostic()?
@@ -649,13 +650,14 @@ impl Backend {
                 }
 
                 let mut first_token = true;
-                let mut is_thinking = false; 
+                let mut is_thinking = is_reasoning_model; 
                 let mut tag_residue = String::new();
-                let mut in_thought_block = false;
+                let mut in_thought_block = is_reasoning_model;
 
                 if is_thinking {
                     if let Some(tx) = event_tx.lock().clone() {
                         let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                        let _ = tx.try_send(AgentEvent::Thinking(None));
                     }
                 }
                 let mut last_segments: Vec<String> = Vec::new();
@@ -720,7 +722,7 @@ impl Backend {
                                         "certainly", "absolutely", "i'll", "let's", "i need to", "first,",
                                         "alright,", "okay,"
                                     ];
-                                    if !is_reasoning_model && implicit_phrases.iter().any(|&p| lower.starts_with(p)) {
+                                    if implicit_phrases.iter().any(|&p| lower.starts_with(p)) {
                                         in_thought_block = true;
                                         if let Some(tx) = event_tx.lock().clone() {
                                             let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
@@ -862,6 +864,23 @@ impl Backend {
                                             }
                                             is_thinking = false;
                                             current_pos += end_idx + 8;
+                                            
+                                            if first_token {
+                                                first_token = false;
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::Thinking(None));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(None));
+                                                }
+                                            }
+                                        } else if let Some(json_idx) = text[current_pos..].find("```json") {
+                                            // FAILSAFE: Implicit end of explicit thinking block
+                                            let reasoning = &text[current_pos..current_pos + json_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            is_thinking = false;
+                                            current_pos += json_idx;
                                             
                                             if first_token {
                                                 first_token = false;
@@ -1186,6 +1205,9 @@ impl Backend {
             }
             #[cfg(feature = "mlx")]
             Backend::MLX { .. } => {
+                // MistralRs doesn't have a 'stop' command, but the OS will reclaim 
+                // all model memory as soon as the main process returns.
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         }
     }
@@ -1245,6 +1267,8 @@ fn build_deepseek_r1_prompt(history: &[ChatMessage]) -> String {
                 prompt.push_str(&msg.content);
             }
             MessageRole::Tool => {
+                // For DeepSeek-R1 style, we inject tool results back as user-like context 
+                // or specific block markers.
                 prompt.push_str("\n\n[TOOL_RESULT]\n");
                 prompt.push_str(&msg.content);
                 prompt.push_str("\n");
@@ -1252,8 +1276,16 @@ fn build_deepseek_r1_prompt(history: &[ChatMessage]) -> String {
             MessageRole::System => {}
         }
     }
-    if !prompt.ends_with("<｜Assistant｜>") {
-        prompt.push_str("<｜Assistant｜>");
+    
+    // Force the model to start thinking for the NEW response
+    // Re-forcing <think> to ensure the model maintains its reasoning identity.
+    // The parser now correctly handles the transition to conversation after </think>.
+    if !prompt.ends_with("<｜Assistant｜><think>\n") {
+        if prompt.ends_with("<｜Assistant｜>") {
+            prompt.push_str("<think>\n");
+        } else {
+            prompt.push_str("<｜Assistant｜><think>\n");
+        }
     }
     prompt
 }
