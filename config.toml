@@ -86,3 +86,4 @@ sub_agent_model = "llama3.2:1b"
 history_path = "history.json"
 db_path = "~/fleet.db"
 encrypt_history = false
+tui_theme = "base16-ocean.dark"

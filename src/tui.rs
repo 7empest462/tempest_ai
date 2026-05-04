@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style, Modifier},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
     Frame, Terminal,
 };
 use syntect::parsing::SyntaxSet;
@@ -37,6 +37,7 @@ pub enum AgentEvent {
     SubagentStatus(Option<String>),
     ContextStatus { used: usize, total: u64 },
     SentinelUpdate { active: Vec<String>, log: String },
+    TelemetryMetrics { cpu: Option<u64>, gpu: Option<u64>, tps: Option<u64> },
     CommandOutput(String),
     EditorEdit { path: String, content: String },
 }
@@ -53,6 +54,7 @@ pub enum FocusedPane {
     Chat,
     Reasoning,
     Explorer,
+    CommandPalette,
 }
 
 pub struct App {
@@ -87,10 +89,20 @@ pub struct App {
     pub command_output: Vec<String>,
     pub syntax_set: SyntaxSet,
     pub theme_set: ThemeSet,
+    // --- 📊 SPARKLINE STATE ---
+    pub cpu_history: Vec<u64>,
+    pub gpu_history: Vec<u64>,
+    pub tps_history: Vec<u64>, // Tokens Per Second
+    // --- ⌨️ COMMAND PALETTE STATE ---
+    pub show_command_palette: bool,
+    pub command_palette_query: String,
+    pub command_palette_options: Vec<String>,
+    pub command_palette_state: ratatui::widgets::ListState,
+    pub current_theme: String,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(initial_theme: String) -> Self {
         Self {
             input_buffer: String::new(),
             messages: vec![
@@ -127,6 +139,26 @@ impl App {
             command_output: Vec::new(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
+            cpu_history: vec![0; 100],
+            gpu_history: vec![0; 100],
+            tps_history: vec![0; 100],
+            show_command_palette: false,
+            command_palette_query: String::new(),
+            command_palette_options: vec![
+                "Hot-Swap: DeepSeek R1 (Distill)".to_string(),
+                "Hot-Swap: Qwen 2.5 Coder".to_string(),
+                "Toggle Safe Mode: ON/OFF".to_string(),
+                "Recall: Latest Memory Item".to_string(),
+                "System: Compact Context".to_string(),
+                "Sentinel: Toggle Hardcore Mode".to_string(),
+                "Theme: Base16 Ocean (Dark)".to_string(),
+                "Theme: Base16 Mocha".to_string(),
+                "Theme: Base16 Eighties".to_string(),
+                "Theme: Solarized (Dark)".to_string(),
+                "Theme: Solarized (Light)".to_string(),
+            ],
+            command_palette_state: ratatui::widgets::ListState::default(),
+            current_theme: initial_theme,
         }
     }
 
@@ -169,13 +201,14 @@ pub async fn run_tui(
     user_tx: tokio::sync::mpsc::Sender<String>, 
     tool_tx: tokio::sync::mpsc::Sender<ToolResponse>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    initial_theme: String,
 ) -> Result<()> {
     enable_raw_mode().into_diagnostic()?;
     stdout().execute(EnterAlternateScreen).into_diagnostic()?;
     stdout().execute(crossterm::event::EnableMouseCapture).into_diagnostic()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).into_diagnostic()?;
 
-    let mut app = App::new();
+    let mut app = App::new(initial_theme);
     let tick_rate = Duration::from_millis(50);
     let mut last_tick = Instant::now();
 
@@ -286,15 +319,67 @@ pub async fn run_tui(
                                 } else if app.focused_pane == FocusedPane::Explorer {
                                     app.focused_pane = FocusedPane::Chat;
                                 }
+                            } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'p' || c == 'P') {
+                                app.show_command_palette = !app.show_command_palette;
+                                if app.show_command_palette {
+                                    app.focused_pane = FocusedPane::CommandPalette;
+                                    app.command_palette_query.clear();
+                                    app.command_palette_state.select(Some(0));
+                                } else if app.focused_pane == FocusedPane::CommandPalette {
+                                    app.focused_pane = FocusedPane::Chat;
+                                }
+                            } else if app.focused_pane == FocusedPane::CommandPalette {
+                                app.command_palette_query.push(c);
                             } else {
                                 app.input_buffer.push(c);
                             }
                         }
                         KeyCode::Backspace => {
-                            app.input_buffer.pop();
+                            if app.focused_pane == FocusedPane::CommandPalette {
+                                app.command_palette_query.pop();
+                            } else {
+                                app.input_buffer.pop();
+                            }
                         }
                         KeyCode::Enter => {
-                            if app.focused_pane == FocusedPane::Explorer {
+                            if app.focused_pane == FocusedPane::CommandPalette {
+                                if let Some(idx) = app.command_palette_state.selected() {
+                                    let option = app.command_palette_options[idx].clone();
+                                    app.push_message(format!("⚡ [PALETTE]: Executing '{}'", option));
+                                    
+                                    if option.starts_with("Theme: ") {
+                                        let theme_name = match option.as_str() {
+                                            "Theme: Base16 Ocean (Dark)" => "base16-ocean.dark",
+                                            "Theme: Base16 Mocha" => "base16-mocha.dark",
+                                            "Theme: Base16 Eighties" => "base16-eighties.dark",
+                                            "Theme: Solarized (Dark)" => "Solarized (dark)",
+                                            "Theme: Solarized (Light)" => "Solarized (light)",
+                                            _ => "base16-ocean.dark",
+                                        };
+                                        app.current_theme = theme_name.to_string();
+                                        app.push_message(format!("🎨 Aesthetic updated to {}", theme_name));
+                                        
+                                        // --- 💾 PERSIST TO CONFIG.TOML ---
+                                        if let Ok(mut content) = std::fs::read_to_string("config.toml") {
+                                            let re = regex::Regex::new(r#"(?m)^tui_theme\s*=\s*".*""#).unwrap();
+                                            if re.is_match(&content) {
+                                                content = re.replace(&content, &format!(r#"tui_theme = "{}""#, theme_name)).into_owned();
+                                            } else {
+                                                // If not found, append it to the [🧹 BASE SETTINGS] section or end of file
+                                                if content.contains("[🧹 BASE SETTINGS]") {
+                                                    content = content.replace("[🧹 BASE SETTINGS]", &format!("[🧹 BASE SETTINGS]\ntui_theme = \"{}\"", theme_name));
+                                                } else {
+                                                    content.push_str(&format!("\ntui_theme = \"{}\"\n", theme_name));
+                                                }
+                                            }
+                                            let _ = std::fs::write("config.toml", content);
+                                        }
+                                    }
+
+                                    app.show_command_palette = false;
+                                    app.focused_pane = FocusedPane::Chat;
+                                }
+                            } else if app.focused_pane == FocusedPane::Explorer {
                                 if let Some(idx) = app.explorer_state.selected() {
                                     if let Some((name, is_dir)) = app.explorer_files.get(idx) {
                                         if *is_dir {
@@ -327,6 +412,7 @@ pub async fn run_tui(
                                 },
                                 FocusedPane::Reasoning => if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
                                 FocusedPane::Explorer => FocusedPane::Chat,
+                                FocusedPane::CommandPalette => FocusedPane::Chat,
                             };
                         }
                         KeyCode::Up => {
@@ -337,6 +423,9 @@ pub async fn run_tui(
                             } else if app.focused_pane == FocusedPane::Explorer {
                                 let cur = app.explorer_state.selected().unwrap_or(0);
                                 app.explorer_state.select(Some(cur.saturating_sub(1)));
+                            } else if app.focused_pane == FocusedPane::CommandPalette {
+                                let cur = app.command_palette_state.selected().unwrap_or(0);
+                                app.command_palette_state.select(Some(cur.saturating_sub(1)));
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_sub(1);
                             }
@@ -348,6 +437,9 @@ pub async fn run_tui(
                             } else if app.focused_pane == FocusedPane::Explorer {
                                 let cur = app.explorer_state.selected().unwrap_or(0);
                                 app.explorer_state.select(Some(cur + 1));
+                            } else if app.focused_pane == FocusedPane::CommandPalette {
+                                let cur = app.command_palette_state.selected().unwrap_or(0);
+                                app.command_palette_state.select(Some(cur + 1));
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_add(1);
                             }
@@ -453,6 +545,20 @@ pub async fn run_tui(
                         }
                     }
                 }
+                AgentEvent::TelemetryMetrics { cpu, gpu, tps } => {
+                    if let Some(c) = cpu {
+                        app.cpu_history.push(c);
+                        if app.cpu_history.len() > 100 { app.cpu_history.remove(0); }
+                    }
+                    if let Some(g) = gpu {
+                        app.gpu_history.push(g);
+                        if app.gpu_history.len() > 100 { app.gpu_history.remove(0); }
+                    }
+                    if let Some(t) = tps {
+                        app.tps_history.push(t);
+                        if app.tps_history.len() > 100 { app.tps_history.remove(0); }
+                    }
+                }
                 AgentEvent::SubagentStatus(msg) => {
                     app.engine_status = msg;
                 }
@@ -482,9 +588,9 @@ pub async fn run_tui(
     Ok(())
 }
 
-fn highlight_text(text: &str, syntax_set: &SyntaxSet, theme_set: &ThemeSet) -> Vec<Line<'static>> {
+fn highlight_text(text: &str, syntax_set: &SyntaxSet, theme_set: &ThemeSet, theme_name: &str) -> Vec<Line<'static>> {
     let syntax = syntax_set.find_syntax_by_extension("rs").unwrap(); // Default to Rust
-    let mut h = HighlightLines::new(syntax, &theme_set.themes["base16-ocean.dark"]);
+    let mut h = HighlightLines::new(syntax, &theme_set.themes[theme_name]);
     let mut lines = Vec::new();
 
     for line in LinesWithEndings::from(text) {
@@ -588,7 +694,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         // --- 🌈 SYNTAX HIGHLIGHTING FOR CODE BLOCKS IN CHAT ---
         if !is_user && content_to_wrap.contains("```") {
              // Basic detection and highlighting for code blocks
-             let highlighted = highlight_text(content_to_wrap, &app.syntax_set, &app.theme_set);
+             let highlighted = highlight_text(content_to_wrap, &app.syntax_set, &app.theme_set, &app.current_theme);
              for line in highlighted {
                  items.push(ListItem::new(line));
              }
@@ -710,6 +816,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 
     // --- 🛡️ SENTINEL FLEET HUD ---
+    status_lines.push(Line::from(""));
     if !app.active_sentinels.is_empty() {
         let mut spans = vec![Span::styled("🛡️ FLEET: ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))];
         for s in &app.active_sentinels {
@@ -738,15 +845,60 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled("|".repeat(filled), Style::default().fg(bar_color)),
             Span::styled(".".repeat(bar_width - filled), Style::default().fg(Color::DarkGray)),
             Span::styled("]", Style::default().fg(Color::Gray)),
-            Span::raw(format!(" {}k", app.context_total / 1024)),
+            Span::raw(format!(" {}k / {}k", app.context_used / 1024, app.context_total / 1024)),
         ]));
     }
+
+    // --- STATUS PANE LAYOUT (Split for Sparklines) ---
+    let status_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1), // Text metrics
+            Constraint::Length(10), // Sparklines area
+        ])
+        .split(top_chunks[1]);
 
     let status_block = Paragraph::new(status_lines)
         .block(Block::default().borders(Borders::ALL).title(status_title))
         .style(Style::default().fg(Color::Gray))
         .wrap(ratatui::widgets::Wrap { trim: true });
-    f.render_widget(status_block, top_chunks[1]);
+    f.render_widget(status_block, status_chunks[0]);
+
+    // --- 📊 REAL-TIME TELEMETRY SPARKLINES (Boxed) ---
+    let pulse_block = Block::default()
+        .title(Span::styled(" 📊 TELEMETRY PULSE ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    
+    let pulse_inner = pulse_block.inner(status_chunks[1]);
+    f.render_widget(pulse_block, status_chunks[1]);
+
+    let pulse_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Ratio(1, 3), // CPU
+            Constraint::Ratio(1, 3), // GPU
+            Constraint::Ratio(1, 3), // TPS
+        ])
+        .split(pulse_inner);
+
+    let cpu_spark = Sparkline::default()
+        .block(Block::default().title(" CPU ").style(Style::default().fg(Color::Green)))
+        .data(&app.cpu_history)
+        .max(100);
+    f.render_widget(cpu_spark, pulse_chunks[0]);
+    
+    let gpu_spark = Sparkline::default()
+        .block(Block::default().title(" GPU ").style(Style::default().fg(Color::Blue)))
+        .data(&app.gpu_history)
+        .max(100);
+    f.render_widget(gpu_spark, pulse_chunks[1]);
+
+    let tps_spark = Sparkline::default()
+        .block(Block::default().title(" TPS ").style(Style::default().fg(Color::Magenta)))
+        .data(&app.tps_history)
+        .max(50);
+    f.render_widget(tps_spark, pulse_chunks[2]);
 
     // --- REASONING TRACE PANE (With Syntax Highlighting) ---
     if app.show_reasoning {
@@ -754,7 +906,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let reasoning_border_color = if app.focused_pane == FocusedPane::Reasoning { Color::Yellow } else { Color::Magenta };
         let reasoning_title = if app.focused_pane == FocusedPane::Reasoning { " 🧠 REASONING [FOCUS] " } else { " 🧠 REASONING " };
 
-        let highlighted_lines = highlight_text(&app.reasoning_buffer, &app.syntax_set, &app.theme_set);
+        let highlighted_lines = highlight_text(&app.reasoning_buffer, &app.syntax_set, &app.theme_set, &app.current_theme);
 
         let reasoning_para = Paragraph::new(highlighted_lines)
             .block(Block::default()
@@ -789,4 +941,57 @@ fn ui(f: &mut Frame, app: &mut App) {
         chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
         chunks[2].y + 1,
     ));
+
+    // --- ⌨️ FUZZY COMMAND PALETTE OVERLAY ---
+    if app.show_command_palette {
+        let area = centered_rect(60, 40, f.area());
+        f.render_widget(ratatui::widgets::Clear, area); // Clear background
+
+        let block = Block::default()
+            .title(" ⌨️ COMMAND PALETTE [Fuzzy Search] ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        
+        let filtered_options: Vec<ListItem> = app.command_palette_options.iter()
+            .filter(|opt| opt.to_lowercase().contains(&app.command_palette_query.to_lowercase()))
+            .map(|opt| ListItem::new(Span::raw(opt.clone())))
+            .collect();
+
+        let list = List::new(filtered_options)
+            .block(block)
+            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(area);
+
+        let query_box = Paragraph::new(app.command_palette_query.clone())
+            .block(Block::default().borders(Borders::ALL).title(" 🔍 Search "));
+        
+        f.render_widget(query_box, chunks[0]);
+        f.render_stateful_widget(list, chunks[1], &mut app.command_palette_state);
+    }
+}
+
+// Helper for centering the command palette
+fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ].as_ref())
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ].as_ref())
+        .split(popup_layout[1])[1]
 }

@@ -139,6 +139,7 @@ struct AppConfig {
     pub mlx_repeat_penalty_planning: Option<f32>,
     pub mlx_repeat_penalty_execution: Option<f32>,
     pub planning_enabled: Option<bool>,
+    pub tui_theme: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -189,8 +190,9 @@ impl Default for AppConfig {
             mlx_top_p_planning: Some(0.95),
             mlx_top_p_execution: Some(0.9),
             mlx_repeat_penalty_planning: Some(1.05),
-            mlx_repeat_penalty_execution: Some(1.05),
+            mlx_repeat_penalty_execution: Some(1.02),
             planning_enabled: Some(true),
+            tui_theme: Some("base16-ocean.dark".to_string()),
             mcp_servers: None,
         }
     }
@@ -702,6 +704,15 @@ async fn main() -> Result<()> {
             update_str.push_str("\n\n----------------------------------");
             
             let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
+            
+            // --- 📊 SPARKLINE DATA EXTRACTION ---
+            // Send parsed values for Sparklines
+            let _ = agent_tx_metrics.send(crate::tui::AgentEvent::TelemetryMetrics { 
+                cpu: Some(avg_cpu as u64), 
+                gpu: Some(gpu_load as u64),
+                tps: None 
+            }).await;
+
             {
                 let mut lock = shared_telemetry.lock();
                 *lock = update_str;
@@ -720,7 +731,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag).await {
+    let initial_theme = config.tui_theme.clone().unwrap_or_else(|| "base16-ocean.dark".to_string());
+
+    if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag, initial_theme).await {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
     

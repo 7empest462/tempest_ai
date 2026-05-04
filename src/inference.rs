@@ -306,7 +306,19 @@ impl Backend {
                 let mut tag_residue = String::new();
                 let mut in_thought_block = false;
 
+                let mut token_count = 0;
+                let start_time = std::time::Instant::now();
+
                 while let Some(res) = stream.next().await {
+                    token_count += 1;
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    if elapsed > 0.5 {
+                        let tps = (token_count as f64 / elapsed) as u64;
+                        if let Some(tx) = event_tx.lock().clone() {
+                            let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, tps: Some(tps) });
+                        }
+                    }
+
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     let chunk = res.map_err(|_| miette!("Ollama stream error"))?;
                     
@@ -727,8 +739,18 @@ impl Backend {
                     }
                 }
                 let mut last_segments: Vec<String> = Vec::new();
+                let mut token_count = 0;
+                let start_time = std::time::Instant::now();
                 
                 while let Some(response) = stream.next().await {
+                    token_count += 1;
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    if elapsed > 0.5 {
+                        let tps = (token_count as f64 / elapsed) as u64;
+                        if let Some(tx) = event_tx.lock().clone() {
+                            let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, tps: Some(tps) });
+                        }
+                    }
 
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
 
