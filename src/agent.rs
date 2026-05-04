@@ -508,6 +508,15 @@ impl Agent {
             }
         }
 
+        // --- 🌪️ MLX UNIFICATION GUARD ---
+        // If we are in MLX mode, we override the tiered models to None so they fallback 
+        // to the unified MLX model. This prevents accidental Ollama callouts for 'Planning'.
+        let (p_model, e_model, v_model) = if mode == AgentMode::MLX {
+            (None, None, None)
+        } else {
+            (planner_model, executor_model, verifier_model)
+        };
+
         let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
@@ -642,9 +651,9 @@ impl Agent {
 
             tool_stats: Arc::new(DashMap::new()),
             tool_repetition_stack: Arc::new(Mutex::new(Vec::new())),
-            planner_model,
-            executor_model,
-            verifier_model,
+            planner_model: p_model,
+            executor_model: e_model,
+            verifier_model: v_model,
             mlx_presets: {
                 let dm = DashMap::new();
                 for (k, v) in mlx_presets { dm.insert(k, v); }
@@ -1523,8 +1532,15 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
-        if let Some(tx) = self.event_tx.lock().clone() {
-            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("📡 Dispatching request to Ollama ({}) [Waiting for GPU]...", model_name))));
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let mode = self.backend.read().await.mode();
+            let backend_name = match mode {
+                crate::inference::AgentMode::MLX => "MLX Engine",
+                crate::inference::AgentMode::Ollama => "Ollama",
+                crate::inference::AgentMode::Bridge => "AI Bridge",
+            };
+            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("📡 Dispatching request to {} ({}) [Waiting for GPU]...", backend_name, model_name))));
         }
 
         let output = self.backend.read().await.stream_chat(
@@ -2150,7 +2166,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             "warmup".to_string()
         )];
         
-        let model_name = AgentPhase::Planning.default_model();
+        let model_name = self.model.lock().clone();
 
         // We use a tiny max_len for the warmup pulse
         let _ = self.backend.read().await.stream_chat(
