@@ -24,7 +24,12 @@ An industrial, high-fidelity terminal dashboard for full-screen autonomous workf
   - **Model Presets**: Switch between MLX and Ollama engines instantly.
   - **Aesthetic Engine**: Cycle through premium syntax themes (**Ocean**, **Mocha**, **Eighties**, **Solarized**).
   - **Safety Protocols**: Toggle **Safe Mode** and **Hardcore Sentinel** states on the fly.
-  - **System Commands**: Access all traditional slash commands (like `/undo` and `/clear`) without typing.
+  - **System Commands**: Access all traditional slash commands without typing.
+- **⚡ Traditional Slash Commands**: For classic terminal workflows, all system actions remain fully supported:
+  - `/help` — Show the full command manual.
+  - `/undo` — Revert the last file modification.
+  - `/switch <name>` — Hot-swap the MLX inference engine preset.
+  - `/clear` — Wipe the conversation history.
 
 ### 🖥️ Standard CLI
 A lightweight, direct command-line interface for rapid tasks, scriptable interactions, and piping workflows.
