@@ -19,7 +19,7 @@ training.log
 *.log
 
 # Build & OS
-/target
+target/
 .DS_Store
 master.key
 temp_agent_chunk*.rs

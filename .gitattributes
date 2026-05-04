@@ -1,0 +1,16 @@
+# GitHub Language Detection overrides
+# Mark large datasets and models as vendored/generated so they don't count towards stats
+
+*.jsonl linguist-generated
+brain_vectors.json linguist-generated
+*.db linguist-generated
+*.log linguist-generated
+
+# Subprojects that might have their own artifacts
+tempest-wasm/target/* linguist-vendored
+vscode-tempest/node_modules/* linguist-vendored
+vscode-tempest/out/* linguist-vendored
+
+# Ensure Rust is dominant
+*.rs linguist-detectable
+Cargo.toml linguist-detectable
