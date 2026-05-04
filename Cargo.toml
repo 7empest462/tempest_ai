@@ -1,6 +1,6 @@
 [package]
 name = "tempest_ai"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.95"
 
@@ -50,6 +50,7 @@ crossterm = "0.29.0"
 rustyline = "15.0.0"
 include_dir = "0.7"
 walkdir = "2.5"
+ignore = "0.4"
 similar = "2.6"
 schemars = "1.2.1"
 miette = { version = "7.5", features = ["fancy"] }

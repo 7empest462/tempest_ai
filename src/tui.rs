@@ -23,6 +23,9 @@ use syntect::util::LinesWithEndings;
 use unicode_width::UnicodeWidthStr;
 use std::io::stdout;
 use std::time::{Duration, Instant};
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use std::path::PathBuf;
 
 pub enum AgentEvent {
     SystemUpdate(String), // Telemetry
@@ -40,6 +43,7 @@ pub enum AgentEvent {
     TelemetryMetrics { cpu: Option<u64>, gpu: Option<u64>, tps: Option<u64> },
     CommandOutput(String),
     EditorEdit { path: String, content: String },
+    ShowManual(String),
 }
 
 pub enum ToolResponse {
@@ -55,6 +59,7 @@ pub enum FocusedPane {
     Reasoning,
     Explorer,
     CommandPalette,
+    Viewer,
 }
 
 pub struct App {
@@ -99,17 +104,19 @@ pub struct App {
     pub command_palette_options: Vec<String>,
     pub command_palette_state: ratatui::widgets::ListState,
     pub current_theme: String,
+    pub explorer_root: PathBuf,
+    pub explorer_query: String,
+    pub matcher: SkimMatcherV2,
+    // --- 📄 VIEWER STATE ---
+    pub viewer_content: Option<(String, String)>, // (path, content)
+    pub viewer_scroll: u16,
 }
 
 impl App {
     pub fn new(initial_theme: String) -> Self {
         Self {
             input_buffer: String::new(),
-            messages: vec![
-                "Welcome to Tempest AI TUI.".to_string(),
-                "Type your request below and press Enter.".to_string(),
-                "Press Esc to stop agent, Ctrl+C to exit.".to_string(),
-            ],
+            messages: Vec::new(),
             current_stream: String::new(),
             active_tool: None,
             telemetry_text: "Initializing systems...".to_string(),
@@ -159,29 +166,51 @@ impl App {
             ],
             command_palette_state: ratatui::widgets::ListState::default(),
             current_theme: initial_theme,
+            explorer_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            explorer_query: String::new(),
+            matcher: SkimMatcherV2::default(),
+            viewer_content: None,
+            viewer_scroll: 0,
         }
     }
 
     pub fn refresh_explorer(&mut self) {
-        if let Ok(entries) = std::fs::read_dir(&self.current_explorer_dir) {
-            let mut files = entries.filter_map(|e| e.ok())
-                .map(|e| {
-                    let path = e.path().file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    let is_dir = e.path().is_dir();
-                    (path, is_dir)
-                })
-                .collect::<Vec<_>>();
-            
-            // Sort: Dirs first, then alpha
-            files.sort_by(|a, b| {
-                if a.1 != b.1 {
-                    b.1.cmp(&a.1)
-                } else {
-                    a.0.to_lowercase().cmp(&b.0.to_lowercase())
-                }
-            });
-            self.explorer_files = files;
+        let mut files = Vec::new();
+        
+        // Add ".." if not at root
+        if self.current_explorer_dir != self.explorer_root {
+            files.push(("..".to_string(), true));
         }
+
+        if let Ok(entries) = std::fs::read_dir(&self.current_explorer_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let is_dir = entry.path().is_dir();
+                
+                // Filtering
+                if !self.explorer_query.is_empty() {
+                    if self.matcher.fuzzy_match(&name, &self.explorer_query).is_none() {
+                        continue;
+                    }
+                }
+                
+                // Skip hidden and common ignores
+                if name.starts_with('.') && name != ".." { continue; }
+                if name == "target" || name == "node_modules" { continue; }
+
+                files.push((name, is_dir));
+            }
+        }
+
+        // Sort: Dirs first, then alpha
+        files.sort_by(|a, b| {
+            if a.1 != b.1 {
+                b.1.cmp(&a.1)
+            } else {
+                a.0.to_lowercase().cmp(&b.0.to_lowercase())
+            }
+        });
+        self.explorer_files = files;
     }
 
     pub fn push_message(&mut self, msg: String) {
@@ -193,6 +222,48 @@ impl App {
         if self.focused_pane == FocusedPane::Chat {
             self.list_state.select(Some(self.messages.len().saturating_sub(1)));
         }
+    }
+
+    pub fn generate_file_suggestions(&self, file_path: &str) -> Vec<String> {
+        let extension = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        match extension {
+            "rs" => vec![
+                "Fix issues in this file".to_string(),
+                "Explain this module".to_string(),
+                "Add error handling".to_string(),
+                "Refactor for better readability".to_string(),
+                "Generate unit tests".to_string(),
+            ],
+            "toml" | "yaml" | "yml" => vec![
+                "Explain this config".to_string(),
+                "Optimize dependencies".to_string(),
+                "Check for schema errors".to_string(),
+            ],
+            "md" => vec![
+                "Improve documentation flow".to_string(),
+                "Check for broken links".to_string(),
+                "Summarize this document".to_string(),
+            ],
+            _ => vec![
+                "Explain this file".to_string(),
+                "Improve this code".to_string(),
+                "Add documentation".to_string(),
+            ]
+        }
+    }
+
+    pub fn get_general_suggestions(&self) -> Vec<String> {
+        vec![
+            "Help me plan a new feature".to_string(),
+            "Debug the current build".to_string(),
+            "Review recent changes".to_string(),
+            "Optimize performance".to_string(),
+            "Search for TODOs in project".to_string(),
+        ]
     }
 }
 
@@ -226,15 +297,52 @@ pub async fn run_tui(
             if let Event::Mouse(mev) = &ev {
                 if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = mev.kind {
                     let size = terminal.size().into_diagnostic()?;
-                    let horizontal_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    
+                    // Re-calculate main_chunks to match UI logic
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(8), // Header
+                            Constraint::Min(3),    // Main Content
+                            Constraint::Length(3), // Input
+                        ])
                         .split(size.into());
 
-                    if horizontal_chunks[0].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                    let mut main_constraints = Vec::new();
+                    if app.show_explorer { main_constraints.push(Constraint::Percentage(20)); }
+                    main_constraints.push(Constraint::Percentage(if app.show_reasoning || app.viewer_content.is_some() { 40 } else { 80 }));
+                    if app.show_reasoning { main_constraints.push(Constraint::Percentage(40)); }
+                    if app.viewer_content.is_some() { main_constraints.push(Constraint::Percentage(40)); }
+
+                    let main_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints(main_constraints)
+                        .split(chunks[1]);
+
+                    let mut current_idx = 0;
+                    if app.show_explorer {
+                        if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                            app.focused_pane = FocusedPane::Explorer;
+                        }
+                        current_idx += 1;
+                    }
+                    
+                    if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
                         app.focused_pane = FocusedPane::Chat;
-                    } else if horizontal_chunks[1].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
-                        app.focused_pane = FocusedPane::Reasoning;
+                    }
+                    current_idx += 1;
+
+                    if app.show_reasoning {
+                        if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                            app.focused_pane = FocusedPane::Reasoning;
+                        }
+                        current_idx += 1;
+                    }
+
+                    if app.viewer_content.is_some() {
+                        if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                            app.focused_pane = FocusedPane::Viewer;
+                        }
                     }
                 }
                 
@@ -249,6 +357,16 @@ pub async fn run_tui(
                         crossterm::event::MouseEventKind::ScrollDown => {
                             let cur = app.list_state.selected().unwrap_or(0);
                             app.list_state.select(Some(cur + 1));
+                        }
+                        _ => {}
+                    }
+                } else if app.focused_pane == FocusedPane::Viewer {
+                    match mev.kind {
+                        crossterm::event::MouseEventKind::ScrollUp => {
+                            app.viewer_scroll = app.viewer_scroll.saturating_sub(1);
+                        }
+                        crossterm::event::MouseEventKind::ScrollDown => {
+                            app.viewer_scroll = app.viewer_scroll.saturating_add(1);
                         }
                         _ => {}
                     }
@@ -330,6 +448,129 @@ pub async fn run_tui(
                                 }
                             } else if app.focused_pane == FocusedPane::CommandPalette {
                                 app.command_palette_query.push(c);
+                            } else if app.focused_pane == FocusedPane::Explorer {
+                                match c {
+                                    '1'..='5' => {
+                                        if app.messages.is_empty() {
+                                            let suggestions = if let Some(idx) = app.explorer_state.selected() {
+                                                if let Some((name, _)) = app.explorer_files.get(idx) {
+                                                    let full_path = app.current_explorer_dir.join(name);
+                                                    app.generate_file_suggestions(&full_path.to_string_lossy())
+                                                } else {
+                                                    app.get_general_suggestions()
+                                                }
+                                            } else {
+                                                app.get_general_suggestions()
+                                            };
+                                            
+                                            let num = c.to_digit(10).unwrap() as usize;
+                                            if num <= suggestions.len() {
+                                                let suggestion = &suggestions[num - 1];
+                                                let mut cmd = suggestion.clone();
+                                                if let Some(idx) = app.explorer_state.selected() {
+                                                    if let Some((name, _)) = app.explorer_files.get(idx) {
+                                                        let full_path = app.current_explorer_dir.join(name);
+                                                        cmd = format!("{}: {}", suggestion, full_path.to_string_lossy());
+                                                    }
+                                                }
+                                                app.push_message(format!("You: {}", cmd));
+                                                let _ = user_tx.send(cmd).await;
+                                                app.focused_pane = FocusedPane::Chat;
+                                            }
+                                        }
+                                    }
+                                    'j' => {
+                                        let cur = app.explorer_state.selected().unwrap_or(0);
+                                        app.explorer_state.select(Some(cur + 1));
+                                    }
+                                    'k' => {
+                                        let cur = app.explorer_state.selected().unwrap_or(0);
+                                        app.explorer_state.select(Some(cur.saturating_sub(1)));
+                                    }
+                                    'h' => {
+                                        app.current_explorer_dir.pop();
+                                        app.refresh_explorer();
+                                        app.explorer_state.select(Some(0));
+                                    }
+                                    'l' => {
+                                        if let Some(idx) = app.explorer_state.selected() {
+                                            if let Some((name, is_dir)) = app.explorer_files.get(idx).cloned() {
+                                                if is_dir {
+                                                    if name == ".." {
+                                                        app.current_explorer_dir.pop();
+                                                    } else {
+                                                        app.current_explorer_dir.push(name);
+                                                    }
+                                                    app.refresh_explorer();
+                                                    app.explorer_state.select(Some(0));
+                                                } else {
+                                                    // Open in VIEWER
+                                                    let full_path = app.current_explorer_dir.join(name);
+                                                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                                        app.viewer_content = Some((full_path.to_string_lossy().into_owned(), content));
+                                                        app.viewer_scroll = 0;
+                                                        app.focused_pane = FocusedPane::Viewer;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    'c' => {
+                                        if let Some(idx) = app.explorer_state.selected() {
+                                            if let Some((name, _)) = app.explorer_files.get(idx) {
+                                                let full_path = app.current_explorer_dir.join(name);
+                                                let path_str = full_path.to_string_lossy().into_owned();
+                                                app.push_message(format!("📋 [COPIED]: {}", path_str));
+                                            }
+                                        }
+                                    }
+                                    'f' => {
+                                        if let Some(idx) = app.explorer_state.selected() {
+                                            if let Some((name, is_dir)) = app.explorer_files.get(idx) {
+                                                if !is_dir {
+                                                    let full_path = app.current_explorer_dir.join(name);
+                                                    let cmd = format!("Fix this file: {}", full_path.to_string_lossy());
+                                                    app.push_message(format!("You: {}", cmd));
+                                                    let _ = user_tx.send(cmd).await;
+                                                    app.focused_pane = FocusedPane::Chat;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    'r' => {
+                                        if let Some(idx) = app.explorer_state.selected() {
+                                            if let Some((name, is_dir)) = app.explorer_files.get(idx) {
+                                                if !is_dir {
+                                                    let full_path = app.current_explorer_dir.join(name);
+                                                    let cmd = format!("Refactor this file: {}", full_path.to_string_lossy());
+                                                    app.push_message(format!("You: {}", cmd));
+                                                    let _ = user_tx.send(cmd).await;
+                                                    app.focused_pane = FocusedPane::Chat;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    'e' => {
+                                        if let Some(idx) = app.explorer_state.selected() {
+                                            if let Some((name, is_dir)) = app.explorer_files.get(idx) {
+                                                if !is_dir {
+                                                    let full_path = app.current_explorer_dir.join(name);
+                                                    app.input_buffer.push_str(&format!(" [CONTEXT: {}] ", full_path.to_string_lossy()));
+                                                    app.focused_pane = FocusedPane::Chat;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        app.explorer_query.push(c);
+                                        app.refresh_explorer();
+                                    }
+                                }
+                            } else if app.focused_pane == FocusedPane::Viewer {
+                                if c == 'q' || c == 'Q' || c == 'x' || c == 'X' {
+                                    app.viewer_content = None;
+                                    app.focused_pane = if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat };
+                                }
                             } else {
                                 app.input_buffer.push(c);
                             }
@@ -337,6 +578,15 @@ pub async fn run_tui(
                         KeyCode::Backspace => {
                             if app.focused_pane == FocusedPane::CommandPalette {
                                 app.command_palette_query.pop();
+                            } else if app.focused_pane == FocusedPane::Explorer {
+                                if !app.explorer_query.is_empty() {
+                                    app.explorer_query.pop();
+                                    app.refresh_explorer();
+                                } else {
+                                    app.current_explorer_dir.pop();
+                                    app.refresh_explorer();
+                                    app.explorer_state.select(Some(0));
+                                }
                             } else {
                                 app.input_buffer.pop();
                             }
@@ -381,8 +631,8 @@ pub async fn run_tui(
                                 }
                             } else if app.focused_pane == FocusedPane::Explorer {
                                 if let Some(idx) = app.explorer_state.selected() {
-                                    if let Some((name, is_dir)) = app.explorer_files.get(idx) {
-                                        if *is_dir {
+                                    if let Some((name, is_dir)) = app.explorer_files.get(idx).cloned() {
+                                        if is_dir {
                                             if name == ".." {
                                                 app.current_explorer_dir.pop();
                                             } else {
@@ -391,10 +641,13 @@ pub async fn run_tui(
                                             app.refresh_explorer();
                                             app.explorer_state.select(Some(0));
                                         } else {
-                                            // Select file for context
+                                            // Default Enter action: Open in Viewer
                                             let full_path = app.current_explorer_dir.join(name);
-                                            app.input_buffer.push_str(&format!(" [CONTEXT: {}] ", full_path.to_string_lossy()));
-                                            app.focused_pane = FocusedPane::Chat;
+                                            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                                app.viewer_content = Some((full_path.to_string_lossy().into_owned(), content));
+                                                app.viewer_scroll = 0;
+                                                app.focused_pane = FocusedPane::Viewer;
+                                            }
                                         }
                                     }
                                 }
@@ -408,9 +661,13 @@ pub async fn run_tui(
                         KeyCode::Tab => {
                             app.focused_pane = match app.focused_pane {
                                 FocusedPane::Chat => {
-                                    if app.show_reasoning { FocusedPane::Reasoning } else if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat }
+                                    if app.show_reasoning { FocusedPane::Reasoning } 
+                                    else if app.viewer_content.is_some() { FocusedPane::Viewer }
+                                    else if app.show_explorer { FocusedPane::Explorer } 
+                                    else { FocusedPane::Chat }
                                 },
-                                FocusedPane::Reasoning => if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
+                                FocusedPane::Reasoning => if app.viewer_content.is_some() { FocusedPane::Viewer } else if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
+                                FocusedPane::Viewer => if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
                                 FocusedPane::Explorer => FocusedPane::Chat,
                                 FocusedPane::CommandPalette => FocusedPane::Chat,
                             };
@@ -426,6 +683,8 @@ pub async fn run_tui(
                             } else if app.focused_pane == FocusedPane::CommandPalette {
                                 let cur = app.command_palette_state.selected().unwrap_or(0);
                                 app.command_palette_state.select(Some(cur.saturating_sub(1)));
+                            } else if app.focused_pane == FocusedPane::Viewer {
+                                app.viewer_scroll = app.viewer_scroll.saturating_sub(1);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_sub(1);
                             }
@@ -440,6 +699,8 @@ pub async fn run_tui(
                             } else if app.focused_pane == FocusedPane::CommandPalette {
                                 let cur = app.command_palette_state.selected().unwrap_or(0);
                                 app.command_palette_state.select(Some(cur + 1));
+                            } else if app.focused_pane == FocusedPane::Viewer {
+                                app.viewer_scroll = app.viewer_scroll.saturating_add(1);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_add(1);
                             }
@@ -449,6 +710,8 @@ pub async fn run_tui(
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur.saturating_sub(15)));
                                 app.auto_scroll = false;
+                            } else if app.focused_pane == FocusedPane::Viewer {
+                                app.viewer_scroll = app.viewer_scroll.saturating_sub(15);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_sub(15);
                             }
@@ -457,6 +720,8 @@ pub async fn run_tui(
                             if app.focused_pane == FocusedPane::Chat {
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur + 15));
+                            } else if app.focused_pane == FocusedPane::Viewer {
+                                app.viewer_scroll = app.viewer_scroll.saturating_add(15);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_add(15);
                             }
@@ -469,7 +734,10 @@ pub async fn run_tui(
                             app.auto_scroll = true;
                         }
                         KeyCode::Esc => {
-                            if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
+                            if app.focused_pane == FocusedPane::Viewer {
+                                app.viewer_content = None;
+                                app.focused_pane = FocusedPane::Chat;
+                            } else if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                                 app.push_message("⚠️ [INTERRUPTED]: Stopping agent...".to_string());
                             } else {
@@ -569,6 +837,11 @@ pub async fn run_tui(
                 AgentEvent::EditorEdit { path, .. } => {
                     app.push_message(format!("📝 [EDITOR SYNC]: Applied changes to {}", path));
                 }
+                AgentEvent::ShowManual(content) => {
+                    app.viewer_content = Some(("OPERATIONAL MANUAL".to_string(), content));
+                    app.viewer_scroll = 0;
+                    app.focused_pane = FocusedPane::Viewer;
+                }
             }
         }
 
@@ -620,9 +893,12 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.show_explorer {
         main_constraints.push(Constraint::Percentage(20)); // Explorer
     }
-    main_constraints.push(Constraint::Percentage(if app.show_reasoning { 40 } else { 80 })); // Chat
+    main_constraints.push(Constraint::Percentage(if app.show_reasoning || app.viewer_content.is_some() { 40 } else { 80 })); // Chat
     if app.show_reasoning {
         main_constraints.push(Constraint::Percentage(40)); // Reasoning
+    }
+    if app.viewer_content.is_some() {
+        main_constraints.push(Constraint::Percentage(40)); // Viewer
     }
 
     let main_chunks = Layout::default()
@@ -638,9 +914,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         pane_idx += 1;
         
         let explorer_border_color = if app.focused_pane == FocusedPane::Explorer { Color::Yellow } else { Color::DarkGray };
-        let explorer_title = if app.focused_pane == FocusedPane::Explorer { " 📂 EXPLORER [FOCUS] " } else { " 📂 EXPLORER " };
+        let explorer_title = format!(" 📂 EXPLORER: {} {} ", 
+            app.current_explorer_dir.file_name().unwrap_or_default().to_string_lossy(),
+            if app.explorer_query.is_empty() { "".to_string() } else { format!("(🔍 {})", app.explorer_query) }
+        );
 
-        let mut items = vec![ListItem::new(Span::styled(".. [UP]", Style::default().fg(Color::Blue)))];
+        let mut items = Vec::new();
         for (name, is_dir) in &app.explorer_files {
             let icon = if *is_dir { "📁 " } else { "📄 " };
             let style = if *is_dir { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::White) };
@@ -648,11 +927,27 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
 
         let explorer = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(explorer_title).border_style(Style::default().fg(explorer_border_color)))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(explorer_title, Style::default().fg(explorer_border_color).add_modifier(Modifier::BOLD)))
+                .border_style(Style::default().fg(explorer_border_color)))
             .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
             .highlight_symbol(">> ");
         
         f.render_stateful_widget(explorer, explorer_area, &mut app.explorer_state);
+
+        // Help text at bottom of explorer
+        if app.focused_pane == FocusedPane::Explorer {
+             let help_area = ratatui::layout::Rect {
+                 x: explorer_area.x + 1,
+                 y: explorer_area.y + explorer_area.height.saturating_sub(2),
+                 width: explorer_area.width.saturating_sub(2),
+                 height: 1,
+             };
+             let help_text = Paragraph::new(" [h]:Up [l]:In [f]:Fix [r]:Ref ")
+                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+             f.render_widget(help_text, help_area);
+        }
     }
 
     // Header area for Logo
@@ -681,104 +976,160 @@ fn ui(f: &mut Frame, app: &mut App) {
         ].as_ref())
         .split(chat_area);
 
-    let mut list_items = Vec::new();
-    let chat_width = top_chunks[0].width.saturating_sub(2) as usize;
-
-    let push_wrapped = |text: &str, items: &mut Vec<ListItem>, is_user: bool, show_header: bool| {
-        if chat_width == 0 { return; }
-        let (prefix, color) = if is_user { ("You: ", Color::Blue) } else { ("Tempest: ", Color::Cyan) };
-        
-        let has_prefix = text.starts_with(prefix);
-        let content_to_wrap = if has_prefix { &text[prefix.len()..] } else { text };
-        
-        // --- 🌈 SYNTAX HIGHLIGHTING FOR CODE BLOCKS IN CHAT ---
-        if !is_user && content_to_wrap.contains("```") {
-             // Basic detection and highlighting for code blocks
-             let highlighted = highlight_text(content_to_wrap, &app.syntax_set, &app.theme_set, &app.current_theme);
-             for line in highlighted {
-                 items.push(ListItem::new(line));
-             }
-             return;
-        }
-
-        let mut first_line = true;
-        for line in content_to_wrap.split('\n') {
-            let mut current = line;
-            let mut first_chunk = true;
-
-            if current.is_empty() && !first_line {
-                items.push(ListItem::new(Line::from("")));
-                continue;
-            }
-
-            while !current.is_empty() || (first_line && first_chunk) {
-                let mut width = 0;
-                let mut split_idx = 0;
-                let available_width = if first_line && first_chunk && show_header && has_prefix {
-                    chat_width.saturating_sub(UnicodeWidthStr::width(prefix))
-                } else {
-                    chat_width
-                };
-
-                for (i, c) in current.char_indices() {
-                    let c_width = UnicodeWidthStr::width(c.to_string().as_str());
-                    if width + c_width > available_width {
-                        break;
-                    }
-                    width += c_width;
-                    split_idx = i + c.len_utf8();
-                }
-
-                if split_idx == 0 && !current.is_empty() {
-                    split_idx = current.chars().next().unwrap().len_utf8();
-                }
-
-                let (chunk, rest) = current.split_at(split_idx);
-                
-                let line_content = if first_line && first_chunk && show_header && has_prefix {
-                    Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                        Span::raw(chunk.to_string()),
-                    ])
-                } else {
-                    Line::from(chunk.to_string())
-                };
-                
-                items.push(ListItem::new(line_content));
-                current = rest;
-                first_chunk = false;
-                if current.is_empty() { break; }
-            }
-            first_line = false;
-        }
-    };
-
-    for msg in &app.messages {
-        let is_user = msg.starts_with("You: ");
-        push_wrapped(msg, &mut list_items, is_user, true);
-    }
-
-    if !app.current_stream.is_empty() {
-        push_wrapped(&format!("Tempest: {}", app.current_stream), &mut list_items, false, true);
-    }
-
-    let core_border_color = if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray };
-    let core_title = if app.focused_pane == FocusedPane::Chat { " 🦾 CORE SESSION [FOCUS] " } else { " 🦾 CORE SESSION " };
-    
-    let item_count = list_items.len();
-    let list = List::new(list_items)
-        .block(Block::default()
+    // --- 🦾 CHAT ZONE: Smart Panel vs History ---
+    if app.messages.is_empty() {
+        let block = Block::default()
             .borders(Borders::ALL)
-            .title(core_title)
-            .border_style(Style::default().fg(core_border_color)))
-        .style(Style::default().fg(Color::White));
+            .title(if app.focused_pane == FocusedPane::Chat { " 🦾 MISSION CONTROL [FOCUS] " } else { " 🦾 MISSION CONTROL " })
+            .border_style(Style::default().fg(if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray }));
 
-    if app.auto_scroll && item_count > 0 {
-        app.list_state.select(Some(item_count.saturating_sub(1)));
+        let selected_file = if let Some(idx) = app.explorer_state.selected() {
+            app.explorer_files.get(idx).map(|(name, _)| app.current_explorer_dir.join(name).to_string_lossy().into_owned())
+        } else {
+            None
+        };
+
+        let suggestions = if let Some(file) = &selected_file {
+            app.generate_file_suggestions(file)
+        } else {
+            app.get_general_suggestions()
+        };
+
+        let mut content = vec![
+            Line::from(vec![
+                Span::styled("🌪️  TEMPEST AI ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("v0.3.1 \"Cyber-Orchestrator\"", Style::default().fg(Color::DarkGray)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("Status: "),
+                Span::styled("STANDBY", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("SELECTED: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(selected_file.unwrap_or_else(|| "Project Root".to_string())),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled("🎯 SUGGESTED ACTIONS (Press 1-5 in Explorer):", Style::default().add_modifier(Modifier::UNDERLINED))),
+            Line::from(""),
+        ];
+
+        for (i, suggestion) in suggestions.iter().enumerate() {
+            content.push(Line::from(vec![
+                Span::styled(format!(" [{}] ", i + 1), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(suggestion.clone()),
+            ]));
+        }
+
+        content.push(Line::from(""));
+        content.push(Line::from(Span::styled("Type a command below to begin session...", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))));
+
+        let welcome = Paragraph::new(content)
+            .block(block)
+            .alignment(ratatui::layout::Alignment::Left)
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(welcome, top_chunks[0]);
+    } else {
+        let mut list_items = Vec::new();
+        let chat_width = top_chunks[0].width.saturating_sub(2) as usize;
+
+        let push_wrapped = |text: &str, items: &mut Vec<ListItem>, is_user: bool, show_header: bool| {
+            if chat_width == 0 { return; }
+            let (prefix, color) = if is_user { ("You: ", Color::Blue) } else { ("Tempest: ", Color::Cyan) };
+            
+            let has_prefix = text.starts_with(prefix);
+            let content_to_wrap = if has_prefix { &text[prefix.len()..] } else { text };
+            
+            // --- 🌈 SYNTAX HIGHLIGHTING FOR CODE BLOCKS IN CHAT ---
+            if !is_user && content_to_wrap.contains("```") {
+                 let highlighted = highlight_text(content_to_wrap, &app.syntax_set, &app.theme_set, &app.current_theme);
+                 for line in highlighted {
+                     items.push(ListItem::new(line));
+                 }
+                 return;
+            }
+
+            let mut first_line = true;
+            for line in content_to_wrap.split('\n') {
+                let mut current = line;
+                let mut first_chunk = true;
+
+                if current.is_empty() && !first_line {
+                    items.push(ListItem::new(Line::from("")));
+                    continue;
+                }
+
+                while !current.is_empty() || (first_line && first_chunk) {
+                    let mut width = 0;
+                    let mut split_idx = 0;
+                    let available_width = if first_line && first_chunk && show_header && has_prefix {
+                        chat_width.saturating_sub(UnicodeWidthStr::width(prefix))
+                    } else {
+                        chat_width
+                    };
+
+                    for (i, c) in current.char_indices() {
+                        let c_width = UnicodeWidthStr::width(c.to_string().as_str());
+                        if width + c_width > available_width {
+                            break;
+                        }
+                        width += c_width;
+                        split_idx = i + c.len_utf8();
+                    }
+
+                    if split_idx == 0 && !current.is_empty() {
+                        split_idx = current.chars().next().unwrap().len_utf8();
+                    }
+
+                    let (chunk, rest) = current.split_at(split_idx);
+                    
+                    let line_content = if first_line && first_chunk && show_header && has_prefix {
+                        Line::from(vec![
+                            Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                            Span::raw(chunk.to_string()),
+                        ])
+                    } else {
+                        Line::from(chunk.to_string())
+                    };
+                    
+                    items.push(ListItem::new(line_content));
+                    current = rest;
+                    first_chunk = false;
+                    if current.is_empty() { break; }
+                }
+                first_line = false;
+            }
+        };
+
+        for msg in &app.messages {
+            let is_user = msg.starts_with("You: ");
+            push_wrapped(msg, &mut list_items, is_user, true);
+        }
+
+        if !app.current_stream.is_empty() {
+            push_wrapped(&format!("Tempest: {}", app.current_stream), &mut list_items, false, true);
+        }
+
+        let core_border_color = if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray };
+        let core_title = if app.focused_pane == FocusedPane::Chat { " 🦾 CORE SESSION [FOCUS] " } else { " 🦾 CORE SESSION " };
+        
+        let item_count = list_items.len();
+        let list = List::new(list_items)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(core_title)
+                .border_style(Style::default().fg(core_border_color)))
+            .style(Style::default().fg(Color::White));
+
+        if app.auto_scroll && item_count > 0 {
+            app.list_state.select(Some(item_count.saturating_sub(1)));
+        }
+        
+        f.render_stateful_widget(list, top_chunks[0], &mut app.list_state);
     }
-    
-    f.render_stateful_widget(list, top_chunks[0], &mut app.list_state);
 
+    // --- ⚙️ STATUS / TELEMETRY ZONE (Always Visible) ---
     let status_title = format!(" ⚙️ STATUS [{}] ", app.agent_mode);
     let mut status_lines = Vec::new();
     
@@ -916,6 +1267,29 @@ fn ui(f: &mut Frame, app: &mut App) {
             .wrap(ratatui::widgets::Wrap { trim: false })
             .scroll((app.reasoning_scroll, 0));
         f.render_widget(reasoning_para, reasoning_area);
+        pane_idx += 1;
+    }
+
+    // --- 📄 CYBER-VIEWER PANE (Syntax Highlighted) ---
+    if let Some((path, content)) = &app.viewer_content {
+        let viewer_area = main_chunks[pane_idx];
+        
+        let viewer_border_color = if app.focused_pane == FocusedPane::Viewer { Color::Yellow } else { Color::Green };
+        let viewer_title = format!(" 📄 VIEWER: {} {} ", 
+            path, 
+            if app.focused_pane == FocusedPane::Viewer { "[FOCUS]" } else { "" }
+        );
+
+        let highlighted_lines = highlight_text(content, &app.syntax_set, &app.theme_set, &app.current_theme);
+
+        let viewer_para = Paragraph::new(highlighted_lines)
+            .block(Block::default()
+                .title(Span::styled(viewer_title, Style::default().fg(viewer_border_color).add_modifier(Modifier::BOLD)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(viewer_border_color)))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((app.viewer_scroll, 0));
+        f.render_widget(viewer_para, viewer_area);
     }
 
     let mut input_title = " 🗨️ INPUT ".to_string();

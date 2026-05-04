@@ -41,7 +41,12 @@ use std::sync::Arc;
 ///   /safemode  - Toggle blocking approvals (ON/OFF)
 ///   /switch    - Hot-swap the inference model
 #[derive(Parser, Debug)]
-#[command(name = "tempest_ai", version, about, after_help = "For full documentation, run Tempest and type /help in the TUI.")]
+#[command(
+    name = "tempest_ai", 
+    version, 
+    about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.", 
+    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.1 Operational Manual, launch the TUI and type '/help'."
+)]
 struct Cli {
     /// Ollama model to use (overrides config and OLLAMA_MODEL env var)
     #[arg(short, long)]

@@ -1,85 +1,77 @@
-# 🌪️ Tempest AI `v0.3.0` — "Cyber-Orchestrator"
+# 🌪️ Tempest AI `v0.3.1` — "Cyber-Orchestrator"
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
-Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat-wrappers, Tempest is a **Stateful Intelligence** that operates with a hardened "Frontal Lobe" architecture—enforcing programmatic boundaries, real-time situational awareness, and a disciplined Planning/Execution lifecycle.
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer."
+
+---
+
+## 🚀 Launch Modes
+Tempest can be started in several modes depending on your hardware and desired interface:
+
+| Command | Mode | Backend |
+| :--- | :--- | :--- |
+| `./tempest_ai` | **TUI (Default)** | Ollama |
+| `./tempest_ai --mlx` | **TUI** | MLX (Apple Silicon) |
+| `./tempest_ai --cli` | **CLI** | Ollama |
+| `./tempest_ai --mlx --cli` | **CLI** | MLX (Apple Silicon) |
 
 ---
 
 ## 🕹️ "Cyber-Orchestrator" TUI Controls
 
-The TUI is designed as a high-fidelity Mission Control dashboard. Use the following shortcuts to navigate the environment:
-
+### 📂 Cyber-Explorer & Viewer
 | Shortcut | Action |
 | :--- | :--- |
-| **`Ctrl+P`** | **Mission Control Palette**: Fuzzy-searchable hub for model presets, themes, and system actions. |
-| **`Ctrl+E`** | **Interactive Explorer**: Toggle the workspace file browser. |
-| **`Ctrl+C`** | **Emergency Exit**: Gracefully terminate the engine and unload models. |
-| **`Tab`** | **Focus Switch**: Cycle focus between Chat, Reasoning, and Explorer panes. |
-| **`Esc`** | **Interruption**: Stop the agent's current thought or execution loop. |
-| **`Mouse Wheel`**| **Scroll**: Direct interaction with Chat and Reasoning buffers. |
+| **`h` / `j` / `k` / `l`** | **Vim Navigation**: Navigate the workspace tree. |
+| **`Backspace` / `h`** | **Up**: Go to parent directory. |
+| **`Enter` / `l`** | **In**: Open folder or **View file** in Cyber-Viewer. |
+| **`1` - `5`** | **Smart Action**: Dispatch the corresponding suggested action instantly. |
+| **`e`** | **Edit**: Inject file context into chat with `[CONTEXT]` tag. |
+| **`f`** | **Fix**: Instantly command the agent to fix the selected file. |
+| **`r`** | **Refactor**: Trigger a refactor pulse for the selected file. |
+| **`c`** | **Copy**: Copy the absolute path to the system clipboard. |
+| **`d`** | **Delete**: Remove the file (Use with caution). |
+
+### 🛰️ Global Navigation
+| Shortcut | Action |
+| :--- | :--- |
+| **`Ctrl+P`** | **Mission Control Palette**: Fuzzy-search themes, models, and actions. |
+| **`Ctrl+E`** | **Toggle Explorer**: Show/Hide the workspace browser. |
+| **`Tab`** | **Focus Switch**: Cycle between Explorer, Chat, Viewer, and Reasoning. |
+| **`Esc` / `q` / `x`** | **Close Viewer**: Dismiss the Cyber-Viewer (when focused). |
+| **`Esc`** | **Interrupt**: Stop agent's current thought or execution loop. |
 
 ---
 
-## 📊 Mission Control HUD
-
-The dashboard provides real-time observability into the agent's performance and system health:
-
-### 1. Telemetry Pulse
-- **CPU Load**: Real-time rolling history of all core activity.
-- **GPU Activity**: High-fidelity Metal/Vulkan load tracking.
-- **TPS (Tokens Per Second)**: Live generation velocity history.
-
-### 2. Context HUD
-- **Usage Ratio**: Displays current tokens vs. total capacity (e.g., `12k / 32k`).
-- **Sentinel Fleet**: Real-time status of background monitors (Security, Syntax, and Rules).
-
----
-
-## 🎨 Persistent Aesthetic Engine
-
-Tempest AI supports professional-grade syntax highlighting for its Reasoning Trace and code blocks.
-- **Hot-Swapping**: Use `Ctrl+P` and search "Theme" to cycle through **Ocean**, **Mocha**, **Eighties**, and **Solarized**.
-- **Persistence**: Your theme selection is automatically committed to `config.toml` and restored on every boot.
+## 🦾 Smart Orchestrator Panel
+When starting a session with no active messages, Tempest manifests the **Smart Orchestrator**:
+1. **Selection Awareness**: It tracks your active file in the Explorer.
+2. **Contextual Logic**: It generates 5 tailored actions based on file extension (e.g., Rust module vs. TOML config).
+3. **Numeric Execution**: Pressing `1-5` while the explorer is focused dispatches the command immediately.
 
 ---
 
 ## ⚡ High-Velocity Mode & Safety
 
-Tempest AI operates in **High-Velocity Mode** by default. It will perform modifications without asking for permission, allowing for rapid-fire iteration.
-
 ### The Safety Net (`/undo`)
 Every modification made by Tempest triggers an **Automatic Checkpoint**. 
-- If you don't like a change, simply wait for the turn to end and type **`/undo`** (or select it from `Ctrl+P`).
-- This will revert all modified files to their state immediately before the last tool execution.
+- **Atomic Backups**: Every file edit is backed up to a checkpoint manager before the first byte is written.
+- **Instant Recovery**: If you don't like a change, type **`/undo`** (or select it from `Ctrl+P`). This reverts all modified files to their state immediately before the last tool execution.
 
 ### Safe Mode (`/safemode`)
-If you are working on sensitive production code:
 - Toggle **Safe Mode** via `/safemode` or the `Ctrl+P` palette.
-- When **ON**, Tempest will block and show you a **Unified Diff Preview** for every change, waiting for your approval to proceed.
-
----
-
-## 🛠️ Integrated Command Hub
-
-All system actions can be accessed via either **Slash Commands** or the **Fuzzy Palette (`Ctrl+P`)**:
-
-| Command | Palette Entry | Description |
-| :--- | :--- | :--- |
-| `/help` | `Help: Manual` | Display this guide. |
-| `/undo` | `System: Undo` | Revert the last file modification. |
-| `/switch` | `Hot-Swap: <Model>` | Change the inference engine preset. |
-| `/safemode`| `Toggle: Safe Mode`| Switch between Velocity and Safety modes. |
-| `/clear` | `System: Clear` | Wipe conversation history and reset context. |
+- When **ON**, Tempest will block and show you a **Unified Diff Preview** for every change, waiting for your explicit approval to proceed.
 
 ---
 
 ## 🔧 Configuration
-Configuration is stored in `config.toml` (locally) or `~/.config/tempest_ai/config.toml`. Key v0.3.0 fields:
-- `tui_theme`: Your persistent aesthetic choice.
-- `mlx_model`: Default native engine preset.
+Configuration is stored in `config.toml`. Key v0.3.1 fields:
+- `tui_theme`: Your persistent aesthetic choice (Ocean, Mocha, Solarized).
+- `mlx_model`: Default native engine preset for Apple Silicon.
 - `planner_model` / `executor_model`: Ollama-tier logic configuration.
+- `safe_mode`: Persistent toggle for execution safety.
 
 ---
 
-> [!TIP]
-> **Pro Tip**: Use the **Explorer (`Ctrl+E`)** to select specific files for context injection. Once focused on a file, pressing `Enter` will append its path to your input buffer with the `[CONTEXT]` tag, ensuring the agent has high-fidelity access to your ground truth. 🦾🚀✨
+> [!IMPORTANT]
+> **Industrial Traversal**: Use **`h`** and **`l`** for deep-dive exploration. The Cyber-Explorer respects your `.gitignore` and hides heavy artifacts (target/, node_modules/) automatically. 🦾🚀✨

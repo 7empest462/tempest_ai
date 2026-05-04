@@ -1120,11 +1120,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let prompt_trimmed = initial_user_prompt.trim();
         if prompt_trimmed.starts_with('/') {
             if prompt_trimmed == "/help" {
-                let manual = std::fs::read_to_string("MANUAL.md")
-                    .unwrap_or_else(|_| "Error: MANUAL.md not found. Please refer to the repository documentation.".to_string());
+                let manual = include_str!("../MANUAL.md");
                 let tx_opt = self.event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
-                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(manual));
+                    let _ = tx.try_send(crate::tui::AgentEvent::ShowManual(manual.to_string()));
                 }
                 return Ok(());
             }

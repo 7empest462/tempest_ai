@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.0` — "Cyber-Orchestrator"
+# 🌪️ Tempest AI `v0.3.1` — "Cyber-Orchestrator"
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat-wrappers, Tempest is a **Stateful Intelligence** that operates with a hardened "Frontal Lobe" architecture—enforcing programmatic boundaries, real-time situational awareness, and a disciplined Planning/Execution lifecycle.
@@ -8,93 +8,50 @@ Tempest AI is a high-performance, Rust-based autonomous agent designed to be you
 ## 🕹️ Available Interfaces
 Tempest AI is built for versatility, offering three distinct ways to interact:
 
+### 📟 "Cyber-Orchestrator" TUI (v0.3.1 Update)
+An industrial, high-fidelity terminal dashboard for full-screen autonomous workflows.
+- **🦾 Smart Orchestrator Panel**: A dynamic welcome dashboard with **Context-Aware Suggestions** based on your currently selected file.
+- **⚡ High-Velocity Shortcuts**: Use numeric keys **`1-5`** in the explorer to instantly dispatch suggested commands.
+- **📂 Cyber-Explorer (Ctrl+E)**: Real-time workspace navigation with **Vim-style navigation** (`h/j/k/l`).
+- **📄 Cyber-Viewer**: High-fidelity code observation pane. Press **`Enter`** or **`l`** in the explorer to manifest.
+- **📊 Mission Control Pulse**: Boxed telemetry sparklines for **CPU**, **GPU**, and **TPS**.
+- **⌨️ Mission Control Palette (Ctrl+P)**: Fuzzy-searchable hub for themes, models, and protocols.
+
 ### 💻 VS Code Sidebar
 The premium engineering experience. A modern, **Vue 3-powered** dashboard with a sleek glassmorphism design.
-- **⚡ Smart Toolbar**: Context-aware quick actions—`Fix`, `Explain`, `Refactor`, and `Comment`—that automatically snapshot your active file and cursor position for instant, one-click engineering.
-- **🧠 Hardened Editor Awareness**: Explicit `[EDITOR GROUND TRUTH]` injection ensures the agent prioritizes your active file path and code selection over internal hallucinations.
-- **🌀 Real-Time Feedback Loop**: Watch the "Storm" in motion with a pulsing thought HUD, a blinking streaming cursor, and a dynamic status bar that tracks the agent's phase (**THINKING**, **ANALYZING**, **LOADING**) in real-time.
-
-### 📟 "Cyber-Orchestrator" TUI (v0.3.0 Update)
-An industrial, high-fidelity terminal dashboard for full-screen autonomous workflows.
-- **📊 Mission Control Pulse**: Boxed, real-time telemetry sparklines for **CPU Load**, **GPU Activity (Metal)**, and **TPS (Token Generation Velocity)**.
-- **📂 Interactive File Explorer (Ctrl+E)**: A dedicated sidebar for real-time workspace navigation. Select files to instantly inject them into the context window for targeted engineering.
-- **🧠 Advanced Context HUD**: Detailed usage ratios (e.g., `12k / 32k`) with a synchronized progress bar and **Sentinel Fleet** status.
-- **🌀 Synchronized Reasoning**: Dynamic ASCII spinners and real-time `<think>` block parsing show exactly what the model is doing.
-- **⌨️ Unified "Mission Control" Palette (Ctrl+P)**: The central hub for high-speed system orchestration. This searchable overlay allows you to hot-swap everything in real-time with fuzzy-matching precision:
-  - **Model Presets**: Switch between MLX and Ollama engines instantly.
-  - **Aesthetic Engine**: Cycle through premium syntax themes (**Ocean**, **Mocha**, **Eighties**, **Solarized**).
-  - **Safety Protocols**: Toggle **Safe Mode** and **Hardcore Sentinel** states on the fly.
-  - **System Commands**: Access all traditional slash commands without typing.
-- **⚡ Traditional Slash Commands**: For classic terminal workflows, all system actions remain fully supported:
-  - `/help` — Show the full command manual.
-  - `/undo` — Revert the last file modification.
-  - `/switch <name>` — Hot-swap the MLX inference engine preset.
-  - `/clear` — Wipe the conversation history.
+- **⚡ Smart Toolbar**: One-click engineering actions—`Fix`, `Explain`, `Refactor`, and `Comment`.
+- **🧠 Hardened Editor Awareness**: Explicit `[EDITOR GROUND TRUTH]` injection for high-fidelity accuracy.
 
 ### 🖥️ Standard CLI
-A lightweight, direct command-line interface for rapid tasks, scriptable interactions, and piping workflows.
+A lightweight, direct command-line interface for rapid tasks and piping workflows. Use the `--cli` flag to activate.
 
 ---
 
 ## ⚙️ Engines & Hardware
-Tempest AI is designed to be hardware-agnostic while still squeezing every drop of performance out of your local machine.
+Tempest AI is designed to be hardware-aware, utilizing the best available local resources:
 
-- **🍏 MLX Engine (Premium)**: Built specifically for Apple Silicon (M1/M2/M3/M4). Utilizes the Metal GPU and Neural Engine for high-speed, unified-memory inference.
-- **🐋 Ollama Engine (Cross-Platform)**: Fully supports **Linux, Windows, and Intel Macs**. Connect to any model in the Ollama library (DeepSeek-R1, Llama 3, Qwen, etc.) for a flexible, local engineering experience.
-- **🧠 Hybrid Awareness**: Tempest automatically detects your hardware and scales its context window and reasoning loops to match your available VRAM.
+- **🍏 MLX Engine (Premium)**: Built specifically for Apple Silicon (M1-M4). Utilizes the Metal GPU and Neural Engine. Activate with the `--mlx` flag.
+- **🐋 Ollama Engine (Default)**: Cross-platform support for Linux, Windows, and Intel Macs. Connects to any Ollama model.
+- **🧠 Hybrid Awareness**: Automatically detects hardware and scales the context window and reasoning loops to match available VRAM.
 
 ---
 
 ## 🚀 Key Abilities
-- **🔌 MCP Protocol Support**: Native integration with the Model Context Protocol. Connect Tempest to any MCP server (Git, SQLite, Jira, Slack) to expand its toolset dynamically.
-- **⚡ Parallel Tool Execution**: High-velocity pipeline that executes independent tool calls (e.g., reading 5 different files) in parallel using `tokio` tasks for massive speed gains.
-- **⏪ Multi-Level Undo**: Automatic file snapshots before every modification. Revert changes across the entire workspace with a single command.
-- **🧠 Persistent Memory & Context Management**: Background summarization is offloaded to a secondary micro-model, preserving the primary reasoning window. Intelligent session restoration injects previous progress into the start of a new run.
-- **🧪 Competency Tracking**: The agent monitors its own success/failure rates. If a tool fails repeatedly, Tempest enters a "Self-Reflective" state, injecting a Competency Warning that forces the model to analyze the failure before trying again.
+- **🔌 MCP Protocol Support**: Native integration with any Model Context Protocol server.
+- **⚡ Parallel Tool Execution**: High-velocity pipeline executes independent tool calls in parallel.
+- **⏪ Multi-Level Undo**: Automatic file snapshots before every modification. Use `/undo` to revert.
+- **🧪 Competency Tracking**: Monitors tool success rates; enters "Self-Reflective" mode upon repeated failures.
 
 ---
 
 ## 🏗️ The "Frontal Lobe" Architecture
-Tempest is hardened with a sophisticated agency management layer that prevents hallucinations and unauthorized executions.
-
-### 🛡️ Programmatic Safety Gates & Checkpoints
-- **Approval-First Execution**: All system-modifying actions are strictly blocked until an explicit **Implementation Plan** is approved.
-- **Automatic Snapshots**: Every file edit is backed up to a checkpoint manager before the first byte is written.
+- **🛡️ Programmatic Safety**: All system-modifying actions are blocked until an explicit **Implementation Plan** is approved.
 - **Visual Diff Previews**: High-fidelity, colorized diffs are generated for all proposed changes during the approval phase.
-
-### 🛰️ State-Injected Turns
-Every reasoning turn begins with a high-priority **Situational Report** injected directly into the context:
-- **Mode Awareness**: Explicitly informs the model if it is in **Planning** (Read-only research) or **Execution** (Active engineering) mode.
-- **Approval Tracking**: Injects the current verification status of the proposed plan.
-
-### 🧪 Competency HUD & Tool Stats
-- **Performance Tracking**: Successful vs. failed tool calls are tallied in a thread-safe registry.
-- **Self-Reflective Warnings**: If a tool fails repeatedly, the system injects a **Competency Warning**, forcing the model to stop and analyze the failure.
+- **⚡ DeepSeek Normalizer**: Automatically repacks reasoning model arguments into strict schema objects to prevent tool-call failures.
 
 ---
 
-## 🛠️ The Tempest Toolbox (60+ Tools)
-Tempest ships with a massive suite of native capabilities, now expandable via MCP.
-
-### 📂 File & AST Suite
-- **Navigation**: `project_atlas`, `tree`, `list_dir`, `search_files`.
-- **AST-Aware**: `ast_outline`, `ast_edit` (Tree-sitter powered for Rust, Python, JavaScript, TypeScript).
-- **IO**: `read_file`, `write_file`, `patch_file`, `find_replace`.
-
-### 💻 System & Network
-- **Admin**: `run_command`, `service_manager`, `process_control`.
-- **Network**: `network_scan`, `port_discovery`.
-
-### 🔌 External Ecosystem (via MCP)
-- **Dynamic Discovery**: Connect to any external MCP server via `config.toml`.
-- **First-Class Tools**: MCP tools are proxied and registered dynamically, appearing to the LLM exactly like native Rust tools.
-
-### ⚡ DeepSeek Normalizer
-- **Argument Repacking**: Automatically detects and repacks root-level flat arguments generated by reasoning models into strict schema objects, ensuring tool calls never fail due to formatting quirks.
-
----
-
-## 🚀 Quick Start
+## 🛠️ Quick Start
 
 ### 1. Build the Backend
 ```bash
@@ -103,27 +60,26 @@ cd tempest_ai
 cargo build --release
 ```
 
-### 2. Run via CLI or TUI
+### 2. Launch the Orchestrator
 ```bash
-# Standard CLI mode
+# Start the v0.3.1 TUI (Default: Ollama Engine)
 ./target/release/tempest_ai
 
-# Professional TUI mode
-./target/release/tempest_ai --tui
-```
+# Start the v0.3.1 TUI (Premium: MLX Apple Silicon Engine)
+./target/release/tempest_ai --mlx
 
-### 3. Launch the VS Code Extension
-1. Open the `vscode-tempest` folder in VS Code.
-2. Run `npm install` and `npm run compile`.
-3. Press **F5** to launch a new "Extension Development Host" window.
-4. Click the 🌪️ icon in the Activity Bar to open Tempest.
+# Start the Standard CLI (Ollama)
+./target/release/tempest_ai --cli
+
+# Start the Standard CLI (MLX)
+./target/release/tempest_ai --mlx --cli
+```
 
 ---
 
 ## ⚖️ License
 Tempest AI is released under the **Tempest AI Source-Available License**.
 - **Free for Personal, Educational, and Internal Business use.**
-- **All commercial rights (selling, SaaS, managed services, etc.) are exclusively reserved by Robert Simens.**
-- See the [LICENSE](LICENSE) file for full details.
+- **All commercial rights are exclusively reserved by Robert Simens.**
 
 **Tempest AI is built for engineers who value privacy, speed, and autonomous reliability.** 🌬️🦾
