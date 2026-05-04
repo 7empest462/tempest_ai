@@ -313,11 +313,12 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
     <style>
         :root {
             --tempest-bg: var(--vscode-sideBar-background);
-            --tempest-fg: var(--vscode-sideBar-foreground);
+            --tempest-fg: var(--vscode-foreground);
             --tempest-accent: #4da6ff;
             --tempest-success: #00cc88;
             --tempest-border: var(--vscode-sideBar-border);
             --tempest-glass: var(--vscode-editor-background);
+            --tempest-text: var(--vscode-editor-foreground);
         }
 
         body {
@@ -347,13 +348,13 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         
         .message { padding: 8px 12px; border-radius: 6px; max-width: 90%; font-size: 13px; line-height: 1.5; word-break: break-word; }
         .message.user { align-self: flex-end; background: var(--tempest-accent); color: white; }
-        .message.tempest { align-self: flex-start; background: var(--tempest-glass); border: 1px solid var(--tempest-border); }
+        .message.tempest { align-self: flex-start; background: var(--tempest-glass); border: 1px solid var(--tempest-border); color: var(--tempest-text); }
         .message pre { background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; overflow-x: auto; }
         .message code { font-family: var(--vscode-editor-font-family); }
 
-        .thought-block { margin: 4px 0; padding: 8px; background: rgba(255,255,255,0.03); border-left: 2px solid var(--tempest-accent); font-size: 11px; color: #888; }
-        .thought-header { font-weight: bold; font-size: 9px; margin-bottom: 4px; }
-        .thought-content { white-space: pre-wrap; }
+        .thought-block { margin: 4px 0; padding: 10px; background: rgba(255,255,255,0.04); border-left: 2px solid var(--tempest-accent); font-size: 12px; color: var(--vscode-descriptionForeground); border-radius: 0 4px 4px 0; }
+        .thought-header { font-weight: bold; font-size: 10px; margin-bottom: 6px; letter-spacing: 0.5px; opacity: 0.8; }
+        .thought-content { white-space: pre-wrap; line-height: 1.4; }
 
         .input-area { padding: 12px; display: flex; gap: 8px; background: var(--tempest-bg); border-top: 1px solid var(--tempest-border); }
         .chat-input { flex: 1; padding: 8px 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; font-size: 13px; }
@@ -485,10 +486,14 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
 
                 const renderMarkdown = (text) => marked.parse(text);
 
-                const scrollToBottom = async () => {
+                const scrollToBottom = async (force = false) => {
                     await nextTick();
                     if (outputRef.value) {
-                        outputRef.value.scrollTop = outputRef.value.scrollHeight;
+                        const { scrollTop, scrollHeight, clientHeight } = outputRef.value;
+                        const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
+                        if (force || isAtBottom) {
+                            outputRef.value.scrollTop = outputRef.value.scrollHeight;
+                        }
                     }
                 };
 
@@ -501,7 +506,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     inputMsg.value = '';
                     isLoading.value = true;
                     currentPhase.value = 'LOADING';
-                    scrollToBottom();
+                    scrollToBottom(true);
 
                     vscode.postMessage({
                         type: 'tempest-request',
@@ -530,7 +535,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     messages.value.push({ id: Date.now(), type: 'user', text: action });
                     isLoading.value = true;
                     currentPhase.value = 'LOADING';
-                    scrollToBottom();
+                    scrollToBottom(true);
                     vscode.postMessage({
                         type: 'tempest-request',
                         id: Date.now(),

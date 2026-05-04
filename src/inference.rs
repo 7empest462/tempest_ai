@@ -1,4 +1,7 @@
-use miette::{Result, IntoDiagnostic, miette};
+use miette::{Result, miette};
+#[cfg(target_os = "macos")]
+use miette::IntoDiagnostic;
+#[cfg(target_os = "macos")]
 use colored::Colorize;
 use ollama_rs::{
     generation::{
@@ -86,6 +89,14 @@ impl Backend {
     }
 
     pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, paged_attn: bool, ctx_limit: usize) -> Result<(Self, String)> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = quant;
+            let _ = event_tx;
+            let _ = paged_attn;
+            let _ = ctx_limit;
+        }
+
         match mode {
             AgentMode::Ollama => {
                 Ok((Backend::Ollama(Ollama::default()), model))
@@ -312,7 +323,7 @@ impl Backend {
                 while let Some(res) = stream.next().await {
                     token_count += 1;
                     let elapsed = start_time.elapsed().as_secs_f64();
-                    if elapsed > 0.5 {
+                    if elapsed > 0.1 {
                         let tps = (token_count as f64 / elapsed) as u64;
                         if let Some(tx) = event_tx.lock().clone() {
                             let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, tps: Some(tps) });
@@ -745,7 +756,7 @@ impl Backend {
                 while let Some(response) = stream.next().await {
                     token_count += 1;
                     let elapsed = start_time.elapsed().as_secs_f64();
-                    if elapsed > 0.5 {
+                    if elapsed > 0.1 {
                         let tps = (token_count as f64 / elapsed) as u64;
                         if let Some(tx) = event_tx.lock().clone() {
                             let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, tps: Some(tps) });

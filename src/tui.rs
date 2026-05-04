@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use std::path::PathBuf;
+use ratatui_textarea::TextArea;
 
 pub enum AgentEvent {
     SystemUpdate(String), // Telemetry
@@ -110,6 +111,8 @@ pub struct App {
     // --- 📄 VIEWER STATE ---
     pub viewer_content: Option<(String, String)>, // (path, content)
     pub viewer_scroll: u16,
+    pub viewer_editor: Option<TextArea<'static>>,
+    pub is_editing: bool,
 }
 
 impl App {
@@ -146,9 +149,9 @@ impl App {
             command_output: Vec::new(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
-            cpu_history: vec![0; 100],
-            gpu_history: vec![0; 100],
-            tps_history: vec![0; 100],
+            cpu_history: Vec::new(),
+            gpu_history: Vec::new(),
+            tps_history: Vec::new(),
             show_command_palette: false,
             command_palette_query: String::new(),
             command_palette_options: vec![
@@ -171,6 +174,8 @@ impl App {
             matcher: SkimMatcherV2::default(),
             viewer_content: None,
             viewer_scroll: 0,
+            viewer_editor: None,
+            is_editing: false,
         }
     }
 
@@ -423,6 +428,22 @@ pub async fn run_tui(
                         _ => {}
                     }
                 } else {
+                    // --- 📝 EDITOR PRIORITY INPUT ---
+                    if app.focused_pane == FocusedPane::Viewer && app.is_editing {
+                        match key.code {
+                            KeyCode::Esc => { /* Fall through to handle exit logic */ }
+                            KeyCode::Char('s') | KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                /* Fall through to handle save logic */
+                            }
+                            _ => {
+                                if let Some(textarea) = &mut app.viewer_editor {
+                                    textarea.input(ev);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Char(c) => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'c' || c == 'C') {
@@ -446,6 +467,17 @@ pub async fn run_tui(
                                 } else if app.focused_pane == FocusedPane::CommandPalette {
                                     app.focused_pane = FocusedPane::Chat;
                                 }
+                            } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') {
+                                // --- 💾 SAVE PROTOCOL ---
+                                if let (Some((path, _)), Some(textarea)) = (&app.viewer_content, &app.viewer_editor) {
+                                    let path = path.clone();
+                                    let new_content = textarea.lines().join("\n");
+                                    if std::fs::write(&path, &new_content).is_ok() {
+                                        app.push_message(format!("💾 [SAVED]: {}", path));
+                                        app.viewer_content = Some((path, new_content));
+                                    }
+                                }
+                                continue;
                             } else if app.focused_pane == FocusedPane::CommandPalette {
                                 app.command_palette_query.push(c);
                             } else if app.focused_pane == FocusedPane::Explorer {
@@ -507,8 +539,16 @@ pub async fn run_tui(
                                                     // Open in VIEWER
                                                     let full_path = app.current_explorer_dir.join(name);
                                                     if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                                        app.viewer_content = Some((full_path.to_string_lossy().into_owned(), content));
+                                                        let path_str = full_path.to_string_lossy().into_owned();
+                                                        app.viewer_content = Some((path_str.clone(), content.clone()));
                                                         app.viewer_scroll = 0;
+                                                        
+                                                        // Initialize editor
+                                                        let mut textarea = TextArea::from(content.lines().map(String::from));
+                                                        textarea.set_block(Block::default().borders(Borders::ALL).title(format!(" 📝 EDITING: {} ", path_str)));
+                                                        app.viewer_editor = Some(textarea);
+                                                        app.is_editing = false;
+                                                        
                                                         app.focused_pane = FocusedPane::Viewer;
                                                     }
                                                 }
@@ -569,7 +609,12 @@ pub async fn run_tui(
                             } else if app.focused_pane == FocusedPane::Viewer {
                                 if c == 'q' || c == 'Q' || c == 'x' || c == 'X' {
                                     app.viewer_content = None;
+                                    app.viewer_editor = None;
+                                    app.is_editing = false;
                                     app.focused_pane = if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat };
+                                } else if c == 'i' || c == 'I' {
+                                    app.is_editing = true;
+                                    app.push_message("📝 [EDITOR]: Entered EDIT mode. Press Esc to exit, Ctrl+S to save.".to_string());
                                 }
                             } else {
                                 app.input_buffer.push(c);
@@ -735,8 +780,14 @@ pub async fn run_tui(
                         }
                         KeyCode::Esc => {
                             if app.focused_pane == FocusedPane::Viewer {
-                                app.viewer_content = None;
-                                app.focused_pane = FocusedPane::Chat;
+                                if app.is_editing {
+                                    app.is_editing = false;
+                                    app.push_message("📝 [EDITOR]: Exited EDIT mode.".to_string());
+                                } else {
+                                    app.viewer_content = None;
+                                    app.viewer_editor = None;
+                                    app.focused_pane = FocusedPane::Chat;
+                                }
                             } else if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                                 app.push_message("⚠️ [INTERRUPTED]: Stopping agent...".to_string());
@@ -747,10 +798,10 @@ pub async fn run_tui(
                             }
                         }
                         _ => {}
+                        }
                     }
                 }
             }
-        }
 
         while let Ok(event) = agent_rx.try_recv() {
             match event {
@@ -1205,7 +1256,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1), // Text metrics
-            Constraint::Length(10), // Sparklines area
+            Constraint::Length(14), // Sparklines area
         ])
         .split(top_chunks[1]);
 
@@ -1233,22 +1284,39 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(pulse_inner);
 
+    let width = pulse_chunks[0].width.saturating_sub(2) as usize; // Subtracting borders
+    
+    let cpu_data = if app.cpu_history.len() > width {
+        &app.cpu_history[app.cpu_history.len() - width..]
+    } else {
+        &app.cpu_history
+    };
     let cpu_spark = Sparkline::default()
         .block(Block::default().title(" CPU ").style(Style::default().fg(Color::Green)))
-        .data(&app.cpu_history)
-        .max(100);
+        .data(cpu_data)
+        .max(10000);
     f.render_widget(cpu_spark, pulse_chunks[0]);
     
+    let gpu_data = if app.gpu_history.len() > width {
+        &app.gpu_history[app.gpu_history.len() - width..]
+    } else {
+        &app.gpu_history
+    };
     let gpu_spark = Sparkline::default()
         .block(Block::default().title(" GPU ").style(Style::default().fg(Color::Blue)))
-        .data(&app.gpu_history)
-        .max(100);
+        .data(gpu_data)
+        .max(10000);
     f.render_widget(gpu_spark, pulse_chunks[1]);
 
+    let tps_data = if app.tps_history.len() > width {
+        &app.tps_history[app.tps_history.len() - width..]
+    } else {
+        &app.tps_history
+    };
     let tps_spark = Sparkline::default()
         .block(Block::default().title(" TPS ").style(Style::default().fg(Color::Magenta)))
-        .data(&app.tps_history)
-        .max(50);
+        .data(tps_data)
+        .max(100);
     f.render_widget(tps_spark, pulse_chunks[2]);
 
     // --- REASONING TRACE PANE (With Syntax Highlighting) ---
@@ -1270,26 +1338,55 @@ fn ui(f: &mut Frame, app: &mut App) {
         pane_idx += 1;
     }
 
-    // --- 📄 CYBER-VIEWER PANE (Syntax Highlighted) ---
+    // --- 📄 CYBER-VIEWER PANE (Syntax Highlighted / Editable) ---
     if let Some((path, content)) = &app.viewer_content {
         let viewer_area = main_chunks[pane_idx];
-        
         let viewer_border_color = if app.focused_pane == FocusedPane::Viewer { Color::Yellow } else { Color::Green };
-        let viewer_title = format!(" 📄 VIEWER: {} {} ", 
-            path, 
-            if app.focused_pane == FocusedPane::Viewer { "[FOCUS]" } else { "" }
-        );
-
-        let highlighted_lines = highlight_text(content, &app.syntax_set, &app.theme_set, &app.current_theme);
-
-        let viewer_para = Paragraph::new(highlighted_lines)
-            .block(Block::default()
-                .title(Span::styled(viewer_title, Style::default().fg(viewer_border_color).add_modifier(Modifier::BOLD)))
+        
+        if app.is_editing {
+            // --- 🩹 SELF-HEALING: Initialize editor if missing ---
+            if app.viewer_editor.is_none() {
+                let textarea = TextArea::from(content.lines().map(String::from));
+                app.viewer_editor = Some(textarea);
+            }
+            
+            let textarea = app.viewer_editor.as_mut().unwrap();
+            let cursor = textarea.cursor();
+            
+            // --- 🎯 HYPER-VISIBILITY CURSOR ---
+            textarea.set_cursor_style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::REVERSED));
+            textarea.set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
+            
+            let viewer_title = format!(" 📝 EDITING: {} [L:{}, C:{}] ", path, cursor.0 + 1, cursor.1 + 1);
+            textarea.set_block(Block::default()
+                .title(Span::styled(viewer_title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(viewer_border_color)))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((app.viewer_scroll, 0));
-        f.render_widget(viewer_para, viewer_area);
+                .border_style(Style::default().fg(Color::Yellow)));
+            f.render_widget(&*textarea, viewer_area);
+            
+            // --- ⌨️ HARDWARE ANCHOR ---
+            // Even if we don't know the exact scroll, placing it at the top-left of the viewer 
+            // confirms focus and provides a starting point.
+            if app.focused_pane == FocusedPane::Viewer {
+                f.set_cursor_position((viewer_area.x + 1, viewer_area.y + 1));
+            }
+        } else {
+            let viewer_title = format!(" 📄 VIEWER: {} {} ", 
+                path, 
+                if app.focused_pane == FocusedPane::Viewer { "[FOCUS] - Press 'i' to Edit" } else { "" }
+            );
+
+            let highlighted_lines = highlight_text(content, &app.syntax_set, &app.theme_set, &app.current_theme);
+
+            let viewer_para = Paragraph::new(highlighted_lines)
+                .block(Block::default()
+                    .title(Span::styled(viewer_title, Style::default().fg(viewer_border_color).add_modifier(Modifier::BOLD)))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(viewer_border_color)))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((app.viewer_scroll, 0));
+            f.render_widget(viewer_para, viewer_area);
+        }
     }
 
     let mut input_title = " 🗨️ INPUT ".to_string();
@@ -1311,10 +1408,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title(input_title));
     f.render_widget(input, chunks[2]);
 
-    f.set_cursor_position((
-        chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
-        chunks[2].y + 1,
-    ));
+    // --- ⌨️ DYNAMIC CURSOR ANCHORING ---
+    if app.focused_pane == FocusedPane::Chat || app.focused_pane == FocusedPane::Explorer {
+        f.set_cursor_position((
+            chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
+            chunks[2].y + 1,
+        ));
+    }
 
     // --- ⌨️ FUZZY COMMAND PALETTE OVERLAY ---
     if app.show_command_palette {

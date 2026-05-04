@@ -335,10 +335,62 @@ impl<'a> AgentStream<'a> {
                     results: tool_results.clone() 
                 };
                 
-                let feedback_batch: Vec<_> = tool_results.into_iter()
+                let feedback_batch: Vec<_> = tool_results.clone().into_iter()
                     .map(|r| (r.tool_name, r.result, r.is_success))
                     .collect();
                 self.agent.process_tool_feedback_stage(feedback_batch).await?;
+
+                // --- 🛡️ VERIFICATION SENTINEL ---
+                // If any modifications were made, we automatically trigger a verification check
+                let mut was_modifying = false;
+                for res in &tool_results {
+                    if res.is_success {
+                        if let Some(tool) = self.agent.tools.get(&res.tool_name).map(|r| r.value().clone()) {
+                            if tool.is_modifying() {
+                                was_modifying = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if was_modifying {
+                    // Check if we are in a Rust project
+                    if std::path::Path::new("Cargo.toml").exists() {
+                        let tx_opt = self.agent.event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some("🔬 [SENTINEL]: Verifying changes via cargo check...".to_string())));
+                        }
+
+                        // Run cargo check
+                        let output = tokio::process::Command::new("cargo")
+                            .arg("check")
+                            .arg("--color")
+                            .arg("never")
+                            .output()
+                            .await;
+
+                        match output {
+                            Ok(out) => {
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                if !out.status.success() {
+                                    // INJECT ERROR DIRECTLY INTO HISTORY
+                                    let reprimand = format!("🛑 [VERIFICATION FAILED]: Your recent changes broke the build. You MUST fix these errors before proceeding:\n\n```\n{}\n```", stderr);
+                                    self.agent.history.lock().push(ChatMessage::new(MessageRole::System, reprimand));
+                                    
+                                    if let Some(tx) = self.agent.event_tx.lock().clone() {
+                                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("⚠️ [SENTINEL]: Build broken. Force-correcting...".to_string()));
+                                    }
+                                } else {
+                                    if let Some(tx) = self.agent.event_tx.lock().clone() {
+                                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("✅ [SENTINEL]: Build verified.".to_string()));
+                                    }
+                                }
+                            },
+                            Err(_) => {}
+                        }
+                    }
+                }
                 
                 self.iteration += 1;
                 self.state = AgentStreamState::Thinking { accumulated: String::new() };
@@ -823,7 +875,12 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         // --- BACKEND-AWARE MODEL ROUTING ---
         // If we are in MLX mode, we only have one model pipeline loaded. 
         // Overwriting the model string here would break the MLX backend.
-        if !matches!(&*self.backend.read().await, crate::inference::Backend::MLX { .. }) {
+        #[cfg(target_os = "macos")]
+        let is_not_mlx = !matches!(&*self.backend.read().await, crate::inference::Backend::MLX { .. });
+        #[cfg(not(target_os = "macos"))]
+        let is_not_mlx = true;
+
+        if is_not_mlx {
             *self.model.lock() = new_phase.default_model();
         }
 

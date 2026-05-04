@@ -107,6 +107,7 @@ wgpu = { version = "29.0.1", default-features = false, features = [
   "vulkan",
   "wgsl",
 ] }
+ratatui-textarea = "0.9.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.25.3", features = ["metal", "accelerate"] }

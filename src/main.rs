@@ -675,8 +675,15 @@ async fn main() -> Result<()> {
             let secs = uptime % 60;
             let proc_count = sys.processes().len();
             
+            #[cfg(target_os = "macos")]
             let gpu_freq_str = if let Some(f) = mac_gpu.gpu_freq_mhz { format!(" @ {:.0} MHz", f) } else { "".to_string() };
+            #[cfg(not(target_os = "macos"))]
+            let gpu_freq_str = "".to_string();
+
+            #[cfg(target_os = "macos")]
             let ane_power_str = if let Some(p) = mac_gpu.ane_power_mw { format!("\n\n🧠 ANE POWER      : {:.0} mW (Neural Engine)", p) } else { "".to_string() };
+            #[cfg(not(target_os = "macos"))]
+            let ane_power_str = "".to_string();
 
             let mut update_str = format!(
 "🔥 CPU LOAD       : {:.1}% ({} Cores)
@@ -711,10 +718,10 @@ async fn main() -> Result<()> {
             let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
             
             // --- 📊 SPARKLINE DATA EXTRACTION ---
-            // Send parsed values for Sparklines
+            // Send parsed values for Sparklines (Scaled x100 for ultra-high-resolution u64 representation)
             let _ = agent_tx_metrics.send(crate::tui::AgentEvent::TelemetryMetrics { 
-                cpu: Some(avg_cpu as u64), 
-                gpu: Some(gpu_load as u64),
+                cpu: Some((avg_cpu * 100.0) as u64), 
+                gpu: Some(gpu_load as u64 * 100),
                 tps: None 
             }).await;
 
@@ -722,7 +729,7 @@ async fn main() -> Result<()> {
                 let mut lock = shared_telemetry.lock();
                 *lock = update_str;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     });
 
