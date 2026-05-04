@@ -22,11 +22,9 @@ An industrial, high-fidelity terminal dashboard for full-screen autonomous workf
 - **📂 Interactive File Explorer (Ctrl+E)**: A dedicated sidebar for real-time workspace navigation. Select files to instantly inject them into the context window for targeted engineering.
 - **🧠 Advanced Context HUD**: Detailed usage ratios (e.g., `12k / 32k`) with a synchronized progress bar and **Sentinel Fleet** status.
 - **Synchronized Reasoning**: Dynamic ASCII spinners and real-time `<think>` block parsing show exactly what the model is doing.
-- **Slash Commands**:
-  - `/help` — Show the full command manual.
-  - `/undo` — Revert the last file modification.
-  - `/switch <name>` — Hot-swap the MLX inference engine preset.
-  - `/clear` — Wipe the conversation history.
+- **⚡ Dual-Access Commands**: Choose your preferred high-speed interface:
+  - **Fuzzy Command Palette (`Ctrl+P`)**: The primary "Mission Control" hub. Search and execute any command, theme swap, or model preset with instant fuzzy-matching.
+  - **Traditional Slash Commands**: For classic terminal workflows, all system actions (like `/undo`, `/switch`, and `/clear`) remain fully supported.
 
 ### 🖥️ Standard CLI
 A lightweight, direct command-line interface for rapid tasks, scriptable interactions, and piping workflows.
