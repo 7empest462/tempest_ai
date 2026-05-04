@@ -5,17 +5,11 @@ use super::{AgentTool, ToolContext};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
-use tree_sitter::{Parser, Node};
+use arborium::tree_sitter::{Parser, Node, Language};
 
 /// Detect the tree-sitter language from a file extension.
-fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
-    match ext {
-        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "py" => Some(tree_sitter_python::LANGUAGE.into()),
-        "js" | "jsx" | "mjs" | "cjs" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "ts" | "tsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        _ => None,
-    }
+fn language_for_extension(ext: &str) -> Option<Language> {
+    arborium::get_language(ext)
 }
 
 /// Recursively walk the AST and collect structural nodes (functions, structs, classes, etc.)
@@ -105,7 +99,7 @@ impl AgentTool for AstOutlineTool {
             .unwrap_or("");
 
         let language = language_for_extension(ext)
-            .ok_or_else(|| miette!("Unsupported file type: '.{}'. Supported: .rs, .py, .js, .jsx, .ts, .tsx", ext))?;
+            .ok_or_else(|| miette!("Unsupported file type: '.{}'. Supported: any language enabled in arborium config.", ext))?;
 
         let source = tokio::task::spawn_blocking({
             let p = path_owned.clone();
@@ -188,7 +182,7 @@ impl AgentTool for AstEditTool {
             .unwrap_or("");
 
         let language = language_for_extension(ext)
-            .ok_or_else(|| miette!("Unsupported file type: '.{}'. Supported: .rs, .py, .js, .jsx, .ts, .tsx", ext))?;
+            .ok_or_else(|| miette!("Unsupported file type: '.{}'. Supported: any language enabled in arborium config.", ext))?;
 
         let source = std::fs::read_to_string(&path_owned)
             .map_err(|e| miette!("Failed to read file: {}", e))?;

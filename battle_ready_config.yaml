@@ -1,0 +1,18 @@
+model: "/Volumes/Corsair_Lab/Home/Projects/tempest_ai/mlx_models/Qwen3-8B-Tempest-Centurion-v6"
+data: "/Volumes/Corsair_Lab/Home/Projects/tempest_ai/tempest_train_v9"
+fine_tune_type: "lora"
+num_layers: 16
+iters: 500
+batch_size: 1
+steps_per_report: 10
+steps_per_eval: 50
+val_batches: 10
+learning_rate: 1e-4
+lora_parameters:
+  rank: 32
+  scale: 2.0
+  dropout: 0.05
+  keys: ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+adapter_path: "/Volumes/Corsair_Lab/Home/Projects/tempest_ai/mlx_models/Tempest-Battle-Ready"
+save_every: 100
+train: true

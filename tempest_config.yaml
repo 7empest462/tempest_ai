@@ -1,0 +1,18 @@
+model: "/Volumes/Corsair_Lab/Home/mlx_models/DeepSeek-R1-Distill-Qwen3-8B"
+data: "/Volumes/Corsair_Lab/Home/Projects/tempest_ai/tempest_train_v8"
+fine_tune_type: "lora"
+num_layers: 16
+iters: 1000
+batch_size: 1
+steps_per_report: 10
+steps_per_eval: 100
+val_batches: 10
+learning_rate: 2e-4
+lora_parameters:
+  rank: 32
+  scale: 2.0
+  dropout: 0.05
+  keys: ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+adapter_path: "/Volumes/Corsair_Lab/Home/Projects/tempest_ai/tempest_adapters_v8"
+save_every: 100
+train: true

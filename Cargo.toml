@@ -1,6 +1,6 @@
 [package]
 name = "tempest_ai"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 
@@ -56,6 +56,11 @@ miette = { version = "7.5", features = ["fancy"] }
 color-eyre = "0.6"
 parking_lot = "0.12"
 dashmap = "6.1"
+dyn-clone = "1.0"
+rig-core = "0.36.0"
+tool-parser = "1.2.0"
+llm-extract = "0.1.0"
+llm-extract-derive = "0.1.0"
 tracing-opentelemetry = "0.28"
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
@@ -64,11 +69,43 @@ metrics-exporter-prometheus = "0.16"
 evalexpr = "11.0"
 unicode-width = "0.2"
 tiktoken = "3.1.2"
-tree-sitter = "0.24"
-tree-sitter-rust = "0.24"
-tree-sitter-python = "0.25"
-tree-sitter-javascript = "0.25"
-tree-sitter-typescript = "0.23"
+fuzzy-matcher = "0.3.7"
+streaming-iterator = "0.1"
+arborium = { version = "2.16.0", default-features = false, features = [
+  "lang-rust", "lang-go", "lang-yaml", "lang-python", "lang-javascript", "lang-typescript",
+  "lang-tsx", "lang-java", "lang-cpp", "lang-bash", "lang-c-sharp", "lang-html", "lang-css",
+  "lang-c", "lang-json", "lang-hcl", "lang-lua", "lang-ruby", "lang-php", "lang-toml",
+  "lang-swift", "lang-kotlin", "lang-scala", "lang-powershell", "lang-elixir", "lang-sql",
+  "lang-starlark", "lang-objc", "lang-xml", "lang-vue", "lang-dockerfile"
+] }
+ai = { version = "0.2.16", features = ["ollama_client", "openai_client"] }
+web-sys = { version = "0.3.69", features = [
+  "Blob",
+  "Clipboard",
+  "ClipboardEvent",
+  "ClipboardItem",
+  "CompositionEvent",
+  "Document",
+  "DataTransfer",
+  "Event",
+  "HtmlCanvasElement",
+  "HtmlInputElement",
+  "InputEvent",
+  "Navigator",
+  "MediaQueryList",
+  "Window",
+  "Notification",
+  "NotificationPermission",
+] }
+wgpu = { version = "29.0.1", default-features = false, features = [
+  "dx12",
+  "gles",
+  "metal",
+  "parking_lot",
+  "std",
+  "vulkan",
+  "wgsl",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.25.3", features = ["metal", "accelerate"] }

@@ -79,9 +79,9 @@ impl SentinelManager {
             }
         }
 
-        // 1. Context Runway Check
-        if context_manager::needs_compaction(messages, ctx_limit) {
-            action.message.push_str("⚠️ [SENTINEL - CONTEXT RUNWAY]: History is >85% full. Automatic compaction recommended.\n");
+        // 1. Context Runway Check - Tightened to 75% for MLX safety
+        if context_manager::needs_compaction(messages, (ctx_limit as f64 * 0.75) as u64) {
+            action.message.push_str("⚠️ [SENTINEL - CONTEXT RUNWAY]: History is >75% full. Automatic compaction recommended.\n");
             action.needs_compaction = true;
             
         }
@@ -98,13 +98,15 @@ impl SentinelManager {
             }
 
             // Hallucination Guard: Detect "Tool not found" loops or faked results
-            if content.contains("tool not found in registry") || content.contains("hallucinated a capability") {
-                action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Tool hallucination detected. Model is inventing tools.\n");
-                
-            }
-            if content.contains("tool result") || content.contains("tool error") || content.contains("output shown below") {
-                action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Faked tool output detected. Assistant is pretending to be the system.\n");
-                
+            // CRITICAL: Only check if the ASSISTANT is outputting these markers. 
+            // Do not flag legitimate System/Tool results.
+            if last_msg.role == ollama_rs::generation::chat::MessageRole::Assistant {
+                if content.contains("tool not found in registry") || content.contains("hallucinated a capability") {
+                    action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Tool hallucination detected. Model is inventing tools.\n");
+                }
+                if content.contains("=== tool result ===") || content.contains("=== tool error ===") {
+                    action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Faked tool output detected. Assistant is pretending to be the system.\n");
+                }
             }
 
             // Compiler Guard: Count errors in the last output
@@ -148,10 +150,14 @@ impl SentinelManager {
             }
 
             // Code Guard: Detect if the model is dumping raw code without planning
-            if (last_msg.content.contains("```") || last_msg.content.contains("pub fn") || last_msg.content.contains("import ")) 
-                && !last_msg.content.contains("THOUGHT:") && !last_msg.content.to_lowercase().contains("<think>") {
-                action.message.push_str("⚠️ [SENTINEL - CODE GUARD]: Raw code dump detected without thinking phase.\n");
-                
+            if last_msg.role == ollama_rs::generation::chat::MessageRole::Assistant {
+                let has_code = last_msg.content.contains("```") || last_msg.content.contains("pub fn") || last_msg.content.contains("import ");
+                let has_explicit_thought = last_msg.content.contains("THOUGHT:") || last_msg.content.to_lowercase().contains("<think>");
+                let has_metadata_thought = last_msg.thinking.as_ref().map_or(false, |t| !t.is_empty());
+
+                if has_code && !has_explicit_thought && !has_metadata_thought {
+                    action.message.push_str("⚠️ [SENTINEL - CODE GUARD]: Raw code dump detected without thinking phase.\n");
+                }
             }
         }
 

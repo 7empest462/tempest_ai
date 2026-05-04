@@ -188,7 +188,11 @@ impl AgentTool for SystemTelemetryTool {
             // Refine error check: ignore common Launchd non-zero codes (1, 78) that aren't necessarily failures
             let errors = services.iter().filter(|s| {
                 if cfg!(target_os = "macos") {
-                    s.status != 0 && s.status != 1 && s.status != 78
+                    // Ignore common Launchd non-zero codes:
+                    // 1, 78: Demand-loaded / disabled
+                    // -9 (SIGKILL): Graceful background termination
+                    // -15 (SIGTERM): Standard termination
+                    s.status != 0 && s.status != 1 && s.status != 78 && s.status != -9 && s.status != -15
                 } else {
                     s.status != 0
                 }

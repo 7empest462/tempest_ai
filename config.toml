@@ -7,31 +7,52 @@
 # The agent will automatically cycle through these models based on the phase.
 planner_model = "deepseek-r1:8b"
 executor_model = "qwen2.5-coder:7b"
-verifier_model = "deepseek-r1:7b"
+verifier_model = "deepseek-r1:8b"
 
 # ==========================================
 # ⚡ MLX MODEL OPTIONS (Manual Switching)
 # ==========================================
 # The model currently loaded in memory for the MLX backend.
 # Use /switch <name> in the TUI to hot-swap between presets.
-mlx_model = "bartowski/deepseek-ai_DeepSeek-R1-0528-Qwen3-8B-GGUF"
-mlx_quant = "Q6_K"
+mlx_model = "battle_ready"
+mlx_quant = "None"
 
-# Available MLX presets
-[mlx_presets.ministral]
-repo = "bartowski/Ministral-8B-Instruct-2410-GGUF"
+# Available MLX presets (May 2026 8GB GGUF Fleet - Non-Gated)
+[mlx_presets.battle_ready]
+path = "/Volumes/Corsair_Lab/Home/mlx_models/DeepSeek-R1-Distill-Qwen3-8B"
+description = "Battle-Ready DeepSeek-R1 - Distilled Qwen-8B reasoning engine"
+
+[mlx_presets.tempest_centurion]
+path = "/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused"
+description = "Centurion-v8 Master Burn-In Edition - DeepSeek-R1-Distill-Qwen-8B + Universal AST"
+
+[mlx_presets.centurion_v6]
+path = "/Volumes/Corsair_Lab/Home/mlx_models/Qwen3-8B-Tempest-Centurion-v6"
+description = "Centurion-v6 Balanced Edition - Rank 16 LoRA Legacy"
+
+[mlx_presets.ministral_3]
+repo = "bartowski/Ministral-3-14B-Instruct-GGUF"
+quant = "Q3_K_M"
+
+[mlx_presets.r1_future]
+repo = "tvall43/Qwen3.5-14B-A3B-Claude-4.6-Opus-Reasoning-Distilled-reap-gguf"
+quant = "Qwen3.5-14B-A3B-Claude-Opus-Reasoning-Distilled-4.6-MXFP4_MOE.gguf"
+
+[mlx_presets.qwen3_big]
+repo = "bartowski/Qwen3-14B-Instruct-GGUF"
+quant = "Q3_K_M"
+
+[mlx_presets.qwen3_sharp]
+repo = "bartowski/Qwen3-7B-Instruct-GGUF"
 quant = "Q8_0"
-[mlx_presets.r1]
-repo = "bartowski/deepseek-ai_DeepSeek-R1-0528-Qwen3-8B-GGUF"
-quant = "Q6_K"
 
-[mlx_presets.qwen_big]
-repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
+[mlx_presets.llama4_scout]
+repo = "bartowski/Llama-4-Scout-8B-GGUF"
 quant = "Q8_0"
 
-[mlx_presets.qwen_small]
-repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
-quant = "Q4_K_M"
+[mlx_presets.r1_vintage]
+repo = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
+quant = "Q8_0"
 
 # ==========================================
 # ⚙️ SAMPLING PARAMETERS
@@ -43,19 +64,19 @@ top_p_planning = 0.95
 top_p_execution = 0.92
 repeat_penalty_planning = 1.18
 repeat_penalty_execution = 1.12
-ctx_planning = 16384
-ctx_execution = 16384
+ctx_planning = 32768
+ctx_execution = 65536
 
 # ==========================================
 # ⚡ MLX SAMPLING PARAMETERS
 # ==========================================
 # MLX models (especially 7B distilled) require higher temperatures to trigger reasoning.
-mlx_temp_planning = 0.6
-mlx_temp_execution = 0.2
-mlx_top_p_planning = 0.95
-mlx_top_p_execution = 0.9
-mlx_repeat_penalty_planning = 1.05
-mlx_repeat_penalty_execution = 1.1
+mlx_temp_planning = 0.4
+mlx_temp_execution = 0.15
+mlx_top_p_planning = 0.9
+mlx_top_p_execution = 0.85
+mlx_repeat_penalty_planning = 1.02
+mlx_repeat_penalty_execution = 1.02
 
 # ==========================================
 # 🧹 BASE SETTINGS

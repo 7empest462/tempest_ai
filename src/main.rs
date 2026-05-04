@@ -1,3 +1,4 @@
+#![recursion_limit = "1024"]
 mod agent;
 mod crypto;
 mod error;
@@ -19,6 +20,7 @@ mod checkpoint;
 mod mcp;
 mod mcp_server;
 mod mcp_protocol;
+mod ai_bridge;
 
 use agent::Agent;
 use clap::Parser;
@@ -81,6 +83,10 @@ struct Cli {
     #[arg(long)]
     paged_attn: bool,
 
+    /// Use the AI Bridge (Universal Model Access) to connect to any provider
+    #[arg(long)]
+    bridge: bool,
+
     /// Start as a headless MCP Server (JSON-RPC over stdio) for IDE integration
     #[arg(long)]
     mcp_server: bool,
@@ -88,8 +94,10 @@ struct Cli {
 
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct MlxPreset {
-    pub repo: String,
-    pub quant: String,
+    pub repo: Option<String>,
+    pub path: Option<String>,
+    pub quant: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -137,16 +145,22 @@ impl Default for AppConfig {
     fn default() -> Self {
         let mut mlx_presets = std::collections::HashMap::new();
         mlx_presets.insert("r1".to_string(), MlxPreset {
-            repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string(),
-            quant: "Q8_0".to_string(),
+            repo: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
+            quant: Some("Q8_0".to_string()),
+            path: None,
+            description: Some("DeepSeek R1 Distill Qwen 7B (GGUF)".to_string()),
         });
         mlx_presets.insert("qwen_big".to_string(), MlxPreset {
-            repo: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string(),
-            quant: "Q8_0".to_string(),
+            repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
+            quant: Some("Q8_0".to_string()),
+            path: None,
+            description: Some("Qwen 2.5 Coder 7B Instruct (GGUF)".to_string()),
         });
         mlx_presets.insert("qwen_small".to_string(), MlxPreset {
-            repo: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string(),
-            quant: "Q4_K_M".to_string(),
+            repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
+            quant: Some("Q4_K_M".to_string()),
+            path: None,
+            description: Some("Qwen 2.5 Coder 7B Instruct (Q4 GGUF)".to_string()),
         });
 
         AppConfig {
@@ -155,12 +169,12 @@ impl Default for AppConfig {
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
             sub_agent_model: Some("llama3.2:1b".to_string()),
-            mlx_model: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
-            mlx_quant: Some("Q8_0".to_string()),
+            mlx_model: Some("/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string()),
+            mlx_quant: Some("None".to_string()),
             paged_attn: None,
-            planner_model: Some("deepseek-r1:14b".to_string()),
+            planner_model: Some("deepseek-r1:8b".to_string()),
             executor_model: Some("qwen2.5-coder:7b".to_string()),
-            verifier_model: Some("deepseek-r1:7b".to_string()),
+            verifier_model: Some("deepseek-r1:8b".to_string()),
             mlx_presets: Some(mlx_presets),
             temp_planning: Some(0.6),
             temp_execution: Some(0.25),
@@ -188,6 +202,9 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     if let Some(p) = cli_config_path {
         paths_to_try.push(std::path::PathBuf::from(p));
     }
+    
+    // Check local directory first for developer-centric overrides
+    paths_to_try.push(std::path::PathBuf::from("config.toml"));
     
     if let Ok(sudo_user) = std::env::var("SUDO_USER") {
         if !sudo_user.is_empty() && sudo_user != "root" {
@@ -292,7 +309,12 @@ async fn main() -> Result<()> {
         "windows" => "Windows",
         _ => std::env::consts::OS,
     };
-    let system_prompt = crate::prompts::SYSTEM_PROMPT.replace("{OS}", os_name);
+    let system_prompt = format!(
+        "{}\n\nOPERATING SYSTEM: {}\n\n{}",
+        crate::prompts::SYSTEM_PROMPT_BASE,
+        os_name,
+        crate::prompts::SYSTEM_PROMPT_TAIL
+    );
 
     // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
     let model = if cli.mlx {
@@ -391,11 +413,15 @@ async fn main() -> Result<()> {
 
     let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "llama3.2:1b".to_string());
     
-    let mode = cfg_select! {
-        target_os = "macos" => {
+    let mode = if cli.bridge {
+        crate::inference::AgentMode::Bridge
+    } else {
+        #[cfg(target_os = "macos")]
+        {
             if cli.mlx { crate::inference::AgentMode::MLX } else { crate::inference::AgentMode::Ollama }
         }
-        _ => {
+        #[cfg(not(target_os = "macos"))]
+        {
             crate::inference::AgentMode::Ollama
         }
     };
@@ -407,7 +433,25 @@ async fn main() -> Result<()> {
     let quant = cli.quant.or(config.mlx_quant).unwrap_or_else(|| "Q4_K_M".to_string());
 
     if !cli.cli {
-        println!("{} Initializing Tempest AI Agent (Backend: {:?}, Model: {})...", "🚀".blue(), mode, model);
+        println!("{}", "=".repeat(60).blue());
+        println!("{} {}", "🌪️".cyan(), "TEMPEST AI • ENGINE ONLINE".bold());
+        let backend_name = if cli.bridge { 
+            "AI Bridge (Unified)".to_string() 
+        } else if cli.mlx { 
+            format!("MLX (Native Apple Silicon) • {}", quant) 
+        } else { 
+            "Ollama (Cross-Platform)".to_string() 
+        };
+        println!("{} {}", "⚡ Backend:".blue(), backend_name);
+        
+        if cli.mlx {
+            println!("{} {}", "🤖 Unified:".blue(), model);
+        } else {
+            println!("{} {}", "🧠 Planner:".blue(), config.planner_model.as_deref().unwrap_or(&model));
+            println!("{} {}", "💻 Executor:".blue(), config.executor_model.as_deref().unwrap_or(&model));
+            println!("{} {}", "🔬 Verifier:".blue(), config.verifier_model.as_deref().unwrap_or(&model));
+        }
+        println!("{}", "=".repeat(60).blue());
     }
     
     // Pre-initialize event channel for MCP mode to capture startup logs
@@ -437,8 +481,8 @@ async fn main() -> Result<()> {
         config.top_p_execution.unwrap_or(0.92),
         config.repeat_penalty_planning.unwrap_or(1.18),
         config.repeat_penalty_execution.unwrap_or(1.12),
-        config.ctx_planning.unwrap_or(16384),
-        config.ctx_execution.unwrap_or(32768),
+        config.ctx_planning.unwrap_or(32768),
+        config.ctx_execution.unwrap_or(65536),
         config.mlx_temp_planning,
         config.mlx_temp_execution,
         config.mlx_top_p_planning,
@@ -464,13 +508,11 @@ async fn main() -> Result<()> {
     let _ = agent.initialize_mcp(config.mcp_servers.unwrap_or_default()).await;
     let _ = agent.resume_session().await;
     if !cli.cli {
-        println!("{} Indexing local workspace and skills...", "🧠".cyan());
         let agent_init = agent.clone();
         tokio::spawn(async move {
             let _ = agent_init.initialize_atlas(false).await;
             let _ = agent_init.warmup().await;
         });
-        println!("{} Startup sequence complete. Warming up engine...", "✅".green());
     }
     if !cli.cli && !cli.mcp_server {
         println!("{} Launching TUI...", "🚀".green());
@@ -529,30 +571,38 @@ async fn main() -> Result<()> {
 
             // In MLX/Native mode, we need to capture the Metal/AGX memory.
             // sysinfo process.memory() often misses private Metal heaps on macOS.
-            let ai_ram_mb = if mode == crate::inference::AgentMode::MLX {
-                let mut vram_mb = 0;
-                #[cfg(target_os = "macos")]
-                {
-                    // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
-                    // We'll peek at the PerformanceStatistics from AGX specifically.
-                    if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
-                        let s = String::from_utf8_lossy(&output.stdout);
-                        // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
-                        let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
-                        for caps in vram_re.captures_iter(&s) {
-                            if let Some(m) = caps.get(1) {
-                                vram_mb += m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024;
+            let ai_ram_mb = match mode {
+                crate::inference::AgentMode::MLX => {
+                    let mut vram_mb = 0;
+                    #[cfg(target_os = "macos")]
+                    {
+                        // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
+                        // We'll peek at the PerformanceStatistics from AGX specifically.
+                        if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
+                            let s = String::from_utf8_lossy(&output.stdout);
+                            // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
+                            let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
+                            for caps in vram_re.captures_iter(&s) {
+                                if let Some(m) = caps.get(1) {
+                                    vram_mb += m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024;
+                                }
                             }
                         }
                     }
+                    (tempest_mem_bytes / 1024 / 1024) + vram_mb
                 }
-                (tempest_mem_bytes / 1024 / 1024) + vram_mb
-            } else {
-                (ollama_mem_bytes + tempest_mem_bytes) / 1024 / 1024
+                crate::inference::AgentMode::Ollama => {
+                    (ollama_mem_bytes + tempest_mem_bytes) / 1024 / 1024
+                }
+                crate::inference::AgentMode::Bridge => {
+                    tempest_mem_bytes / 1024 / 1024 // External or local but not managed here
+                }
             };
+
             let engine_label = match mode {
                 crate::inference::AgentMode::MLX => "(Native Engine)",
                 crate::inference::AgentMode::Ollama => "(Ollama)",
+                crate::inference::AgentMode::Bridge => "(Bridge)",
             };
 
             let gpu_load = {

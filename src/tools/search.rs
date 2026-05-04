@@ -98,11 +98,35 @@ impl AgentTool for GrepSearchTool {
         let query = typed_args.query;
         let path = typed_args.path.unwrap_or_else(|| ".".to_string());
         
-        let cmd = format!("rg --version >/dev/null 2>&1 && rg -n --no-heading --max-columns=200 \"{}\" {} || grep -rn \"{}\" {}", 
-            query, path, query, path);
-            
+        let cmd = format!("rg -n --no-heading --max-columns=200 \"{}\" {}", query, path);
         let exec_args = json!({ "command": cmd });
-        RunCommandTool.execute(&exec_args, context).await
+        
+        let raw_results = RunCommandTool.execute(&exec_args, context).await?;
+        
+        use fuzzy_matcher::FuzzyMatcher;
+        use fuzzy_matcher::skim::SkimMatcherV2;
+        
+        let matcher = SkimMatcherV2::default();
+        let mut ranked = Vec::new();
+        
+        for line in raw_results.lines() {
+            if let Some(score) = matcher.fuzzy_match(line, &query) {
+                ranked.push((score, line));
+            } else {
+                // If no fuzzy match, keep it with a base score of 0
+                ranked.push((0, line));
+            }
+        }
+        
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        
+        let report = ranked.into_iter()
+            .take(100)
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+            
+        Ok(report)
     }
 }
 

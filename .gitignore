@@ -1,16 +1,35 @@
+# Models & Large Assets (Too big for GitHub)
+mlx_models/
+*.gguf
+*.bin
+*.safetensors
+*.onnx
+*.pkl
+adapters/
+adapters_v2/
+tempest_adapters_v*/
+tempest_train_v*/
+
+# Datasets & Logs
+tempest_dataset*
+tempest_train_*.jsonl
+hardcore_access.jsonl
+brain_vectors.json
+training.log
+*.log
+
+# Build & OS
 /target
 .DS_Store
-*.log
-brain_vectors.json
-history.json
 master.key
 temp_agent_chunk*.rs
-
-# Local Development & Scratch
-scratch/
-test_tools.rs
+history.json
 fleet.db*
 .env
 node_modules/
 out/
 *.vsix
+
+# Local Development & Scratch
+scratch/
+test_tools.rs

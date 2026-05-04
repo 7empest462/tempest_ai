@@ -11,32 +11,38 @@ use ollama_rs::{
 };
 use futures::StreamExt;
 use std::sync::Arc;
-use regex::Regex;
+use llm_extract::Extract;
 
 #[cfg(target_os = "macos")]
 use mistralrs::{
-    GgufModelBuilder, Model, TextMessageRole, 
+    GgufModelBuilder, TextModelBuilder, Model, TextMessageRole, 
     Response as MistralResponse, RequestBuilder, SamplingParams,
     Tool, ToolChoice, Function, ToolType,
     PagedAttentionMetaBuilder, MemoryGpuConfig,
     EmbeddingModelBuilder, EmbeddingRequest
 };
 use crate::tui::AgentEvent;
+use rig::completion::CompletionModel;
+use rig::embeddings::EmbeddingModel;
+use tool_parser::ToolParser;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AgentMode {
     Ollama,
     MLX,
+    Bridge,
 }
 
+#[derive(Clone)]
 pub enum Backend {
     Ollama(Ollama),
     #[cfg(target_os = "macos")]
     MLX {
-        model: Model,
+        model: std::sync::Arc<Model>,
         _ctx_limit: usize,
-        embedder: Option<Model>,
+        embedder: Option<std::sync::Arc<Model>>,
     },
+    Bridge(crate::ai_bridge::TempestAiBridge),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,12 +59,29 @@ pub struct InferenceOutput {
     pub native_tool_calls: Vec<ollama_rs::generation::tools::ToolCall>,
 }
 
+#[derive(serde::Deserialize, Extract, Debug)]
+pub struct ToolCallPayload {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 impl Backend {
     pub fn mode(&self) -> AgentMode {
         match self {
             Backend::Ollama(_) => AgentMode::Ollama,
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => AgentMode::MLX,
+            Backend::Bridge(_) => AgentMode::Bridge,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn supports_tools(&self) -> bool {
+        match self {
+            Backend::Ollama(_) => true,
+            #[cfg(target_os = "macos")]
+            Backend::MLX { .. } => true,
+            Backend::Bridge(_) => false,
         }
     }
 
@@ -102,31 +125,42 @@ impl Backend {
                         ("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string(), "Qwen2.5-Coder-7B-Instruct".to_string())
                     };
 
-                    let gguf_file = format!("{}-{}.gguf", filename_prefix, quant);
-                    
-                    let mut builder = GgufModelBuilder::new(
-                        &repo, 
-                        vec![gguf_file.clone()]
-                    )
-                    .with_logging()
-                    .with_max_num_seqs(1);
+                    let is_gguf = repo.to_lowercase().contains("gguf") || 
+                                 std::path::Path::new(&repo).extension().map_or(false, |ext| ext == "gguf") ||
+                                 std::path::Path::new(&repo).is_dir() && std::fs::read_dir(&repo).map_or(false, |mut dir| dir.any(|entry| entry.map_or(false, |e| e.file_name().to_string_lossy().ends_with(".gguf"))));
 
-                    if paged_attn {
-                        println!("{} MLX: Initializing Paged Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
-                        let paged_attn_cfg = PagedAttentionMetaBuilder::default()
-                            .with_block_size(16)
-                            .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
-                            .build()
-                            .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
-                        builder = builder.with_paged_attn(paged_attn_cfg);
+                    let mlx_model = if is_gguf {
+                        let gguf_file = format!("{}-{}.gguf", filename_prefix, quant);
+                        let mut builder = GgufModelBuilder::new(&repo, vec![gguf_file.clone()])
+                            .with_logging()
+                            .with_max_num_seqs(1);
+
+                        if paged_attn {
+                            println!("{} MLX: Initializing Paged Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
+                            let paged_attn_cfg = PagedAttentionMetaBuilder::default()
+                                .with_block_size(16)
+                                .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
+                                .build()
+                                .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
+                            builder = builder.with_paged_attn(paged_attn_cfg);
+                        }
+                        builder.build().await.map_err(|e| miette!("Failed to load MLX GGUF model: {}", e))?
                     } else {
-                        println!("{} MLX: Initializing Standard Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
-                    }
-
-                    let mlx_model = builder
-                        .build()
-                        .await
-                        .map_err(|e| miette!("Failed to load MLX model: {}", e))?;
+                        println!("{} MLX: Initializing Native Safetensors Backend...", "⚡".yellow());
+                        let mut builder = TextModelBuilder::new(&repo)
+                            .with_logging()
+                            .with_max_num_seqs(1);
+                        
+                        if paged_attn {
+                             let paged_attn_cfg = PagedAttentionMetaBuilder::default()
+                                .with_block_size(16)
+                                .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
+                                .build()
+                                .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
+                            builder = builder.with_paged_attn(paged_attn_cfg);
+                        }
+                        builder.build().await.map_err(|e| miette!("Failed to load MLX Native model: {}", e))?
+                    };
 
                     let embed_model = EmbeddingModelBuilder::new("sentence-transformers/all-MiniLM-L6-v2")
                         .build()
@@ -134,15 +168,22 @@ impl Backend {
                         .ok(); // Fallback to None if embedding model fails to load
 
                     Ok((Backend::MLX { 
-                        model: mlx_model, 
+                        model: std::sync::Arc::new(mlx_model), 
                         _ctx_limit: ctx_limit,
-                        embedder: embed_model 
+                        embedder: embed_model.map(std::sync::Arc::new)
                     }, model))
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
                     Ok((Backend::Ollama(Ollama::default()), model))
                 }
+            }
+            AgentMode::Bridge => {
+                let provider = crate::ai_bridge::ModelProvider::Ollama { 
+                    base_url: "http://127.0.0.1:11434".to_string() 
+                };
+                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
+                Ok((Backend::Bridge(bridge), model))
             }
         }
     }
@@ -171,6 +212,31 @@ impl Backend {
             .top_p(sampling.top_p);
 
         match self {
+            Backend::Bridge(bridge) => {
+                use ai::chat_completions::ChatCompletionMessage;
+                let ai_messages: Vec<ChatCompletionMessage> = history.iter().map(|m| {
+                    match m.role {
+                        MessageRole::System => ChatCompletionMessage::System(m.content.clone().into()),
+                        MessageRole::User => ChatCompletionMessage::User(m.content.clone().into()),
+                        MessageRole::Assistant => ChatCompletionMessage::Assistant(m.content.clone().into()),
+                        _ => ChatCompletionMessage::User(m.content.clone().into()),
+                    }
+                }).collect();
+
+                let mut stream = bridge.stream_chat(ai_messages).await?;
+                while let Some(chunk_res) = stream.next().await {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                    let chunk = chunk_res.map_err(|e| miette!("Bridge Stream Error: {}", e))?;
+                    if let Some(choice) = chunk.choices.first() {
+                        if let Some(ref token) = choice.delta.content {
+                            full_content.push_str(token);
+                            if let Some(tx) = event_tx.lock().clone() {
+                                let _ = tx.try_send(AgentEvent::StreamToken(token.clone()));
+                            }
+                        }
+                    }
+                }
+            }
             Backend::Ollama(ollama) => {
                 let is_r1 = model.to_lowercase().contains("r1") || model.to_lowercase().contains("deepseek");
                 let tx = event_tx.lock().clone();
@@ -476,7 +542,7 @@ impl Backend {
                 }
             }
             #[cfg(target_os = "macos")]
-            Backend::MLX { model: mistralrs, _ctx_limit: _, .. } => {
+            Backend::MLX { model: mistral_model, .. } => {
                 let on_tool_call = on_tool_call;
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -635,9 +701,9 @@ impl Backend {
                         .add_message(TextMessageRole::User, raw_prompt)
                         .set_sampling(sampling_params);
                     
-                    mistralrs.stream_chat_request(req).await.into_diagnostic()?
+                    mistral_model.stream_chat_request(req).await.into_diagnostic()?
                 } else {
-                    mistralrs.stream_chat_request(request_builder).await.into_diagnostic()?
+                    mistral_model.stream_chat_request(request_builder).await.into_diagnostic()?
                 };
                 
                 if let Some(tx) = tx_opt.as_ref() {
@@ -1044,138 +1110,42 @@ impl Backend {
             }
         }
 
-        // --- 🛠️ FALLBACK JSON TOOL PARSER (MLX) ---
-        // If native_tool_calls is empty but full_content has JSON blocks, parse them manually.
-        // This is critical for models like DeepSeek-R1 that may hallucinate the native format
-        // but correctly output the JSON in the text content.
-        if native_tool_calls.is_empty() && !full_content.is_empty() {
-            // Match ```json { "name": "...", "arguments": { ... } } ```
-            let re_json = Regex::new(r"(?s)```json\s*(\{.*?\})\s*```").unwrap();
-            for cap in re_json.captures_iter(&full_content) {
-                if let Some(json_str) = cap.get(1) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.as_str()) {
-                        // Extract name from root or nested function object
-                        let tool_name = val.get("name")
-                            .or_else(|| val.get("tool"))
-                            .or_else(|| val.get("action"))
-                            .or_else(|| val.get("function").and_then(|f| f.get("name")))
-                            .and_then(|v| v.as_str());
+        // --- 🛡️ HARDENED TOOL EXTRACTION (llm-extract) ---
+        // If native_tool_calls is empty but full_content has JSON blocks, parse them using
+        // self-repairing extraction logic. Handles markdown, malformed JSON, and field typos.
+        if native_tool_calls.is_empty() {
+            let combined_content = format!("{}\n{}", reasoning_content, full_content);
 
-                        if let Some(n) = tool_name {
-                            // Fuzzy Tool Name Repair
-                            let fixed_name = match n.to_lowercase().as_str() {
-                                "extract_and_write" | "write" | "save" => "write_file".to_string(),
-                                "read" | "cat" | "view" => "read_file".to_string(),
-                                "shell" | "exec" | "terminal" => "run_command".to_string(),
-                                _ => n.to_string(),
-                            };
-
-                            let arguments = val.get("arguments")
-                                .or_else(|| val.get("args"))
-                                .or_else(|| val.get("function").and_then(|f| f.get("arguments")))
-                                .cloned()
-                                .unwrap_or(serde_json::json!({}));
-
-                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name: fixed_name,
-                                    arguments,
-                                }
-                            });
-                        }
-                    }
-                                                }
-            }
-            
-            // Second pass: Catch naked JSON blocks if no code blocks were found
-            if native_tool_calls.is_empty() {
-                // UNIVERSAL NESTED TOOL CATCHER: Handles flat OR nested "function" structures.
-                // Catch: { "name": "..." } OR { "function": { "name": "..." } }
-                let re_native = Regex::new(r#"(?s)(?:```json\s*)?\{\s*(?:"function"\s*:\s*\{\s*)?"?\s*(?:name|tool|action|function)"?\s*:\s*"([^"]+)"\s*,\s*"?arguments"?\s*:\s*(\{.*?\})\s*\}?\s*\}(?:\s*```)?"#).unwrap();
-                for cap in re_native.captures_iter(&full_content) {
-                    let name = cap.get(1).map(|m| m.as_str().to_string());
-                    let args_str = cap.get(2).map(|m| m.as_str());
-                    
-                    if let (Some(n), Some(a)) = (name, args_str) {
-                        // Fuzzy Tool Name Repair (catch common LLM hallucinations)
-                        let fixed_name = match n.to_lowercase().as_str() {
-                            "extract_and_write" | "write" | "save" => "write_file".to_string(),
-                            "read" | "cat" | "view" => "read_file".to_string(),
-                            "shell" | "exec" | "terminal" => "run_command".to_string(),
-                            _ => n,
-                        };
-
-                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(a) {
-                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name: fixed_name,
-                                    arguments: args,
-                                },
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Third pass: Catch SEARCH/REPLACE diff blocks (hallucinated Aider-style tools)
-            if native_tool_calls.is_empty() {
-                let re_diff = Regex::new(r"(?s)<<<<<<<\s*SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>>\s*REPLACE").unwrap();
-                for cap in re_diff.captures_iter(&full_content) {
-                    let search = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-                    let replace = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
-                    
-                    // Heuristic: Try to find a filename mentioned in the 150 characters before the block
-                    let block_start = cap.get(0).unwrap().start();
-                    let preceding = &full_content[block_start.saturating_sub(150)..block_start];
-                    let re_file = Regex::new(r"([a-zA-Z0-9_\-\./]+\.[a-z]+)").unwrap();
-                    let path = re_file.find_iter(preceding)
-                        .last()
-                        .map(|m| m.as_str().to_string())
-                        .unwrap_or_else(|| "unknown_file.txt".to_string());
-
+            // Extract multiple tool calls using self-repairing JSON logic
+            if let Ok(payloads) = llm_extract::extract_all::<ToolCallPayload>(&combined_content) {
+                for payload in payloads {
                     native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                         function: ollama_rs::generation::tools::ToolCallFunction {
-                            name: "edit_file_with_diff".to_string(),
-                            arguments: serde_json::json!({
-                                "path": path,
-                                "diff": format!("<<<<<<< SEARCH\n{}\n=======\n{}\n>>>>>>> REPLACE", search, replace)
-                            }),
+                            name: payload.name,
+                            arguments: payload.arguments,
                         }
                     });
                 }
+            } else {
+                // --- 🛡️ FALLBACK: tool-parser (v1.2.0) with DeepSeekParser ---
+                // If llm-extract fails, try specialized DeepSeekParser for multi-block recovery
+                let parser = tool_parser::DeepSeekParser::new();
+                if let Ok((_text, calls)) = parser.parse_complete(&combined_content).await {
+                    for call in calls {
+                        native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                            function: ollama_rs::generation::tools::ToolCallFunction {
+                                name: call.function.name,
+                                arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
+                            }
+                        });
+                    }
+                }
             }
 
-            // Fourth pass: Catch raw Markdown code blocks (the "Hail Mary" catcher)
-            if native_tool_calls.is_empty() {
-                let re_markdown = Regex::new(r"(?s)```[a-zA-Z]*\n(.*?)\n```").unwrap();
-                for cap in re_markdown.captures_iter(&full_content) {
-                    let code = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-                    if code.trim().len() < 10 { continue; }
-
-                    // Heuristic: Search for a filename in the last 200 characters before the block
-                    let block_start = cap.get(0).unwrap().start();
-                    let context = if block_start > 200 {
-                        &full_content[block_start-200..block_start]
-                    } else {
-                        &full_content[..block_start]
-                    };
-                    
-                    let re_file = Regex::new(r"([a-zA-Z0-9_\-\./]+\.[a-z]+)").unwrap();
-                    if let Some(path_match) = re_file.find_iter(context).last() {
-                        let path = path_match.as_str().to_string();
-                        // Ignore common false positives like "json" or "python" as paths
-                        if path != "json" && path != "python" && path != "rust" && path != "bash" {
-                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name: "write_file".to_string(),
-                                    arguments: serde_json::json!({
-                                        "path": path,
-                                        "content": code
-                                    }),
-                                }
-                            });
-                        }
-                    }
+            // Enforce [ACTOR PROTOCOL]: Truncate content after first tool call if found
+            if !native_tool_calls.is_empty() {
+                if let Some(pos) = full_content.find('{') {
+                    full_content.truncate(pos);
                 }
             }
         }
@@ -1209,6 +1179,9 @@ impl Backend {
                 // all model memory as soon as the main process returns.
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
+            Backend::Bridge(_) => {
+                // Bridge clients handle their own cleanup
+            }
         }
     }
 
@@ -1234,6 +1207,119 @@ impl Backend {
                     Err(miette!("MLX Embedder not loaded"))
                 }
             }
+            Backend::Bridge(bridge) => {
+                bridge.generate_embeddings(text.to_string()).await
+            }
+        }
+    }
+}
+
+// --- 🌪️ RIG-CORE INTEGRATION (Orchestration Layer) ---
+
+impl CompletionModel for Backend {
+    type Response = String;
+    type StreamingResponse = ();
+    type Client = ();
+
+    fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+        unimplemented!("Backend is usually created via Backend::new")
+    }
+
+    fn completion(
+        &self,
+        request: rig::completion::CompletionRequest,
+    ) -> impl std::future::Future<Output = std::result::Result<rig::completion::CompletionResponse<Self::Response>, rig::completion::CompletionError>> + rig::wasm_compat::WasmCompatSend {
+        let this = self.clone();
+        async move {
+            // Map rig::completion::CompletionRequest to our stream_chat parameters
+            let prompt = request.chat_history.iter().last().map(|m| {
+                match m {
+                    rig::message::Message::System { content } => content.clone(),
+                    rig::message::Message::User { content } => {
+                        content.iter().find_map(|c| match c {
+                            rig::message::UserContent::Text(t) => Some(t.text.clone()),
+                            _ => None
+                        }).unwrap_or_default()
+                    }
+                    rig::message::Message::Assistant { content, .. } => {
+                        content.iter().find_map(|c| match c {
+                            rig::message::AssistantContent::Text(t) => Some(t.text.clone()),
+                            _ => None
+                        }).unwrap_or_default()
+                    }
+                }
+            }).unwrap_or_default();
+            let history = vec![ChatMessage::new(MessageRole::User, prompt)];
+            
+            let sampling = SamplingConfig {
+                temperature: request.temperature.unwrap_or(0.1) as f32,
+                top_p: 0.9,
+                repeat_penalty: 1.1,
+                context_size: 8192,
+            };
+            
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let event_tx = Arc::new(parking_lot::Mutex::new(None));
+            
+            let output = this.stream_chat(
+                request.model.unwrap_or_else(|| "default".to_string()),
+                history,
+                sampling,
+                event_tx,
+                stop,
+                "".to_string(),
+                None,
+                None,
+            ).await.map_err(|e| rig::completion::CompletionError::ProviderError(e.to_string()))?;
+
+            Ok(rig::completion::CompletionResponse {
+                choice: rig::OneOrMany::one(rig::message::AssistantContent::text(output.content)),
+                usage: rig::completion::Usage::new(),
+                raw_response: "".to_string(),
+                message_id: None,
+            })
+        }
+    }
+
+    fn stream(
+        &self,
+        _request: rig::completion::CompletionRequest,
+    ) -> impl std::future::Future<Output = std::result::Result<rig::streaming::StreamingCompletionResponse<Self::StreamingResponse>, rig::completion::CompletionError>> + rig::wasm_compat::WasmCompatSend {
+        async move {
+            Err(rig::completion::CompletionError::ProviderError("Streaming completion not yet implemented for rig-core wrapper".to_string()))
+        }
+    }
+}
+
+impl EmbeddingModel for Backend {
+    const MAX_DOCUMENTS: usize = 100;
+    type Client = ();
+
+    fn make(_client: &Self::Client, _model: impl Into<String>, _dims: Option<usize>) -> Self {
+        unimplemented!("Backend is usually created via Backend::new")
+    }
+
+    fn ndims(&self) -> usize {
+        384 // MiniLM-L6-v2 dimensions
+    }
+
+    fn embed_texts(
+        &self,
+        texts: impl IntoIterator<Item = String> + rig::wasm_compat::WasmCompatSend,
+    ) -> impl std::future::Future<Output = std::result::Result<Vec<rig::embeddings::Embedding>, rig::embeddings::EmbeddingError>> + rig::wasm_compat::WasmCompatSend {
+        let texts_vec: Vec<String> = texts.into_iter().collect();
+        let this = self.clone();
+        async move {
+            let mut results = Vec::new();
+            for text in texts_vec {
+                let emb = this.generate_embeddings(&text).await
+                    .map_err(|e| rig::embeddings::EmbeddingError::ProviderError(e.to_string()))?;
+                results.push(rig::embeddings::Embedding {
+                    document: text,
+                    vec: emb.into_iter().map(|f| f as f64).collect(),
+                });
+            }
+            Ok(results)
         }
     }
 }

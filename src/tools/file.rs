@@ -249,32 +249,42 @@ impl AgentTool for SearchFilesTool {
         let path_owned = shellexpand::tilde(&path_val).to_string();
         
         use walkdir::WalkDir;
+        use fuzzy_matcher::FuzzyMatcher;
+        use fuzzy_matcher::skim::SkimMatcherV2;
         
         // Move blocking filesystem traversal to a dedicated thread pool
         tokio::task::spawn_blocking(move || {
+            let matcher = SkimMatcherV2::default();
             let mut matches = Vec::new();
             
-            // Simple glob to regex conversion:
-            // escape special chars, then replace '*' with '.*' and '?' with '.'
-            let regex_pattern = pattern
-                .replace(".", "\\.")
-                .replace("*", ".*")
-                .replace("?", ".");
-            let regex_str = format!("(?i)^{}$", regex_pattern);
-            let re = regex::Regex::new(&regex_str).map_err(|e| miette!("Invalid search pattern: {}", e))?;
-
-            for entry in WalkDir::new(&path_owned).into_iter().filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy();
-                if re.is_match(&name) {
-                    matches.push(entry.path().display().to_string());
+            for entry in WalkDir::new(&path_owned)
+                .into_iter()
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    !name.starts_with('.') && name != "target" && name != "node_modules"
+                })
+                .filter_map(|e| e.ok()) 
+            {
+                if entry.file_type().is_file() {
+                    let name = entry.file_name().to_string_lossy();
+                    if let Some(score) = matcher.fuzzy_match(&name, &pattern) {
+                        matches.push((score, entry.path().display().to_string()));
+                    }
                 }
-                if matches.len() > 100 { break; }
             }
+            
+            // Sort by score (descending)
+            matches.sort_by(|a, b| b.0.cmp(&a.0));
             
             if matches.is_empty() {
                 Ok("No files found matching pattern.".to_string())
             } else {
-                Ok(matches.join("\n"))
+                let report = matches.into_iter()
+                    .take(50)
+                    .map(|(score, path)| format!("[{}] {}", score, path))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(report)
             }
         }).await.map_err(|e| miette!("Task join error: {}", e))?
     }

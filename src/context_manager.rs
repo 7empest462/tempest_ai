@@ -1,9 +1,7 @@
-use ollama_rs::{
-    generation::chat::{request::ChatMessageRequest, ChatMessage, MessageRole},
-    models::ModelOptions,
-    Ollama,
-};
+use ollama_rs::generation::chat::ChatMessage;
 use miette::Result;
+use crate::inference::{Backend, SamplingConfig};
+use std::sync::Arc;
 
 /// Count tokens for a single string using the cached BPE tokenizer.
 fn count_tokens(text: &str) -> usize {
@@ -34,7 +32,7 @@ pub fn needs_compaction(messages: &[ChatMessage], ctx_limit: u64) -> bool {
 
 /// Compacts the middle of the history by summarizing it using the sub-agent model.
 pub async fn compact_history(
-    ollama: &Ollama,
+    backend: &Backend,
     sub_model: &str,
     mut messages: Vec<ChatMessage>,
     _ctx_limit: u64,
@@ -66,9 +64,9 @@ pub async fn compact_history(
     let mut summary_context = String::new();
     for msg in &target_messages {
         let role = match msg.role {
-            MessageRole::User => "User",
-            MessageRole::Assistant => "Assistant",
-            MessageRole::System => "System",
+            ollama_rs::generation::chat::MessageRole::User => "User",
+            ollama_rs::generation::chat::MessageRole::Assistant => "Assistant",
+            ollama_rs::generation::chat::MessageRole::System => "System",
             _ => "Other",
         };
         summary_context.push_str(&format!("{}: {}\n\n", role, msg.content));
@@ -94,26 +92,36 @@ You are a high-speed context compressor. Summarize the following session history
         pressure_pct, ratio, intensity, summary_context
     );
 
-    let options = ModelOptions::default()
-        .num_ctx(4096) // Summarization doesn't need full context
-        .temperature(0.01);
+    let sampling = SamplingConfig {
+        temperature: 0.01,
+        top_p: 0.9,
+        repeat_penalty: 1.1,
+        context_size: 4096,
+    };
 
-    let request = ChatMessageRequest::new(
-        sub_model.to_string(),
-        vec![ChatMessage::new(MessageRole::User, summary_prompt)],
-    ).options(options);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let event_tx = Arc::new(parking_lot::Mutex::new(None));
 
     // If we are at critical capacity, try to summarize, but fallback to Hard-Prune if it fails or is too slow
     let summary_result = tokio::time::timeout(
         tokio::time::Duration::from_secs(30),
-        ollama.send_chat_messages(request)
+        backend.stream_chat(
+            sub_model.to_string(),
+            vec![ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, summary_prompt)],
+            sampling,
+            event_tx,
+            stop,
+            "".to_string(),
+            None,
+            None,
+        )
     ).await;
 
     match summary_result {
         Ok(Ok(response)) => {
-            let summary_text = response.message.content;
+            let summary_text = response.content;
             let summary_message = ChatMessage::new(
-                MessageRole::System,
+                ollama_rs::generation::chat::MessageRole::System,
                 format!("[CONTEXT SUMMARY - COMPACTED]:\n{}", summary_text)
             );
             messages.splice(compaction_target_range, std::iter::once(summary_message));
@@ -122,7 +130,7 @@ You are a high-speed context compressor. Summarize the following session history
             // Model error (e.g. model not found)
             messages.drain(compaction_target_range);
             let panic_message = ChatMessage::new(
-                MessageRole::System,
+                ollama_rs::generation::chat::MessageRole::System,
                 format!("⚠️ [CRITICAL OVERLOAD]: Summarization model error ({}). Old history hard-pruned to restore stability.", e)
             );
             messages.insert(1, panic_message);
@@ -131,7 +139,7 @@ You are a high-speed context compressor. Summarize the following session history
             // Timeout fallback
             messages.drain(compaction_target_range);
             let panic_message = ChatMessage::new(
-                MessageRole::System,
+                ollama_rs::generation::chat::MessageRole::System,
                 "⚠️ [CRITICAL OVERLOAD]: Summarization TIMEOUT (30s). Background model too slow. History hard-pruned.".to_string()
             );
             messages.insert(1, panic_message);

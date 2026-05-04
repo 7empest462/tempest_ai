@@ -16,6 +16,10 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{ThemeSet, Style as SyntectStyle};
+use syntect::easy::HighlightLines;
+use syntect::util::LinesWithEndings;
 use unicode_width::UnicodeWidthStr;
 use std::io::stdout;
 use std::time::{Duration, Instant};
@@ -48,6 +52,7 @@ pub enum ToolResponse {
 pub enum FocusedPane {
     Chat,
     Reasoning,
+    Explorer,
 }
 
 pub struct App {
@@ -75,7 +80,13 @@ pub struct App {
     pub engine_status: Option<String>,
     pub focused_pane: FocusedPane,
     pub show_reasoning: bool,
+    pub show_explorer: bool,
+    pub explorer_files: Vec<(String, bool)>, // (path, is_dir)
+    pub explorer_state: ratatui::widgets::ListState,
+    pub current_explorer_dir: std::path::PathBuf,
     pub command_output: Vec<String>,
+    pub syntax_set: SyntaxSet,
+    pub theme_set: ThemeSet,
 }
 
 impl App {
@@ -109,7 +120,35 @@ impl App {
             engine_status: None,
             focused_pane: FocusedPane::Chat,
             show_reasoning: false,
+            show_explorer: false,
+            explorer_files: Vec::new(),
+            explorer_state: ratatui::widgets::ListState::default(),
+            current_explorer_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             command_output: Vec::new(),
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+        }
+    }
+
+    pub fn refresh_explorer(&mut self) {
+        if let Ok(entries) = std::fs::read_dir(&self.current_explorer_dir) {
+            let mut files = entries.filter_map(|e| e.ok())
+                .map(|e| {
+                    let path = e.path().file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let is_dir = e.path().is_dir();
+                    (path, is_dir)
+                })
+                .collect::<Vec<_>>();
+            
+            // Sort: Dirs first, then alpha
+            files.sort_by(|a, b| {
+                if a.1 != b.1 {
+                    b.1.cmp(&a.1)
+                } else {
+                    a.0.to_lowercase().cmp(&b.0.to_lowercase())
+                }
+            });
+            self.explorer_files = files;
         }
     }
 
@@ -238,6 +277,15 @@ pub async fn run_tui(
                             if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'c' || c == 'C') {
                                 app.should_quit = true;
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                            } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'e' || c == 'E') {
+                                app.show_explorer = !app.show_explorer;
+                                if app.show_explorer {
+                                    app.refresh_explorer();
+                                    app.focused_pane = FocusedPane::Explorer;
+                                    app.explorer_state.select(Some(0));
+                                } else if app.focused_pane == FocusedPane::Explorer {
+                                    app.focused_pane = FocusedPane::Chat;
+                                }
                             } else {
                                 app.input_buffer.push(c);
                             }
@@ -246,7 +294,26 @@ pub async fn run_tui(
                             app.input_buffer.pop();
                         }
                         KeyCode::Enter => {
-                            if !app.input_buffer.is_empty() {
+                            if app.focused_pane == FocusedPane::Explorer {
+                                if let Some(idx) = app.explorer_state.selected() {
+                                    if let Some((name, is_dir)) = app.explorer_files.get(idx) {
+                                        if *is_dir {
+                                            if name == ".." {
+                                                app.current_explorer_dir.pop();
+                                            } else {
+                                                app.current_explorer_dir.push(name);
+                                            }
+                                            app.refresh_explorer();
+                                            app.explorer_state.select(Some(0));
+                                        } else {
+                                            // Select file for context
+                                            let full_path = app.current_explorer_dir.join(name);
+                                            app.input_buffer.push_str(&format!(" [CONTEXT: {}] ", full_path.to_string_lossy()));
+                                            app.focused_pane = FocusedPane::Chat;
+                                        }
+                                    }
+                                }
+                            } else if !app.input_buffer.is_empty() {
                                 let msg = app.input_buffer.drain(..).collect::<String>();
                                 app.push_message(format!("You: {}", msg));
                                 let _ = user_tx.send(msg).await;
@@ -255,8 +322,11 @@ pub async fn run_tui(
                         }
                         KeyCode::Tab => {
                             app.focused_pane = match app.focused_pane {
-                                FocusedPane::Chat => FocusedPane::Reasoning,
-                                FocusedPane::Reasoning => FocusedPane::Chat,
+                                FocusedPane::Chat => {
+                                    if app.show_reasoning { FocusedPane::Reasoning } else if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat }
+                                },
+                                FocusedPane::Reasoning => if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
+                                FocusedPane::Explorer => FocusedPane::Chat,
                             };
                         }
                         KeyCode::Up => {
@@ -264,6 +334,9 @@ pub async fn run_tui(
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur.saturating_sub(1)));
                                 app.auto_scroll = false;
+                            } else if app.focused_pane == FocusedPane::Explorer {
+                                let cur = app.explorer_state.selected().unwrap_or(0);
+                                app.explorer_state.select(Some(cur.saturating_sub(1)));
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_sub(1);
                             }
@@ -272,6 +345,9 @@ pub async fn run_tui(
                             if app.focused_pane == FocusedPane::Chat {
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur + 1));
+                            } else if app.focused_pane == FocusedPane::Explorer {
+                                let cur = app.explorer_state.selected().unwrap_or(0);
+                                app.explorer_state.select(Some(cur + 1));
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_add(1);
                             }
@@ -406,6 +482,23 @@ pub async fn run_tui(
     Ok(())
 }
 
+fn highlight_text(text: &str, syntax_set: &SyntaxSet, theme_set: &ThemeSet) -> Vec<Line<'static>> {
+    let syntax = syntax_set.find_syntax_by_extension("rs").unwrap(); // Default to Rust
+    let mut h = HighlightLines::new(syntax, &theme_set.themes["base16-ocean.dark"]);
+    let mut lines = Vec::new();
+
+    for line in LinesWithEndings::from(text) {
+        let ranges: Vec<(SyntectStyle, &str)> = h.highlight_line(line, syntax_set).unwrap();
+        let mut spans = Vec::new();
+        for (style, content) in ranges {
+            let color = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+            spans.push(Span::styled(content.to_string(), Style::default().fg(color)));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -416,23 +509,45 @@ fn ui(f: &mut Frame, app: &mut App) {
         ].as_ref())
         .split(f.area());
 
-    // Main Content Area: Split horizontally if there's reasoning content or flag set
-    let main_chunks = if app.show_reasoning || !app.reasoning_buffer.is_empty() {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(50), // Chat
-                Constraint::Percentage(50), // Reasoning
-            ].as_ref())
-            .split(chunks[1])
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(100),
-            ].as_ref())
-            .split(chunks[1])
-    };
+    // Main Content Area Layout Logic
+    let mut main_constraints = Vec::new();
+    if app.show_explorer {
+        main_constraints.push(Constraint::Percentage(20)); // Explorer
+    }
+    main_constraints.push(Constraint::Percentage(if app.show_reasoning { 40 } else { 80 })); // Chat
+    if app.show_reasoning {
+        main_constraints.push(Constraint::Percentage(40)); // Reasoning
+    }
+
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(main_constraints)
+        .split(chunks[1]);
+
+    let mut pane_idx = 0;
+
+    // 📂 FILE EXPLORER (Optional Sidebar)
+    if app.show_explorer {
+        let explorer_area = main_chunks[pane_idx];
+        pane_idx += 1;
+        
+        let explorer_border_color = if app.focused_pane == FocusedPane::Explorer { Color::Yellow } else { Color::DarkGray };
+        let explorer_title = if app.focused_pane == FocusedPane::Explorer { " 📂 EXPLORER [FOCUS] " } else { " 📂 EXPLORER " };
+
+        let mut items = vec![ListItem::new(Span::styled(".. [UP]", Style::default().fg(Color::Blue)))];
+        for (name, is_dir) in &app.explorer_files {
+            let icon = if *is_dir { "📁 " } else { "📄 " };
+            let style = if *is_dir { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::White) };
+            items.push(ListItem::new(Span::styled(format!("{}{}", icon, name), style)));
+        }
+
+        let explorer = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(explorer_title).border_style(Style::default().fg(explorer_border_color)))
+            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
+        
+        f.render_stateful_widget(explorer, explorer_area, &mut app.explorer_state);
+    }
 
     // Header area for Logo
     let logo = vec![
@@ -449,14 +564,16 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::NONE));
     f.render_widget(header_block, chunks[0]);
 
-    let main_area = main_chunks[0]; // All chat/telemetry happens in the left panel
+    let chat_area = main_chunks[pane_idx];
+    pane_idx += 1;
+
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(70),
             Constraint::Percentage(30),
         ].as_ref())
-        .split(main_area);
+        .split(chat_area);
 
     let mut list_items = Vec::new();
     let chat_width = top_chunks[0].width.saturating_sub(2) as usize;
@@ -468,8 +585,17 @@ fn ui(f: &mut Frame, app: &mut App) {
         let has_prefix = text.starts_with(prefix);
         let content_to_wrap = if has_prefix { &text[prefix.len()..] } else { text };
         
+        // --- 🌈 SYNTAX HIGHLIGHTING FOR CODE BLOCKS IN CHAT ---
+        if !is_user && content_to_wrap.contains("```") {
+             // Basic detection and highlighting for code blocks
+             let highlighted = highlight_text(content_to_wrap, &app.syntax_set, &app.theme_set);
+             for line in highlighted {
+                 items.push(ListItem::new(line));
+             }
+             return;
+        }
+
         let mut first_line = true;
-        
         for line in content_to_wrap.split('\n') {
             let mut current = line;
             let mut first_chunk = true;
@@ -480,7 +606,6 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
 
             while !current.is_empty() || (first_line && first_chunk) {
-                // Find how many chars fit in the remaining width
                 let mut width = 0;
                 let mut split_idx = 0;
                 let available_width = if first_line && first_chunk && show_header && has_prefix {
@@ -499,7 +624,6 @@ fn ui(f: &mut Frame, app: &mut App) {
                 }
 
                 if split_idx == 0 && !current.is_empty() {
-                    // Force at least one character if width is too small
                     split_idx = current.chars().next().unwrap().len_utf8();
                 }
 
@@ -533,7 +657,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 
     let core_border_color = if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray };
-    let core_title = if app.focused_pane == FocusedPane::Chat { " 🦾 TEMPEST CORE SESSION [FOCUS] " } else { " 🦾 TEMPEST CORE SESSION " };
+    let core_title = if app.focused_pane == FocusedPane::Chat { " 🦾 CORE SESSION [FOCUS] " } else { " 🦾 CORE SESSION " };
     
     let item_count = list_items.len();
     let list = List::new(list_items)
@@ -549,10 +673,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     
     f.render_stateful_widget(list, top_chunks[0], &mut app.list_state);
 
-    let status_title = format!(" ⚙️ SYSTEM STATUS [{}] ", app.agent_mode);
+    let status_title = format!(" ⚙️ STATUS [{}] ", app.agent_mode);
     let mut status_lines = Vec::new();
     
-    // Animate spinner if thinking
     let spinner = if app.thinking_msg.is_some() {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         frames[(app.animation_tick as usize) % frames.len()]
@@ -577,17 +700,6 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::raw("🔧 Executing: "),
             Span::styled(tool, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]));
-
-        // Show last 3 lines of command output if it's a run_command tool
-        if tool == "run_command" && !app.command_output.is_empty() {
-            let start_idx = app.command_output.len().saturating_sub(3);
-            for line in &app.command_output[start_idx..] {
-                status_lines.push(Line::from(vec![
-                    Span::styled("  > ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(line, Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
-                ]));
-            }
-        }
     }
 
     if let Some(thinking) = &app.thinking_msg {
@@ -597,62 +709,36 @@ fn ui(f: &mut Frame, app: &mut App) {
         ]));
     }
 
-    // --- SENTINEL FLEET HUD (Compact) ---
+    // --- 🛡️ SENTINEL FLEET HUD ---
     if !app.active_sentinels.is_empty() {
-        let mut spans = vec![
-            Span::styled("🛡️ FLEET: ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-        ];
-        
-        for sentinel in &app.active_sentinels {
-            let tag = match sentinel.as_str() {
-                "Context Runway" => "[C]",
-                "Privilege Escalator" => "[P]",
-                "Compiler Guard" => "[G]",
-                "Build Watcher" => "[B]",
-                "Thermal Guard" => "[TH]",
-                "Hallucination Guard" => "[H]",
-                "Tool Guard" => "[T]",
-                "Loop Breaker" => "[L]",
-                _ => "[S]",
-            };
-            spans.push(Span::styled(format!("{} ", tag), Style::default().fg(Color::Cyan)));
+        let mut spans = vec![Span::styled("🛡️ FLEET: ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))];
+        for s in &app.active_sentinels {
+            spans.push(Span::styled(format!("{} ", s.chars().next().unwrap_or('S')), Style::default().fg(Color::Cyan)));
         }
         status_lines.push(Line::from(spans));
     }
 
     for log in &app.sentinel_log {
         status_lines.push(Line::from(vec![
-            Span::styled(" ⤷ ", Style::default().fg(Color::Gray)),
+            Span::styled(" ⤷ ", Style::default().fg(Color::DarkGray)),
             Span::styled(log, Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
         ]));
-    }
-
-    if let Some(msg) = &app.engine_status {
-        status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled("🤖 ENGINE STATUS", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-        for line in msg.split('\n') {
-            status_lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(Color::White))));
-        }
     }
 
     // --- CONTEXT WINDOW TRACKER ---
     if app.context_total > 0 {
         status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled("🧠 CONTEXT WINDOW", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
-        
+        status_lines.push(Line::from(Span::styled("🧠 CONTEXT", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
         let pct = (app.context_used as f64 / app.context_total as f64).min(1.0);
-        let bar_width = 20;
+        let bar_width = 12;
         let filled = (pct * bar_width as f64) as usize;
-        let empty = bar_width - filled;
-        
         let bar_color = if pct > 0.9 { Color::Red } else if pct > 0.75 { Color::Yellow } else { Color::Green };
-        
         status_lines.push(Line::from(vec![
             Span::styled("[", Style::default().fg(Color::Gray)),
             Span::styled("|".repeat(filled), Style::default().fg(bar_color)),
-            Span::styled(".".repeat(empty), Style::default().fg(Color::DarkGray)),
+            Span::styled(".".repeat(bar_width - filled), Style::default().fg(Color::DarkGray)),
             Span::styled("]", Style::default().fg(Color::Gray)),
-            Span::raw(format!(" {} / {}k", app.context_used, app.context_total / 1024)),
+            Span::raw(format!(" {}k", app.context_total / 1024)),
         ]));
     }
 
@@ -662,20 +748,22 @@ fn ui(f: &mut Frame, app: &mut App) {
         .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(status_block, top_chunks[1]);
 
-    // --- REASONING TRACE PANE (Right Panel) ---
-    if !app.reasoning_buffer.is_empty() {
+    // --- REASONING TRACE PANE (With Syntax Highlighting) ---
+    if app.show_reasoning {
+        let reasoning_area = main_chunks[pane_idx];
         let reasoning_border_color = if app.focused_pane == FocusedPane::Reasoning { Color::Yellow } else { Color::Magenta };
-        let reasoning_title = if app.focused_pane == FocusedPane::Reasoning { " 🧠 THOUGHT PROCESS [FOCUS] " } else { " 🧠 THOUGHT PROCESS (Reasoning Trace) " };
+        let reasoning_title = if app.focused_pane == FocusedPane::Reasoning { " 🧠 REASONING [FOCUS] " } else { " 🧠 REASONING " };
 
-        let reasoning_para = Paragraph::new(app.reasoning_buffer.clone())
+        let highlighted_lines = highlight_text(&app.reasoning_buffer, &app.syntax_set, &app.theme_set);
+
+        let reasoning_para = Paragraph::new(highlighted_lines)
             .block(Block::default()
                 .title(Span::styled(reasoning_title, Style::default().fg(reasoning_border_color).add_modifier(Modifier::BOLD)))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(reasoning_border_color)))
-            .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
-            .wrap(ratatui::widgets::Wrap { trim: true })
+            .wrap(ratatui::widgets::Wrap { trim: false })
             .scroll((app.reasoning_scroll, 0));
-        f.render_widget(reasoning_para, main_chunks[1]);
+        f.render_widget(reasoning_para, reasoning_area);
     }
 
     let mut input_title = " 🗨️ INPUT ".to_string();
@@ -687,8 +775,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         input_text = format!("{} >> {}", question, app.input_response_buffer);
         input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     } else if let Some((rationale, _resp_tx)) = &app.pending_privilege_request {
-        input_title = format!(" 🔒 SECURE ESCALATION REQUIRED ");
-        input_text = format!("Rationale: {} | Accept root privileges? (y/n)", rationale);
+        input_title = format!(" 🔒 PRIVILEGE ESCALATION ");
+        input_text = format!("Rationale: {} | Accept root? (y/n)", rationale);
         input_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
     }
 
@@ -697,7 +785,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title(input_title));
     f.render_widget(input, chunks[2]);
 
-    // Set cursor position for typing feedback
     f.set_cursor_position((
         chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
         chunks[2].y + 1,

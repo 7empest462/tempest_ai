@@ -397,7 +397,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                         </div>
                         <div class="status">
                             <span v-if="isLoading" class="spinner">🌀</span>
-                            MLX • {{ currentPhase }}
+                            {{ activeModel }} • {{ currentPhase }}
                         </div>
                     </div>
 
@@ -479,6 +479,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                 const streamingThoughts = ref('');
                 const isLoading = ref(false);
                 const currentPhase = ref('IDLE');
+                const activeModel = ref('TEMPEST');
                 const outputRef = ref(null);
                 const isDragging = ref(false);
 
@@ -554,9 +555,21 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                             const reasoning = findV(raw, 'reasoning');
                             const content = findV(raw, 'content') || findV(raw, 'text') || findV(raw, 'value');
                             const phase = findV(raw, 'phase');
+                            const modelUpdate = findV(raw, 'model');
                             const done = findV(raw, 'done');
 
                             if (phase) currentPhase.value = phase;
+                            if (modelUpdate) activeModel.value = modelUpdate;
+                            
+                            // Heuristic: Extract model name from status text if present
+                            const statusText = findV(raw, 'text') || '';
+                            if (statusText.includes('[Using ') && statusText.includes(']')) {
+                                const match = statusText.match(/\[Using (.*?)\]/);
+                                if (match && match[1]) {
+                                    activeModel.value = match[1].split(':')[0].toUpperCase();
+                                }
+                            }
+
                             if (reasoning) streamingThoughts.value += reasoning;
                             if (content) streamingText.value += content;
                             
@@ -580,7 +593,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
 
                 return { 
                     activeTab, inputMsg, messages, streamingText, streamingThoughts, 
-                    isLoading, currentPhase, outputRef, isDragging,
+                    isLoading, currentPhase, activeModel, outputRef, isDragging,
                     send, renderMarkdown, onDrop, quickAction
                 };
             }
