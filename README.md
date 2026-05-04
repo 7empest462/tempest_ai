@@ -17,14 +17,14 @@ The premium engineering experience. A modern, **Vue 3-powered** dashboard with a
 ### 📟 "Cyber-Orchestrator" TUI (v0.3.0 Update)
 An industrial, high-fidelity terminal dashboard for full-screen autonomous workflows.
 - **📊 Mission Control Pulse**: Boxed, real-time telemetry sparklines for **CPU Load**, **GPU Activity (Metal)**, and **TPS (Token Generation Velocity)**.
-- **⌨️ Fuzzy Command Palette (Ctrl+P)**: A global, searchable hub to hot-swap models, toggle **Safe Mode**, or manage the **Persistent Aesthetic Engine**.
-- **🎨 Persistent Aesthetic Engine**: Real-time hot-swapping between premium syntax themes (**Ocean**, **Mocha**, **Eighties**, **Solarized**) with automatic memory—selection is saved to `config.toml` and restored on boot.
 - **📂 Interactive File Explorer (Ctrl+E)**: A dedicated sidebar for real-time workspace navigation. Select files to instantly inject them into the context window for targeted engineering.
 - **🧠 Advanced Context HUD**: Detailed usage ratios (e.g., `12k / 32k`) with a synchronized progress bar and **Sentinel Fleet** status.
-- **Synchronized Reasoning**: Dynamic ASCII spinners and real-time `<think>` block parsing show exactly what the model is doing.
-- **⚡ Dual-Access Commands**: Choose your preferred high-speed interface:
-  - **Fuzzy Command Palette (`Ctrl+P`)**: The primary "Mission Control" hub. Search and execute any command, theme swap, or model preset with instant fuzzy-matching.
-  - **Traditional Slash Commands**: For classic terminal workflows, all system actions (like `/undo`, `/switch`, and `/clear`) remain fully supported.
+- **🌀 Synchronized Reasoning**: Dynamic ASCII spinners and real-time `<think>` block parsing show exactly what the model is doing.
+- **⌨️ Unified "Mission Control" Palette (Ctrl+P)**: The central hub for high-speed system orchestration. This searchable overlay allows you to hot-swap everything in real-time with fuzzy-matching precision:
+  - **Model Presets**: Switch between MLX and Ollama engines instantly.
+  - **Aesthetic Engine**: Cycle through premium syntax themes (**Ocean**, **Mocha**, **Eighties**, **Solarized**).
+  - **Safety Protocols**: Toggle **Safe Mode** and **Hardcore Sentinel** states on the fly.
+  - **System Commands**: Access all traditional slash commands (like `/undo` and `/clear`) without typing.
 
 ### 🖥️ Standard CLI
 A lightweight, direct command-line interface for rapid tasks, scriptable interactions, and piping workflows.
