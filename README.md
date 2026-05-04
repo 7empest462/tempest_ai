@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.2.0`
+# 🌪️ Tempest AI `v0.3.0` — "Cyber-Orchestrator"
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." Unlike standard chat-wrappers, Tempest is a **Stateful Intelligence** that operates with a hardened "Frontal Lobe" architecture—enforcing programmatic boundaries, real-time situational awareness, and a disciplined Planning/Execution lifecycle.
@@ -8,21 +8,23 @@ Tempest AI is a high-performance, Rust-based autonomous agent designed to be you
 ## 🕹️ Available Interfaces
 Tempest AI is built for versatility, offering three distinct ways to interact:
 
-### 💻 VS Code Sidebar (V0.3.0 "Storming" Update)
+### 💻 VS Code Sidebar
 The premium engineering experience. A modern, **Vue 3-powered** dashboard with a sleek glassmorphism design.
 - **⚡ Smart Toolbar**: Context-aware quick actions—`Fix`, `Explain`, `Refactor`, and `Comment`—that automatically snapshot your active file and cursor position for instant, one-click engineering.
 - **🧠 Hardened Editor Awareness**: Explicit `[EDITOR GROUND TRUTH]` injection ensures the agent prioritizes your active file path and code selection over internal hallucinations.
 - **🌀 Real-Time Feedback Loop**: Watch the "Storm" in motion with a pulsing thought HUD, a blinking streaming cursor, and a dynamic status bar that tracks the agent's phase (**THINKING**, **ANALYZING**, **LOADING**) in real-time.
-- **🍏 Metal-Optimized Streaming**: Optimized for Apple Silicon (M4), ensuring the JSON-RPC bridge remains asynchronous and responsive even during heavy prompt-processing phases.
 
-### 📟 Professional TUI
-An industrial terminal dashboard for full-screen terminal workflows.
-- **Real-Time Hardware Telemetry**: Live tracking of **CPU, RAM, GPU, and Thermals** in the sidebar.
+### 📟 "Cyber-Orchestrator" TUI (v0.3.0 Update)
+An industrial, high-fidelity terminal dashboard for full-screen autonomous workflows.
+- **📊 Mission Control Pulse**: Boxed, real-time telemetry sparklines for **CPU Load**, **GPU Activity (Metal)**, and **TPS (Token Generation Velocity)**.
+- **⌨️ Fuzzy Command Palette (Ctrl+P)**: A global, searchable hub to hot-swap models, toggle **Safe Mode**, or manage the **Persistent Aesthetic Engine**.
+- **🎨 Persistent Aesthetic Engine**: Real-time hot-swapping between premium syntax themes (**Ocean**, **Mocha**, **Eighties**, **Solarized**) with automatic memory—selection is saved to `config.toml` and restored on boot.
+- **🧠 Advanced Context HUD**: Detailed usage ratios (e.g., `12k / 32k`) with a synchronized progress bar and **Sentinel Fleet** status.
 - **Synchronized Reasoning**: Dynamic ASCII spinners and real-time `<think>` block parsing show exactly what the model is doing.
 - **Slash Commands**:
   - `/help` — Show the full command manual.
   - `/undo` — Revert the last file modification.
-  - `/checkpoints` — List the undo history.
+  - `/switch <name>` — Hot-swap the MLX inference engine preset.
   - `/clear` — Wipe the conversation history.
 
 ### 🖥️ Standard CLI
