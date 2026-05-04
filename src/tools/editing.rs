@@ -38,14 +38,31 @@ impl AgentTool for EditFileWithDiffTool {
         }
     }
 
-    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: EditFileWithDiffArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
-        let path = shellexpand::tilde(&typed_args.path).to_string();
-        let new_content = &typed_args.new_content;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
+        let new_content = typed_args.new_content;
+        let path = std::path::PathBuf::from(&path_owned);
 
         // Actually write it
-        fs::write(&path, new_content).into_diagnostic()?;
-        Ok(format!("Successfully applied changes to {}.", path))
+        let content_for_write = new_content.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).into_diagnostic()?;
+            }
+            std::fs::write(&path, &content_for_write).into_diagnostic()?;
+            Ok::<(), miette::Report>(())
+        }).await.map_err(|e| miette::miette!("Task join error: {}", e))??;
+
+        // --- 🖋️ LIVE EDITOR SYNC ---
+        if let Some(tx) = context.tx {
+            let _ = tx.try_send(crate::tui::AgentEvent::EditorEdit { 
+                path: path_owned.clone(), 
+                content: new_content.clone() 
+            });
+        }
+
+        Ok(format!("Successfully applied changes to {}.", path_owned))
     }
 
     async fn get_approval_preview(&self, args: &Value) -> Option<String> {

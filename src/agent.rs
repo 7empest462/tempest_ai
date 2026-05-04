@@ -442,35 +442,21 @@ impl Agent {
     }
 
     pub async fn execute_tool_by_name(&self, name: &str, arguments: &serde_json::Value) -> Result<String> {
-        let tool_entry = self.tools.get(name).ok_or_else(|| miette!("Tool not found: {}", name))?;
-        let tool = tool_entry.value();
-        
-        let ollama = match &*self.backend.read().await {
-            crate::inference::Backend::Ollama(o) => o.clone(),
-            #[cfg(target_os = "macos")]
-            crate::inference::Backend::MLX { .. } => ollama_rs::Ollama::from_url(reqwest::Url::parse("http://127.0.0.1:11434").unwrap()),
-            crate::inference::Backend::Bridge(_) => ollama_rs::Ollama::from_url(reqwest::Url::parse("http://127.0.0.1:11434").unwrap()),
-        };
-
-        let context = crate::tools::ToolContext {
-            ollama,
-            backend: self.backend.clone(),
-            model: self.model.lock().clone(),
-            sub_agent_model: self.sub_agent_model.clone(),
-            history: self.history.clone(),
-            task_context: self.task_context.clone(),
-            vector_brain: self.vector_brain.clone(),
-            telemetry: self.telemetry.clone(),
-            tx: self.event_tx.lock().clone(),
-            tool_rx: self.tool_rx.clone(),
-            recent_tool_calls: self.recent_tool_calls.clone(),
-            brain_path: self.brain_path.clone(),
-            is_root: self.is_root.clone(),
-            all_tools: self.tool_registry.clone(),
-            checkpoint_mgr: self.checkpoint_mgr.clone(),
+        let tool_call = ollama_rs::generation::tools::ToolCall {
+            function: ollama_rs::generation::tools::ToolCallFunction {
+                name: name.to_string(),
+                arguments: arguments.clone(),
+            }
         };
         
-        tool.execute(arguments, context).await
+        // Execute through the unified pipeline to ensure metrics/telemetry/stats are captured
+        let (_, res, success) = self.process_single_tool_call(tool_call, true).await;
+        
+        if success {
+            Ok(res)
+        } else {
+            Err(miette::miette!(res))
+        }
     }
 
     pub fn get_model(&self) -> String {

@@ -325,16 +325,27 @@ impl AgentTool for AppendFileTool {
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let content = typed_args.content;
 
-        // Move blocking file operations to a dedicated thread pool
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path).into_diagnostic()?;
             file.write_all(content.as_bytes()).into_diagnostic()?;
-            Ok(format!("✅ Appended {} bytes to {}", content.len(), path))
-        }).await.map_err(|e| miette!("Task join error: {}", e))?
+            Ok::<String, miette::Report>(format!("✅ Appended {} bytes to {}", content.len(), path))
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+
+        // --- 🖋️ LIVE EDITOR SYNC ---
+        if let Some(tx) = _context.tx {
+            if let Ok(new_full_content) = std::fs::read_to_string(shellexpand::tilde(&typed_args.path).to_string()) {
+                let _ = tx.try_send(crate::tui::AgentEvent::EditorEdit { 
+                    path: shellexpand::tilde(&typed_args.path).to_string(), 
+                    content: new_full_content
+                });
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -387,8 +398,7 @@ impl AgentTool for PatchFileTool {
             return Err(miette!("Invalid line range."));
         }
 
-        // Move blocking file operations to a dedicated thread pool
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let file_content = fs::read_to_string(&path_owned).into_diagnostic()?;
             let lines: Vec<&str> = file_content.lines().collect();
 
@@ -408,9 +418,19 @@ impl AgentTool for PatchFileTool {
             }
 
             let final_content = new_lines.join("\n") + "\n";
-            fs::write(&path_owned, final_content).into_diagnostic()?;
-            Ok(format!("✅ Patched {} from line {} to {}", path_owned, start_line, end_line))
-        }).await.map_err(|e| miette!("Task join error: {}", e))?
+            fs::write(&path_owned, &final_content).into_diagnostic()?;
+            Ok::< (String, String), miette::Report>((final_content, format!("✅ Patched {} from line {} to {}", path_owned, start_line, end_line)))
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+
+        // --- 🖋️ LIVE EDITOR SYNC ---
+        if let Some(tx) = _context.tx {
+            let _ = tx.try_send(crate::tui::AgentEvent::EditorEdit { 
+                path: shellexpand::tilde(&typed_args.file_path).to_string(), 
+                content: result.0
+            });
+        }
+
+        Ok(result.1)
     }
 }
 
@@ -458,8 +478,7 @@ impl AgentTool for FindReplaceTool {
         let is_regex = typed_args.is_regex.unwrap_or(false);
         let file_pattern = typed_args.file_pattern.clone();
 
-        // Move blocking find/replace operations to a dedicated thread pool
-        tokio::task::spawn_blocking(move || {
+        let (report, modified_files) = tokio::task::spawn_blocking(move || {
             let path = std::path::Path::new(&path_owned);
             let mut files_to_process = Vec::new();
 
@@ -495,6 +514,7 @@ impl AgentTool for FindReplaceTool {
             let mut total = 0;
             let mut modified = 0;
             let mut summary = String::new();
+            let mut modified_contents = Vec::new();
 
             for file in &files_to_process {
                 if let Ok(content_str) = fs::read_to_string(file) {
@@ -516,16 +536,26 @@ impl AgentTool for FindReplaceTool {
                             content_str.replace(&find, &replace)
                         } else { continue; }
                     };
-                    fs::write(file, new_content).into_diagnostic()?;
+                    fs::write(file, &new_content).into_diagnostic()?;
+                    modified_contents.push((file.display().to_string(), new_content));
                 }
             }
 
             if total == 0 {
-                Ok(format!("No matches found for '{}'.", find))
+                Ok::< (String, Vec<(String, String)>), miette::Report>((format!("No matches found for '{}'.", find), vec![]))
             } else {
-                Ok(format!("✅ {} replacements in {} files:\n{}", total, modified, summary))
+                Ok((format!("✅ {} replacements in {} files:\n{}", total, modified, summary), modified_contents))
             }
-        }).await.map_err(|e| miette!("Task join error: {}", e))?
+        }).await.map_err(|e| miette!("Task join error: {}", e))??;
+
+        // --- 🖋️ LIVE EDITOR SYNC ---
+        if let Some(tx) = _context.tx {
+            for (path, content) in modified_files {
+                let _ = tx.try_send(crate::tui::AgentEvent::EditorEdit { path, content });
+            }
+        }
+
+        Ok(report)
     }
 }
 #[derive(Deserialize, JsonSchema)]
