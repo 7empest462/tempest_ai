@@ -19,10 +19,6 @@ jobs:
             os-name: macOS-Silicon
             target: aarch64-apple-darwin
             bin: tempest_ai
-          - os: macos-13
-            os-name: macOS-Intel
-            target: x86_64-apple-darwin
-            bin: tempest_ai
           - os: ubuntu-latest
             os-name: Linux-x86_64
             target: x86_64-unknown-linux-gnu
