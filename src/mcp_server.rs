@@ -37,13 +37,10 @@ impl McpServer {
             rx
         });
         
-        let active_id_clone = self.active_chat_id.clone();
         let mut stdout_clone = tokio::io::stdout();
         
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                let current_id = active_id_clone.lock().clone();
-                
                 match event {
                     crate::tui::AgentEvent::SystemUpdate(text) => {
                         let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/status", "params": { "text": text } });
@@ -61,31 +58,19 @@ impl McpServer {
                         }
                     }
                     crate::tui::AgentEvent::StreamToken(token) => {
-                        if let Some(id) = current_id {
-                            let resp = TempestResponse::ChatResponse {
-                                payload: ChatPayload { content: token, reasoning: None, is_streaming: true, done: false }
-                            };
-                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                        }
+                        let resp = ChatPayload { content: token, reasoning: None, is_streaming: true, done: false };
+                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/chat", "params": { "payload": resp } });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
                     }
                     crate::tui::AgentEvent::ReasoningToken(token) => {
-                        if let Some(id) = current_id {
-                            let resp = TempestResponse::ChatResponse {
-                                payload: ChatPayload { content: String::new(), reasoning: Some(token), is_streaming: true, done: false }
-                            };
-                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                        }
+                        let resp = ChatPayload { content: String::new(), reasoning: Some(token), is_streaming: true, done: false };
+                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/chat", "params": { "payload": resp } });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
                     }
                     crate::tui::AgentEvent::SentinelUpdate { log, .. } => {
-                        if let Some(id) = current_id {
-                            let resp = TempestResponse::ChatResponse {
-                                payload: ChatPayload { content: String::new(), reasoning: Some(log), is_streaming: true, done: false }
-                            };
-                            let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": resp });
-                            let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
-                        }
+                        let resp = ChatPayload { content: String::new(), reasoning: Some(log), is_streaming: true, done: false };
+                        let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/chat", "params": { "payload": resp } });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
                     }
                     crate::tui::AgentEvent::EditorEdit { path, content } => {
                         let envelope = json!({ 
@@ -199,7 +184,6 @@ impl McpServer {
                 let message_final = message.to_string();
                 let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let active_chat_id_clone = self.active_chat_id.clone();
-                let id_clone = id.clone();
                 let mut stdout_clone = tokio::io::stdout();
                 
                 // Run the agent asynchronously
@@ -208,11 +192,9 @@ impl McpServer {
                         eprintln!("Agent run error: {}", e);
                     }
                     
-                    // Send final 'done' response so UI re-enables button
-                    let final_resp = TempestResponse::ChatResponse {
-                        payload: ChatPayload { content: String::new(), reasoning: None, is_streaming: false, done: true }
-                    };
-                    let envelope = json!({ "jsonrpc": "2.0", "id": id_clone, "result": final_resp });
+                    // Send final 'done' notification so UI re-enables button
+                    let final_resp = ChatPayload { content: String::new(), reasoning: None, is_streaming: false, done: true };
+                    let envelope = json!({ "jsonrpc": "2.0", "method": "tempest/chat", "params": { "payload": final_resp } });
                     let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
                     let _ = stdout_clone.flush().await;
 

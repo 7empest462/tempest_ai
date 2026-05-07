@@ -3,12 +3,14 @@ use tempest_ai::tools::file::ReadFileTool;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tempest_ai::tools::ToolContext;
+use tempest_ai::tools::{ToolContext, AgentTool};
 use ollama_rs::Ollama;
-use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use parking_lot::Mutex;
 use tempest_ai::vector_brain::VectorBrain;
-use tempest_ai::memory::MemoryStore;
+use tempest_ai::checkpoint::CheckpointManager;
+use tempest_ai::inference::Backend;
+use tokio::sync::RwLock;
 
 fn bench_read_file_tool(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -25,27 +27,29 @@ fn bench_read_file_tool(c: &mut Criterion) {
 
             // Mock context - simplified for benchmarking
             let (tx, _) = mpsc::channel(1);
-            let (_, tool_rx) = mpsc::channel(1);
-            let tool_rx = Arc::new(tokio::sync::Mutex::new(tool_rx));
+            let (_, tool_rx_inner) = mpsc::channel(1);
+            let tool_rx = Arc::new(tokio::sync::Mutex::new(Some(tool_rx_inner)));
 
             let context = ToolContext {
                 ollama: Ollama::default(),
+                backend: Arc::new(RwLock::new(Backend::Ollama(Ollama::default()))),
                 model: "test".to_string(),
                 sub_agent_model: "test".to_string(),
                 history: Arc::new(Mutex::new(vec![])),
-                planning_mode: Arc::new(Mutex::new(false)),
                 task_context: Arc::new(Mutex::new("test".to_string())),
                 vector_brain: Arc::new(Mutex::new(VectorBrain::new())),
                 telemetry: Arc::new(Mutex::new("test".to_string())),
-                tx,
+                tx: Some(tx),
                 tool_rx,
-                recent_tool_calls: Arc::new(Mutex::new(VecDeque::new())),
+                recent_tool_calls: Arc::new(dashmap::DashMap::new()),
                 brain_path: std::path::PathBuf::from("test"),
-                is_root: false,
+                is_root: Arc::new(AtomicBool::new(false)),
+                all_tools: vec![],
+                checkpoint_mgr: Arc::new(Mutex::new(CheckpointManager::new(10))),
             };
 
             let tool = ReadFileTool;
-            let result = tool.execute(&args, context).await;
+            let result = tool.execute(&args, context).await.expect("Tool execution failed during benchmark");
             black_box(result);
         })
     });

@@ -1,28 +1,8 @@
 #![recursion_limit = "1024"]
-mod agent;
-mod crypto;
-mod error;
-mod memory;
-mod tools;
-mod hardware;
+// Modules are now exported via src/lib.rs
 
-mod daemon;
-mod tui;
-mod vector_brain;
-mod skills;
-mod context_manager;
-mod error_classifier;
-mod rules;
-mod sentinel;
-mod inference;
-mod prompts;
-mod checkpoint;
-mod mcp;
-mod mcp_server;
-mod mcp_protocol;
-mod ai_bridge;
 
-use agent::Agent;
+use tempest_ai::agent::Agent;
 use clap::Parser;
 use colored::*;
 // Copyright (c) 2026 Robert Simens. All Rights Reserved.
@@ -95,113 +75,13 @@ struct Cli {
     /// Start as a headless MCP Server (JSON-RPC over stdio) for IDE integration
     #[arg(long)]
     mcp_server: bool,
+
+    /// Use LM Studio (Local OpenAI-compatible API) as the inference backend
+    #[arg(long)]
+    lmstudio: bool,
 }
 
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct MlxPreset {
-    pub repo: Option<String>,
-    pub path: Option<String>,
-    pub quant: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct McpServerConfig {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Option<std::collections::HashMap<String, String>>,
-}
-
-#[allow(dead_code)]
-#[derive(serde::Deserialize, Debug)]
-struct AppConfig {
-    model: Option<String>,
-    history_path: Option<String>,
-    db_path: Option<String>,
-    encrypt_history: Option<bool>,
-    pub sub_agent_model: Option<String>,
-    pub mlx_model: Option<String>,
-    pub mlx_quant: Option<String>,
-    pub paged_attn: Option<bool>,
-    pub planner_model: Option<String>,
-    pub executor_model: Option<String>,
-    pub verifier_model: Option<String>,
-    pub mcp_servers: Option<Vec<McpServerConfig>>,
-    pub mlx_presets: Option<std::collections::HashMap<String, MlxPreset>>,
-    pub temp_planning: Option<f32>,
-    pub temp_execution: Option<f32>,
-    pub top_p_planning: Option<f32>,
-    pub top_p_execution: Option<f32>,
-    pub repeat_penalty_planning: Option<f32>,
-    pub repeat_penalty_execution: Option<f32>,
-    pub ctx_planning: Option<u64>,
-    pub ctx_execution: Option<u64>,
-    pub mlx_temp_planning: Option<f32>,
-    pub mlx_temp_execution: Option<f32>,
-    pub mlx_top_p_planning: Option<f32>,
-    pub mlx_top_p_execution: Option<f32>,
-    pub mlx_repeat_penalty_planning: Option<f32>,
-    pub mlx_repeat_penalty_execution: Option<f32>,
-    pub planning_enabled: Option<bool>,
-    pub tui_theme: Option<String>,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        let mut mlx_presets = std::collections::HashMap::new();
-        mlx_presets.insert("r1".to_string(), MlxPreset {
-            repo: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
-            quant: Some("Q8_0".to_string()),
-            path: None,
-            description: Some("DeepSeek R1 Distill Qwen 7B (GGUF)".to_string()),
-        });
-        mlx_presets.insert("qwen_big".to_string(), MlxPreset {
-            repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
-            quant: Some("Q8_0".to_string()),
-            path: None,
-            description: Some("Qwen 2.5 Coder 7B Instruct (GGUF)".to_string()),
-        });
-        mlx_presets.insert("qwen_small".to_string(), MlxPreset {
-            repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
-            quant: Some("Q4_K_M".to_string()),
-            path: None,
-            description: Some("Qwen 2.5 Coder 7B Instruct (Q4 GGUF)".to_string()),
-        });
-
-        AppConfig {
-            model: Some("qwen2.5-coder:7b".to_string()),
-            history_path: Some("history.json".to_string()),
-            db_path: Some("~/fleet.db".to_string()),
-            encrypt_history: Some(false),
-            sub_agent_model: Some("llama3.2:1b".to_string()),
-            mlx_model: Some("/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string()),
-            mlx_quant: Some("None".to_string()),
-            paged_attn: None,
-            planner_model: Some("deepseek-r1:8b".to_string()),
-            executor_model: Some("qwen2.5-coder:7b".to_string()),
-            verifier_model: Some("deepseek-r1:8b".to_string()),
-            mlx_presets: Some(mlx_presets),
-            temp_planning: Some(0.6),
-            temp_execution: Some(0.25),
-            top_p_planning: Some(0.95),
-            top_p_execution: Some(0.92),
-            repeat_penalty_planning: Some(1.18),
-            repeat_penalty_execution: Some(1.12),
-            ctx_planning: Some(16384),
-            ctx_execution: Some(16384),
-            mlx_temp_planning: Some(0.6),
-            mlx_temp_execution: Some(0.2),
-            mlx_top_p_planning: Some(0.95),
-            mlx_top_p_execution: Some(0.9),
-            mlx_repeat_penalty_planning: Some(1.05),
-            mlx_repeat_penalty_execution: Some(1.02),
-            planning_enabled: Some(true),
-            tui_theme: Some("base16-ocean.dark".to_string()),
-            mcp_servers: None,
-        }
-    }
-}
+use tempest_ai::AppConfig;
 
 fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     let mut paths_to_try: Vec<std::path::PathBuf> = vec![];
@@ -294,12 +174,12 @@ async fn main() -> Result<()> {
         .init();
 
     if cli.install_daemon {
-        crate::daemon::install_daemon();
+        tempest_ai::daemon::install_daemon();
         return Ok(());
     }
 
     if cli.daemon {
-        crate::daemon::run_daemon().await;
+        tempest_ai::daemon::run_daemon().await;
         return Ok(());
     }
 
@@ -318,9 +198,9 @@ async fn main() -> Result<()> {
     };
     let system_prompt = format!(
         "{}\n\nOPERATING SYSTEM: {}\n\n{}",
-        crate::prompts::SYSTEM_PROMPT_BASE,
+        tempest_ai::prompts::SYSTEM_PROMPT_BASE,
         os_name,
-        crate::prompts::SYSTEM_PROMPT_TAIL
+        tempest_ai::prompts::SYSTEM_PROMPT_TAIL
     );
 
     // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
@@ -328,6 +208,10 @@ async fn main() -> Result<()> {
         cli.model.clone()
             .or(config.mlx_model.clone())
             .unwrap_or_else(|| "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string())
+    } else if cli.lmstudio {
+        cli.model.clone()
+            .or(config.lmstudio_model.clone())
+            .unwrap_or_else(|| "Qwen3.5:9B".to_string())
     } else {
         cli.model.clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
@@ -366,7 +250,7 @@ async fn main() -> Result<()> {
         new_key
     };
 
-    let memory_store = Arc::new(Mutex::new(crate::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
+    let memory_store = Arc::new(Mutex::new(tempest_ai::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
     
     if cli.seed_memory {
         println!("{}", "🧠 Injecting Core Agent Routing Instructions into Memory...".cyan());
@@ -421,15 +305,17 @@ async fn main() -> Result<()> {
     let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "llama3.2:1b".to_string());
     
     let mode = if cli.bridge {
-        crate::inference::AgentMode::Bridge
+        tempest_ai::inference::AgentMode::Bridge
+    } else if cli.lmstudio {
+        tempest_ai::inference::AgentMode::LMStudio
     } else {
         #[cfg(target_os = "macos")]
         {
-            if cli.mlx { crate::inference::AgentMode::MLX } else { crate::inference::AgentMode::Ollama }
+            if cli.mlx { tempest_ai::inference::AgentMode::MLX } else { tempest_ai::inference::AgentMode::Ollama }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            crate::inference::AgentMode::Ollama
+            tempest_ai::inference::AgentMode::Ollama
         }
     };
 
@@ -444,6 +330,8 @@ async fn main() -> Result<()> {
         println!("{} {}", "🌪️".cyan(), "TEMPEST AI • ENGINE ONLINE".bold());
         let backend_name = if cli.bridge { 
             "AI Bridge (Unified)".to_string() 
+        } else if cli.lmstudio {
+            format!("LM Studio (Local) • {}", config.lmstudio_url.as_deref().unwrap_or("localhost:1234"))
         } else if cli.mlx { 
             format!("MLX (Native Apple Silicon) • {}", quant) 
         } else { 
@@ -453,6 +341,10 @@ async fn main() -> Result<()> {
         
         if cli.mlx {
             println!("{} {}", "🤖 Unified:".blue(), model);
+        } else if cli.lmstudio {
+            println!("{} {}", "🧠 Planner:".blue(), model);
+            println!("{} {}", "💻 Executor:".blue(), model);
+            println!("{} {}", "🔬 Verifier:".blue(), model);
         } else {
             println!("{} {}", "🧠 Planner:".blue(), config.planner_model.as_deref().unwrap_or(&model));
             println!("{} {}", "💻 Executor:".blue(), config.executor_model.as_deref().unwrap_or(&model));
@@ -498,7 +390,8 @@ async fn main() -> Result<()> {
         config.mlx_repeat_penalty_execution,
         cli.paged_attn || config.paged_attn.unwrap_or(false),
         config.planning_enabled.unwrap_or(true),
-        event_tx,
+        event_tx.clone(),
+        config.lmstudio_url.clone(),
     ).await?;
     
     if let Err(e) = agent.check_connection().await {
@@ -526,7 +419,7 @@ async fn main() -> Result<()> {
     }
 
     if cli.mcp_server {
-        let mut server = crate::mcp_server::McpServer::new(agent, event_rx);
+        let mut server = tempest_ai::mcp_server::McpServer::new(agent, event_rx);
         if let Err(e) = server.run().await {
             eprintln!("MCP Server error: {}", e);
         }
@@ -541,7 +434,7 @@ async fn main() -> Result<()> {
     // Default to TUI mode
     let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(10000);
-    let (tool_tx, tool_rx) = tokio::sync::mpsc::channel::<crate::tui::ToolResponse>(1);
+    let (tool_tx, tool_rx) = tokio::sync::mpsc::channel::<tempest_ai::tui::ToolResponse>(1);
 
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag_agent = stop_flag.clone();
@@ -561,15 +454,18 @@ async fn main() -> Result<()> {
             
             let mut ollama_mem_bytes = 0;
             let mut tempest_mem_bytes = 0;
-            let current_pid = std::process::id();
+            let mut lmstudio_mem_bytes = 0;
 
-            for (pid, process) in sys.processes() {
+            for (_pid, process) in sys.processes() {
                 let name = process.name().to_string_lossy().to_lowercase();
-                if name.contains("ollama") || name.contains("llama") {
-                    ollama_mem_bytes = std::cmp::max(ollama_mem_bytes, process.memory());
-                }
-                if pid.as_u32() == current_pid {
-                    tempest_mem_bytes = process.memory();
+                let exe = process.exe().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
+                
+                if name.contains("tempest_ai") {
+                    tempest_mem_bytes += process.memory();
+                } else if name.contains("ollama") {
+                    ollama_mem_bytes += process.memory();
+                } else if name.contains("lm studio") || name.contains("lmstudio") || exe.contains(".lmstudio") {
+                    lmstudio_mem_bytes += process.memory();
                 }
             }
 
@@ -579,7 +475,7 @@ async fn main() -> Result<()> {
             // In MLX/Native mode, we need to capture the Metal/AGX memory.
             // sysinfo process.memory() often misses private Metal heaps on macOS.
             let ai_ram_mb = match mode {
-                crate::inference::AgentMode::MLX => {
+                tempest_ai::inference::AgentMode::MLX => {
                     let mut vram_mb = 0;
                     #[cfg(target_os = "macos")]
                     {
@@ -598,18 +494,22 @@ async fn main() -> Result<()> {
                     }
                     (tempest_mem_bytes / 1024 / 1024) + vram_mb
                 }
-                crate::inference::AgentMode::Ollama => {
+                tempest_ai::inference::AgentMode::Ollama => {
                     (ollama_mem_bytes + tempest_mem_bytes) / 1024 / 1024
                 }
-                crate::inference::AgentMode::Bridge => {
+                tempest_ai::inference::AgentMode::Bridge => {
                     tempest_mem_bytes / 1024 / 1024 // External or local but not managed here
+                }
+                tempest_ai::inference::AgentMode::LMStudio => {
+                    (lmstudio_mem_bytes + tempest_mem_bytes) / 1024 / 1024
                 }
             };
 
             let engine_label = match mode {
-                crate::inference::AgentMode::MLX => "(Native Engine)",
-                crate::inference::AgentMode::Ollama => "(Ollama)",
-                crate::inference::AgentMode::Bridge => "(Bridge)",
+                tempest_ai::inference::AgentMode::MLX => "(Native Engine)",
+                tempest_ai::inference::AgentMode::Ollama => "(Ollama)",
+                tempest_ai::inference::AgentMode::Bridge => "(Bridge)",
+                tempest_ai::inference::AgentMode::LMStudio => "(LM Studio)",
             };
 
             let gpu_load = {
@@ -619,7 +519,7 @@ async fn main() -> Result<()> {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    crate::hardware::get_linux_gpu_usage()
+                    tempest_ai::hardware::get_linux_gpu_usage()
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 {
@@ -715,11 +615,11 @@ async fn main() -> Result<()> {
             }
             update_str.push_str("\n\n----------------------------------");
             
-            let _ = agent_tx_metrics.send(crate::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
+            let _ = agent_tx_metrics.send(tempest_ai::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
             
             // --- 📊 SPARKLINE DATA EXTRACTION ---
             // Send parsed values for Sparklines (Scaled x100 for ultra-high-resolution u64 representation)
-            let _ = agent_tx_metrics.send(crate::tui::AgentEvent::TelemetryMetrics { 
+            let _ = agent_tx_metrics.send(tempest_ai::tui::AgentEvent::TelemetryMetrics { 
                 cpu: Some((avg_cpu * 100.0) as u64), 
                 gpu: Some(gpu_load as u64 * 100),
                 tps: None 
@@ -739,13 +639,13 @@ async fn main() -> Result<()> {
     let agent_tui = agent.clone();
     tokio::spawn(async move {
         if let Err(e) = agent_tui.run_tui_mode(user_rx, stop_flag_agent).await {
-            let _ = agent_tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
+            let _ = agent_tx.send(tempest_ai::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
         }
     });
 
     let initial_theme = config.tui_theme.clone().unwrap_or_else(|| "base16-ocean.dark".to_string());
 
-    if let Err(e) = crate::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag, initial_theme).await {
+    if let Err(e) = tempest_ai::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag, initial_theme).await {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
     

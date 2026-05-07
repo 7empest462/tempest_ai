@@ -544,6 +544,7 @@ impl Agent {
         paged_attn: bool,
         planning_enabled: bool,
         event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
+        lmstudio_url: Option<String>,
     ) -> Result<Self> {
         // Resolve preset if model name matches a key in mlx_presets
         if mode == AgentMode::MLX {
@@ -560,16 +561,17 @@ impl Agent {
             }
         }
 
-        // --- 🌪️ MLX UNIFICATION GUARD ---
-        // If we are in MLX mode, we override the tiered models to None so they fallback 
-        // to the unified MLX model. This prevents accidental Ollama callouts for 'Planning'.
-        let (p_model, e_model, v_model) = if mode == AgentMode::MLX {
+        // --- 🌪️ BACKEND UNIFICATION GUARD ---
+        // If we are in MLX or LMStudio mode, we override the tiered models to None 
+        // so they fallback to the unified primary model.
+        let (p_model, e_model, v_model) = if mode == AgentMode::MLX || mode == AgentMode::LMStudio {
             (None, None, None)
         } else {
             (planner_model, executor_model, verifier_model)
         };
 
-        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize).await?;
+        let b_url = if mode == AgentMode::LMStudio { lmstudio_url.clone() } else { None };
+        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize, b_url).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
@@ -775,32 +777,51 @@ impl Agent {
     }
 
     pub async fn check_connection(&self) -> Result<()> {
-        if let Ok(ollama) = self.get_ollama().await {
-            // Only enforce the multi-model fleet if we are actually using Ollama.
-            // MLX uses a single loaded model and doesn't require these.
-            let models_result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                ollama.list_local_models()
-            ).await;
+        let backend = self.backend.read().await;
+        match &*backend {
+            crate::inference::Backend::Ollama(_) => {
+                if let Ok(ollama) = self.get_ollama().await {
+                    let models_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        ollama.list_local_models()
+                    ).await;
 
-            let models = match models_result {
-                Ok(Ok(m)) => m,
-                Ok(Err(e)) => return Err(miette!("Ollama API Error: {:?}. Is the service running and responsive?", e)),
-                Err(_) => return Err(miette!("Ollama connection TIMEOUT (10s). The API is not responding. Please check your Ollama app.")),
-            };
+                    let models = match models_result {
+                        Ok(Ok(m)) => m,
+                        Ok(Err(e)) => return Err(miette!("Ollama API Error: {:?}. Is the service running and responsive?", e)),
+                        Err(_) => return Err(miette!("Ollama connection TIMEOUT (10s). The API is not responding. Please check your Ollama app.")),
+                    };
 
-            let model_names: std::collections::HashSet<String> = models.into_iter().map(|m| m.name).collect();
+                    let model_names: std::collections::HashSet<String> = models.into_iter().map(|m| m.name).collect();
 
-            let required = vec![
-                AgentPhase::Planning.default_model(),
-                AgentPhase::Execution.default_model(),
-                AgentPhase::Testing.default_model(),
-            ];
+                    let required = vec![
+                        AgentPhase::Planning.default_model(),
+                        AgentPhase::Execution.default_model(),
+                        AgentPhase::Testing.default_model(),
+                    ];
 
-            for req in required {
-                if !model_names.contains(&req) {
-                    return Err(miette!("Required model '{}' not found in Ollama. Please run: ollama pull {}", req, req));
+                    for req in required {
+                        if !model_names.contains(&req) {
+                            // If we're using a specific unified model override, we might not need the tiered ones
+                            let current_model = self.model.lock().clone();
+                            if model_names.contains(&current_model) {
+                                break; 
+                            }
+                            return Err(miette!("Required model '{}' not found in Ollama. Please run: ollama pull {}", req, req));
+                        }
+                    }
                 }
+            }
+            crate::inference::Backend::Bridge(bridge) => {
+                use ai::chat_completions::ChatCompletionMessage;
+                match bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())]).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(miette!("Bridge connection failed: {}. Ensure your local server (LM Studio/OpenAI) is running and the model '{}' is loaded.", e, self.model.lock())),
+                }?;
+            }
+            #[cfg(target_os = "macos")]
+            crate::inference::Backend::MLX { .. } => {
+                // MLX is local and verified during Backend::new
             }
         }
         Ok(())
@@ -1140,7 +1161,8 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             quant_val,
             self.event_tx.clone(),
             self.paged_attn,
-            self.ctx_execution as usize
+            self.ctx_execution as usize,
+            None
         ).await?;
         
         {
@@ -1304,8 +1326,8 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
 
             // If EITHER the main model or the planner is a reasoning model, use the minimalist prompt
-            let is_reasoning = current_model.contains("r1") || current_model.contains("deepseek") || current_model.contains("deep_seat") ||
-                              planner_model.contains("r1") || planner_model.contains("deepseek") || planner_model.contains("deep_seat");
+            let is_reasoning = current_model.contains("r1") || current_model.contains("deepseek") || current_model.contains("deep-seek") ||
+                              planner_model.contains("r1") || planner_model.contains("deepseek") || planner_model.contains("deep-seek");
 
             if is_reasoning {
                 full_system_prompt.push_str("\n\n[ACTOR PROTOCOL]:\n- You are the ACTOR. Your response MUST start with a `<think>` block.\n- [THOUGHT BOUNDARY]: Your `<think>` block is for internal logic ONLY. Do NOT place tool calls inside thoughts.\n- [TOOL CALL FORMAT]: After `</think>`, explain your action briefly, then output the JSON tool call directly. NEVER use markdown code blocks (```json) for tool calls.\n- [FORMAT]:\n<think>\n[Reasoning]\n</think>\nExplanation text...\n{\"tool\": \"name\", \"arguments\": {}}\n\n- [COLLABORATION]: After performing actions and verifying results, provide a concise summary to the user and ask for the next step in the roadmap.");
@@ -1596,6 +1618,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 crate::inference::AgentMode::MLX => "MLX Engine",
                 crate::inference::AgentMode::Ollama => "Ollama",
                 crate::inference::AgentMode::Bridge => "AI Bridge",
+                crate::inference::AgentMode::LMStudio => "LM Studio",
             };
             let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("📡 Dispatching request to {} ({}) [Waiting for GPU]...", backend_name, model_name))));
         }
@@ -2306,6 +2329,7 @@ mod tests {
             false,
             true,
             Arc::new(Mutex::new(None)),
+            None, // lmstudio_url
         ).await;
         assert!(agent.is_ok());
         let agent = agent.unwrap();

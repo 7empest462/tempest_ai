@@ -2,7 +2,7 @@
     "name": "vscode-tempest",
     "displayName": "Tempest AI",
     "description": "Hardware-Aware Autonomous Engineering Assistant",
-    "version": "0.3.0",
+    "version": "0.3.2",
     "license": "SEE LICENSE IN ROOT",
     "engines": {
         "vscode": "^1.90.0"

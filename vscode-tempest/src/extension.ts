@@ -194,12 +194,17 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private _startTempest() {
-        const binaryPath = '/Volumes/Corsair_Lab/Home/Projects/tempest_ai/target/release/tempest_ai'; 
+        const config = vscode.workspace.getConfiguration('tempest');
+        const binaryPath = config.get<string>('binaryPath') || '/Volumes/Corsair_Lab/Home/Projects/tempest_ai/target/release/tempest_ai';
+        const useMlx = config.get<boolean>('useMlx') !== false; // Default to true if not set
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || '/tmp';
 
-        console.log(`[Host] Spawning Tempest: ${binaryPath} in ${cwd}`);
+        console.log(`[Host] Spawning Tempest: ${binaryPath} (MLX: ${useMlx}) in ${cwd}`);
         
-        this._tempestProcess = spawn(binaryPath, ['--mcp-server', '--mlx'], { cwd });
+        const args = ['--mcp-server'];
+        if (useMlx) args.push('--mlx');
+
+        this._tempestProcess = spawn(binaryPath, args, { cwd });
 
         this._tempestProcess.on('error', (err) => {
             console.error('[Host] Failed to start Tempest process:', err);
@@ -234,8 +239,12 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
             if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
                 try {
                     const json = JSON.parse(trimmed);
-                    const method = json.method || this._pendingRequests.get(json.id);
-                    if (json.id) this._pendingRequests.delete(json.id);
+                    const method = json.method || (json.id ? this._pendingRequests.get(json.id) : undefined);
+                    if (json.id) {
+                        // For streaming, we keep the ID until the backend sends a final result.
+                        // But since we switched to notifications for tokens, we can clear it after the ACK.
+                        this._pendingRequests.delete(json.id);
+                    }
 
                     if (this._view && this._isWebviewReady) {
                         this._view.webview.postMessage({
@@ -265,8 +274,13 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     
                     if (method === 'tempest/status') {
                         statusBarItem.text = `$(tornado) Tempest: ${json.params?.text || 'Ready'}`;
-                    } else if (method === 'tempest/thought') {
+                    } else if (method === 'tempest/thought' || (json.result?.ChatResponse?.payload?.reasoning)) {
                         statusBarItem.text = `$(sync~spin) Tempest: Thinking...`;
+                    } else if (method === 'tempest/edit') {
+                        const params = json.params || json.result?.payload || {};
+                        if (params.path && params.content) {
+                            this._applyEditorEdit(params.path, params.content);
+                        }
                     }
                 } catch (e) {
                     // Not valid JSON, treat as raw log below
@@ -319,6 +333,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
             --tempest-border: var(--vscode-sideBar-border);
             --tempest-glass: var(--vscode-editor-background);
             --tempest-text: var(--vscode-editor-foreground);
+            --vortex-glow: #0088ff;
         }
 
         body {
@@ -380,6 +395,12 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
         .drop-area { flex: 1; margin: 20px; border: 2px dashed #444; border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,0.02); cursor: pointer; }
         .drop-area.drag-over { border-color: var(--tempest-accent); background: rgba(77, 166, 255, 0.05); }
         .drop-icon { font-size: 40px; margin-bottom: 12px; }
+
+        /* Vortex Styles */
+        .vortex-tab { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+        #vortex-canvas { width: 100%; height: 100%; min-height: 300px; display: block; border-radius: 8px; box-shadow: 0 0 20px rgba(0, 136, 255, 0.1); }
+        .vortex-overlay { position: absolute; top: 16px; left: 16px; pointer-events: none; }
+        .vortex-label { font-size: 10px; font-weight: bold; color: var(--vortex-glow); text-transform: uppercase; letter-spacing: 2px; }
     </style>
 </head>
 <body>
@@ -413,6 +434,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     <div class="tabs">
                         <button :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">💬 CHAT</button>
                         <button :class="{ active: activeTab === 'upload' }" @click="activeTab = 'upload'">📤 UPLOAD</button>
+                        <button :class="{ active: activeTab === 'vortex' }" @click="activeTab = 'vortex'">🌀 VORTEX</button>
                     </div>
 
                     <div v-show="activeTab === 'chat'" class="chat-tab">
@@ -469,6 +491,17 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                             <p>or click to select</p>
                         </div>
                     </div>
+
+                    <div v-show="activeTab === 'vortex'" class="vortex-tab">
+                        <div class="vortex-overlay">
+                            <div class="vortex-label">Tempest Vortex Engine</div>
+                            <div style="font-size: 8px; opacity: 0.6;">Local GPU / WebGPU Accelerated</div>
+                        </div>
+                        <canvas id="vortex-canvas"></canvas>
+                        <div v-if="vortexError" style="padding: 20px; text-align: center; color: #ff6666;">
+                            ⚠️ {{ vortexError }}
+                        </div>
+                    </div>
                 </div>
             \`,
             setup() {
@@ -483,6 +516,8 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                 const activeModel = ref('TEMPEST');
                 const outputRef = ref(null);
                 const isDragging = ref(false);
+                const vortexError = ref(null);
+                const isVortexInitialized = ref(false);
 
                 const renderMarkdown = (text) => marked.parse(text);
 
@@ -596,9 +631,25 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     vscode.postMessage({ type: 'webview-ready' });
                 });
 
+                Vue.watch(activeTab, async (newTab) => {
+                    if (newTab === 'vortex' && !isVortexInitialized.value) {
+                        try {
+                            const wasmUri = "${webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'resources', 'wasm', 'tempest_wasm.js'))}";
+                            const { default: init, initialize_dashboard } = await import(wasmUri);
+                            await init();
+                            await initialize_dashboard('vortex-canvas');
+                            isVortexInitialized.value = true;
+                        } catch (e) {
+                            console.error('[Webview] Vortex initialization failed:', e);
+                            vortexError.value = "WebGPU Initialization Failed. Ensure your browser/system supports WebGPU.";
+                        }
+                    }
+                });
+
                 return { 
                     activeTab, inputMsg, messages, streamingText, streamingThoughts, 
                     isLoading, currentPhase, activeModel, outputRef, isDragging,
+                    vortexError,
                     send, renderMarkdown, onDrop, quickAction
                 };
             }

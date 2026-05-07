@@ -914,7 +914,14 @@ pub async fn run_tui(
 
 fn highlight_text(text: &str, syntax_set: &SyntaxSet, theme_set: &ThemeSet, theme_name: &str) -> Vec<Line<'static>> {
     let syntax = syntax_set.find_syntax_by_extension("rs").unwrap(); // Default to Rust
-    let mut h = HighlightLines::new(syntax, &theme_set.themes[theme_name]);
+    
+    // Safely get theme or fallback to prevent panics
+    let theme = theme_set.themes.get(theme_name)
+        .or_else(|| theme_set.themes.get("base16-ocean.dark"))
+        .or_else(|| theme_set.themes.values().next())
+        .expect("No themes available in ThemeSet");
+
+    let mut h = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
 
     for line in LinesWithEndings::from(text) {

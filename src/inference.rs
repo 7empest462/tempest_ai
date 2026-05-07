@@ -34,6 +34,7 @@ pub enum AgentMode {
     Ollama,
     MLX,
     Bridge,
+    LMStudio,
 }
 
 #[derive(Clone)]
@@ -74,9 +75,10 @@ impl Backend {
             Backend::Ollama(_) => AgentMode::Ollama,
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => AgentMode::MLX,
-            Backend::Bridge(_) => AgentMode::Bridge,
+            Backend::Bridge(_) => AgentMode::Bridge, // Note: LMStudio also maps to Bridge internally for now
         }
     }
+
 
     #[allow(dead_code)]
     pub fn supports_tools(&self) -> bool {
@@ -84,11 +86,19 @@ impl Backend {
             Backend::Ollama(_) => true,
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => true,
-            Backend::Bridge(_) => false,
+            Backend::Bridge(_) => true, // We handle raw text tool parsing for Bridge
         }
     }
 
-    pub async fn new(mode: AgentMode, model: String, quant: String, event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, paged_attn: bool, ctx_limit: usize) -> Result<(Self, String)> {
+    pub async fn new(
+        mode: AgentMode, 
+        model: String, 
+        quant: String, 
+        event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, 
+        paged_attn: bool, 
+        ctx_limit: usize,
+        base_url: Option<String>
+    ) -> Result<(Self, String)> {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = quant;
@@ -190,8 +200,18 @@ impl Backend {
                 }
             }
             AgentMode::Bridge => {
+                let url = base_url.unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
                 let provider = crate::ai_bridge::ModelProvider::Ollama { 
-                    base_url: "http://127.0.0.1:11434".to_string() 
+                    base_url: url 
+                };
+                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
+                Ok((Backend::Bridge(bridge), model))
+            }
+            AgentMode::LMStudio => {
+                let url = base_url.unwrap_or_else(|| "http://127.0.0.1:1234/v1".to_string());
+                let provider = crate::ai_bridge::ModelProvider::OpenAI { 
+                    api_key: "lm-studio".to_string(),
+                    base_url: Some(url)
                 };
                 let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
                 Ok((Backend::Bridge(bridge), model))
@@ -234,28 +254,122 @@ impl Backend {
                     }
                 }).collect();
 
+                let model_lower = model.to_lowercase();
+                let is_reasoning = model_lower.contains("r1") || model_lower.contains("deepseek") || model_lower.contains("deep-seek");
+                
+                let tx_opt = event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
+                }
+
                 let mut stream = bridge.stream_chat(ai_messages).await?;
+                
+                let tx_opt = event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(AgentEvent::SubagentStatus(Some("⚡ Bridge: Connection established, waiting for tokens...".to_string()))).await;
+                }
+
+                let mut is_thinking = is_reasoning;
+                let in_thought_block = is_reasoning;
+                let mut tag_residue = String::new();
+                let mut first_token = true;
+                let mut token_count = 0;
+                let start_time = std::time::Instant::now();
+
                 while let Some(chunk_res) = stream.next().await {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     let chunk = chunk_res.map_err(|e| miette!("Bridge Stream Error: {}", e))?;
+                    
                     if let Some(choice) = chunk.choices.first() {
-                        if let Some(ref token) = choice.delta.content {
-                            full_content.push_str(token);
-                            if let Some(tx) = event_tx.lock().clone() {
-                                let _ = tx.try_send(AgentEvent::StreamToken(token.clone()));
+                        if let Some(token) = choice.delta.content.clone() {
+                            token_count += 1;
+                            
+                            // Broadcast TPS pulse
+                            let elapsed = start_time.elapsed().as_secs_f32();
+                            if elapsed > 0.1 {
+                                let tps = token_count as f32 / elapsed;
+                                let tx_opt = event_tx.lock().clone();
+                                if let Some(tx) = tx_opt {
+                                    let _ = tx.try_send(AgentEvent::TelemetryMetrics { 
+                                        cpu: None, gpu: None, tps: Some(tps as u64) 
+                                    });
+                                }
+                            }
+
+                            if first_token {
+                                first_token = false;
+                                let tx_opt = event_tx.lock().clone();
+                                if let Some(tx) = tx_opt {
+                                    let _ = tx.send(AgentEvent::Thinking(None)).await;
+                                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🌊 Stream Active: Receiving tokens...".to_string()))).await;
+                                }
+                            }
+                            let mut text = tag_residue.clone();
+                            text.push_str(&token);
+                            tag_residue.clear();
+
+                            let mut current_pos = 0;
+                            
+                            while current_pos < text.len() {
+                                if !is_thinking && !in_thought_block {
+                                    if let Some(start_idx) = text[current_pos..].find("<think>") {
+                                        let before = &text[current_pos..current_pos + start_idx];
+                                        if !before.trim().is_empty() {
+                                            full_content.push_str(before);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                            }
+                                        }
+                                        is_thinking = true;
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                        }
+                                        current_pos += start_idx + 7;
+                                        continue;
+                                    }
+                                }
+
+                                if is_thinking {
+                                    if let Some(end_idx) = text[current_pos..].find("</think>") {
+                                        let reasoning = &text[current_pos..current_pos + end_idx];
+                                        reasoning_content.push_str(reasoning);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                        }
+                                        is_thinking = false;
+                                        current_pos += end_idx + 8;
+                                        continue;
+                                    } else {
+                                        let remaining = &text[current_pos..];
+                                        reasoning_content.push_str(remaining);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                        }
+                                        break;
+                                    }
+                                } else {
+                                    let remaining = &text[current_pos..];
+                                    full_content.push_str(remaining);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::StreamToken(remaining.to_string()));
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
             Backend::Ollama(ollama) => {
-                let is_r1 = model.to_lowercase().contains("r1") || model.to_lowercase().contains("deepseek");
-                let tx = event_tx.lock().clone();
-                if let Some(tx) = tx {
+                let model_lower = model.to_lowercase();
+                let is_reasoning = model_lower.contains("r1") || model_lower.contains("deepseek") || model_lower.contains("deep-seek");
+                
+                let tx_opt = event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
                 }
 
-                let mut stream = if is_r1 {
+                let mut stream = if is_reasoning {
                     // --- 🧠 DEEPSEEK-R1 MANUAL TEMPLATE (OLLAMA) ---
                     let raw_prompt = build_deepseek_r1_prompt(&history);
                     let request = ollama_rs::generation::completion::request::GenerationRequest::new(model, raw_prompt)
@@ -276,7 +390,7 @@ impl Backend {
                     
                     // Wrap the generation stream to match the chat stream interface
                     Box::pin(s.map(|res| {
-                        let chunks = res.map_err(|_| ())?;
+                        let chunks: Vec<ollama_rs::generation::completion::GenerationResponse> = res.map_err(|_| ())?;
                         let chunk = chunks.first().ok_or(())?;
                         Ok(ollama_rs::generation::chat::ChatMessageResponse {
                             model: "".to_string(),
@@ -296,16 +410,27 @@ impl Backend {
                 } else {
                     let mut request = ChatMessageRequest::new(model, history).options(options);
                     if let Some(registry) = tool_registry {
-                        request = request.tools(registry);
+                        // DeepSeek R1/V3 on Ollama does not support native tools and throws 400
+                        if !is_reasoning {
+                            request = request.tools(registry);
+                        }
                     }
 
                     let mut s = None;
-                    for _ in 1..=3 {
-                        if let Ok(res) = ollama.send_chat_messages_stream(request.clone()).await {
-                            s = Some(res);
-                            break;
+                    for _attempt in 1..=3 {
+                        match ollama.send_chat_messages_stream(request.clone()).await {
+                            Ok(res) => {
+                                s = Some(res);
+                                break;
+                            }
+                            Err(e) => {
+                                let tx_opt = event_tx.lock().clone();
+                                if let Some(tx) = tx_opt {
+                                    let _ = tx.send(AgentEvent::SystemUpdate(format!("⚠️ Ollama Error: {}. Retrying (attempt {}/3)...", e, _attempt))).await;
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                            }
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                     let s = s.ok_or_else(|| miette!("Ollama chat stream failed"))?;
                     Box::pin(s.map(|res| res.map_err(|_| ()))) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, ()>> + Send>>
@@ -425,6 +550,19 @@ impl Backend {
                                     current_pos += end_idx;
                                     continue;
                                 }
+                            }
+                        }
+
+                        // --- 🛡️ DEFAULT CASE: Normal Content ---
+                        if !is_thinking && !in_thought_block {
+                            let remaining = &text[current_pos..];
+                            if !remaining.is_empty() {
+                                full_content.push_str(remaining);
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::StreamToken(remaining.to_string()));
+                                }
+                                current_pos = text.len();
+                                received_any_token = true;
                             }
                         }
 

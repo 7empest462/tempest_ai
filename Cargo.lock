@@ -2023,6 +2023,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -2035,6 +2036,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -9947,9 +9949,9 @@ dependencies = [
 
 [[package]]
 name = "tempest-monitor"
-version = "0.3.7"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83515ca7ad23e75dc76a1d581d8acdefc8734cdffe3aa4e67b7894272e6a6a61"
+checksum = "89a7fc8a074cdb0efc01b84d25bff39970b9c6fb28af54ce8ab26a9eca9a38b3"
 dependencies = [
  "battery",
  "chrono",
@@ -9984,7 +9986,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_ai"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "ai",
