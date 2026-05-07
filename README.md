@@ -3,6 +3,7 @@
 ![License](https://img.shields.io/badge/license-Source--Available-blue?style=flat-square)
 ![GitHub Stars](https://img.shields.io/github/stars/7empest462/tempest_ai?style=flat-square&color=yellow)
 ![Rust Version](https://img.shields.io/badge/rust-1.95.0-orange?style=flat-square&logo=rust)
+![TypeScript](https://img.shields.io/badge/typescript-%23007ACC.svg?style=flat-square&logo=typescript&logoColor=white)
 ![Engine](https://img.shields.io/badge/backend-MLX%20%7C%20Ollama%20%7C%20LMStudio%20%7C%20Bridge-blueviolet?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WASM-lightgrey?style=flat-square)
 
