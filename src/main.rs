@@ -25,7 +25,7 @@ use std::sync::Arc;
     name = "tempest_ai", 
     version, 
     about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.", 
-    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.1 Operational Manual, launch the TUI and type '/help'."
+    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.2 Operational Manual, launch the TUI and type '/help'."
 )]
 struct Cli {
     /// Ollama model to use (overrides config and OLLAMA_MODEL env var)
@@ -287,7 +287,7 @@ async fn main() -> Result<()> {
             ),
             (
                 "tempest_identity",
-                "CORE INSTRUCTION (Identity): Your name is Tempest AI. You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.2` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
                 vec!["identity", "branding", "instructions", "architecture"]
             )
         ];
@@ -476,7 +476,11 @@ async fn main() -> Result<()> {
             // sysinfo process.memory() often misses private Metal heaps on macOS.
             let ai_ram_mb = match mode {
                 tempest_ai::inference::AgentMode::MLX => {
+                    #[cfg(target_os = "macos")]
                     let mut vram_mb = 0;
+                    #[cfg(not(target_os = "macos"))]
+                    let vram_mb = 0;
+
                     #[cfg(target_os = "macos")]
                     {
                         // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.

@@ -1056,7 +1056,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let mut content = vec![
             Line::from(vec![
                 Span::styled("🌪️  TEMPEST AI ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled("v0.3.1 \"Cyber-Orchestrator\"", Style::default().fg(Color::DarkGray)),
+                Span::styled("v0.3.2 \"Cyber-Orchestrator\"", Style::default().fg(Color::DarkGray)),
             ]),
             Line::from(""),
             Line::from(vec![
