@@ -64,9 +64,11 @@ jobs:
       - name: Install Dependencies (macOS)
         if: contains(matrix.platform.os, 'macos')
         run: |
-          brew install pkg-config openssl fontconfig freetype
+          brew install pkg-config openssl fontconfig freetype llvm cmake
 
       - name: Build Release
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: cargo build --release --target ${{ matrix.platform.target }}
 
       - name: Prepare Binary
