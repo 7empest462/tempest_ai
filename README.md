@@ -1,6 +1,6 @@
 # 🌪️ Tempest AI `v0.3.2` — "Cyber-Orchestrator"
 
-![GitHub License](https://img.shields.io/github/license/7empest462/tempest_ai?color=cyan&style=flat-square)
+![License](https://img.shields.io/badge/license-Source--Available-blue?style=flat-square)
 ![GitHub Stars](https://img.shields.io/github/stars/7empest462/tempest_ai?style=flat-square&color=yellow)
 ![Rust Version](https://img.shields.io/badge/rust-1.95.0-orange?style=flat-square&logo=rust)
 ![Engine](https://img.shields.io/badge/backend-MLX%20%7C%20Ollama%20%7C%20LMStudio%20%7C%20Bridge-blueviolet?style=flat-square)
