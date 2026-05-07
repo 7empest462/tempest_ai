@@ -1,5 +1,7 @@
 # 🌪️ Tempest AI `v0.3.2` — "Cyber-Orchestrator"
 
+[![Download Latest Release](https://img.shields.io/badge/Download-Latest%20Release-blue?style=for-the-badge&logo=github)](https://github.com/7empest462/tempest_ai/releases/latest)
+
 ![License](https://img.shields.io/badge/license-Source--Available-blue?style=flat-square)
 ![GitHub Stars](https://img.shields.io/github/stars/7empest462/tempest_ai?style=flat-square&color=yellow)
 ![Rust Version](https://img.shields.io/badge/rust-1.95.0-orange?style=flat-square&logo=rust)
@@ -75,6 +77,9 @@ cargo build --release
 
 # Start the v0.3.2 TUI (Premium: MLX Apple Silicon Engine)
 ./target/release/tempest_ai --mlx
+
+# Start the v0.3.2 TUI (Local: LM Studio Engine)
+./target/release/tempest_ai --lmstudio
 
 # Start the Standard CLI
 ./target/release/tempest_ai --cli
