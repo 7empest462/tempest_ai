@@ -1,4 +1,11 @@
-# 🌪️ Tempest AI `v0.3.2` — "Cyber-Library"
+# 🌪️ Tempest AI `v0.3.2` — "Cyber-Orchestrator"
+
+![GitHub License](https://img.shields.io/github/license/7empest462/tempest_ai?color=cyan&style=flat-square)
+![GitHub Stars](https://img.shields.io/github/stars/7empest462/tempest_ai?style=flat-square&color=yellow)
+![Rust Version](https://img.shields.io/badge/rust-1.95.0-orange?style=flat-square&logo=rust)
+![Engine](https://img.shields.io/badge/backend-MLX%20%7C%20Ollama%20%7C%20LMStudio%20%7C%20Bridge-blueviolet?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WASM-lightgrey?style=flat-square)
+
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.2 release, Tempest evolves into a **Library/Binary Hybrid Architecture**, separating its core "Frontal Lobe" reasoning from the interface layer to deliver unparalleled stability and multi-platform consistency.
