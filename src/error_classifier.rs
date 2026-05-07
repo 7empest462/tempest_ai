@@ -17,6 +17,7 @@ pub fn classify_error(_tool_name: &str, error_msg: &str) -> ErrorClass {
        msg.contains("timeout") || 
        msg.contains("connection refused") || 
        msg.contains("reset by peer") ||
+       msg.contains("error 400") || // Bad Request
        msg.contains("error 429") || // Too Many Requests
        msg.contains("error 500") || // Internal Server Error
        msg.contains("error 503") || // Service Unavailable
