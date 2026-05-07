@@ -37,6 +37,35 @@ jobs:
         with:
           targets: ${{ matrix.platform.target }}
 
+      - name: Install Dependencies (Linux)
+        if: matrix.platform.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            pkg-config \
+            libssl-dev \
+            libpcap-dev \
+            libfreetype6-dev \
+            libdbus-1-dev \
+            zlib1g-dev \
+            libexpat1-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxfixes-dev \
+            libgl1-mesa-dev \
+            libglvnd-dev \
+            libclang-dev \
+            cmake
+
+      - name: Install Dependencies (macOS)
+        if: contains(matrix.platform.os, 'macos')
+        run: |
+          brew install pkg-config openssl fontconfig freetype
+
       - name: Build Release
         run: cargo build --release --target ${{ matrix.platform.target }}
 
