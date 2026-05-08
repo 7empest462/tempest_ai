@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
     } else if cli.lmstudio {
         cli.model.clone()
             .or(config.lmstudio_model.clone())
-            .unwrap_or_else(|| "Qwen3.5:9B".to_string())
+            .unwrap_or_else(|| "LM Studio (External Inference)".to_string())
     } else {
         cli.model.clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())

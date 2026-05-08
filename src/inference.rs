@@ -309,7 +309,6 @@ impl Backend {
                             tag_residue.clear();
 
                             let mut current_pos = 0;
-                            
                             while current_pos < text.len() {
                                 if !is_thinking && !in_thought_block {
                                     if let Some(start_idx) = text[current_pos..].find("<think>") {
@@ -326,6 +325,20 @@ impl Backend {
                                         }
                                         current_pos += start_idx + 7;
                                         continue;
+                                    } else if let Some(last_lt) = text[current_pos..].rfind('<') {
+                                        // Potential partial start tag
+                                        let pot_tag = &text[current_pos + last_lt..];
+                                        if "<think>".starts_with(pot_tag) {
+                                            tag_residue = pot_tag.to_string();
+                                            let before = &text[current_pos..current_pos + last_lt];
+                                            if !before.is_empty() {
+                                                full_content.push_str(before);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                                }
+                                            }
+                                            break;
+                                        }
                                     }
                                 }
 
@@ -339,14 +352,28 @@ impl Backend {
                                         is_thinking = false;
                                         current_pos += end_idx + 8;
                                         continue;
-                                    } else {
-                                        let remaining = &text[current_pos..];
-                                        reasoning_content.push_str(remaining);
-                                        if let Some(tx) = event_tx.lock().clone() {
-                                            let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                    } else if let Some(last_lt) = text[current_pos..].rfind('<') {
+                                        // Potential partial end tag
+                                        let pot_tag = &text[current_pos + last_lt..];
+                                        if "</think>".starts_with(pot_tag) {
+                                            tag_residue = pot_tag.to_string();
+                                            let before = &text[current_pos..current_pos + last_lt];
+                                            if !before.is_empty() {
+                                                reasoning_content.push_str(before);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(before.to_string()));
+                                                }
+                                            }
+                                            break;
                                         }
-                                        break;
                                     }
+                                    
+                                    let remaining = &text[current_pos..];
+                                    reasoning_content.push_str(remaining);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                    }
+                                    break;
                                 } else {
                                     let remaining = &text[current_pos..];
                                     full_content.push_str(remaining);
