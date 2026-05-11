@@ -79,6 +79,14 @@ struct Cli {
     /// Use LM Studio (Local OpenAI-compatible API) as the inference backend
     #[arg(long)]
     lmstudio: bool,
+
+    /// Start the Tempest Nexus Web Server (WebSocket API)
+    #[arg(long)]
+    web: bool,
+
+    /// Port for the Tempest Nexus Web Server (Default: 8080)
+    #[arg(short, long, default_value_t = 8080)]
+    port: u16,
 }
 
 use tempest_ai::AppConfig;
@@ -380,8 +388,8 @@ async fn main() -> Result<()> {
         config.top_p_execution.unwrap_or(0.92),
         config.repeat_penalty_planning.unwrap_or(1.18),
         config.repeat_penalty_execution.unwrap_or(1.12),
-        config.ctx_planning.unwrap_or(32768),
-        config.ctx_execution.unwrap_or(65536),
+        config.ctx_planning.unwrap_or(12288),
+        config.ctx_execution.unwrap_or(32768),
         config.mlx_temp_planning,
         config.mlx_temp_execution,
         config.mlx_top_p_planning,
@@ -418,7 +426,19 @@ async fn main() -> Result<()> {
         println!("{} Launching TUI...", "🚀".green());
     }
 
+    if cli.web {
+        println!("{} Launching Tempest Nexus...", "🌐".green());
+        tempest_ai::nexus::run_nexus(agent, cli.port).await;
+        return Ok(());
+    }
+
     if cli.mcp_server {
+        if let Some(tx) = event_tx.lock().clone() {
+            let collector = tempest_ai::telemetry::TelemetryCollector::new(tx);
+            tokio::spawn(async move {
+                collector.run().await;
+            });
+        }
         let mut server = tempest_ai::mcp_server::McpServer::new(agent, event_rx);
         if let Err(e) = server.run().await {
             eprintln!("MCP Server error: {}", e);
@@ -626,6 +646,7 @@ async fn main() -> Result<()> {
             let _ = agent_tx_metrics.send(tempest_ai::tui::AgentEvent::TelemetryMetrics { 
                 cpu: Some((avg_cpu * 100.0) as u64), 
                 gpu: Some(gpu_load as u64 * 100),
+                ram: None,
                 tps: None 
             }).await;
 
@@ -643,7 +664,7 @@ async fn main() -> Result<()> {
     let agent_tui = agent.clone();
     tokio::spawn(async move {
         if let Err(e) = agent_tui.run_tui_mode(user_rx, stop_flag_agent).await {
-            let _ = agent_tx.send(tempest_ai::tui::AgentEvent::SystemUpdate(format!("Agent crashed: {}", e))).await;
+            let _ = agent_tx.send(tempest_ai::tui::AgentEvent::AgentError(format!("Agent crashed: {}", e))).await;
         }
     });
 

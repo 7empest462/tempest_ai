@@ -262,7 +262,7 @@ impl Backend {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
                 }
 
-                let mut stream = bridge.stream_chat(ai_messages).await?;
+                let mut stream = bridge.stream_chat(ai_messages, tool_registry.clone()).await?;
                 
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -276,114 +276,157 @@ impl Backend {
                 let mut token_count = 0;
                 let start_time = std::time::Instant::now();
 
+                let mut tool_arguments_deltas: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
                 while let Some(chunk_res) = stream.next().await {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     let chunk = chunk_res.map_err(|e| miette!("Bridge Stream Error: {}", e))?;
                     
-                    if let Some(choice) = chunk.choices.first() {
-                        if let Some(token) = choice.delta.content.clone() {
-                            token_count += 1;
+                    // Convert to Value for flexible parsing because the 'ai' crate types are rigid
+                    let chunk_val = serde_json::to_value(&chunk).unwrap_or_default();
+
+                    if let Some(choices) = chunk_val.get("choices").and_then(|c| c.as_array()) {
+                        if let Some(choice) = choices.first() {
+                            let delta = choice.get("delta").cloned().unwrap_or_default();
                             
-                            // Broadcast TPS pulse
-                            let elapsed = start_time.elapsed().as_secs_f32();
-                            if elapsed > 0.1 {
-                                let tps = token_count as f32 / elapsed;
-                                let tx_opt = event_tx.lock().clone();
-                                if let Some(tx) = tx_opt {
-                                    let _ = tx.try_send(AgentEvent::TelemetryMetrics { 
-                                        cpu: None, gpu: None, tps: Some(tps as u64) 
-                                    });
+                            if let Some(token) = delta.get("content").and_then(|c| c.as_str()) {
+                                token_count += 1;
+                                
+                                // Broadcast TPS pulse
+                                let elapsed = start_time.elapsed().as_secs_f32();
+                                if elapsed > 0.1 {
+                                    let tps = token_count as f32 / elapsed;
+                                    let tx_opt = event_tx.lock().clone();
+                                    if let Some(tx) = tx_opt {
+                                        let _ = tx.try_send(AgentEvent::TelemetryMetrics { 
+                                            cpu: None, gpu: None, ram: None, tps: Some(tps as u64) 
+                                        });
+                                    }
                                 }
-                            }
 
-                            if first_token {
-                                first_token = false;
-                                let tx_opt = event_tx.lock().clone();
-                                if let Some(tx) = tx_opt {
-                                    let _ = tx.send(AgentEvent::Thinking(None)).await;
-                                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🌊 Stream Active: Receiving tokens...".to_string()))).await;
+                                if first_token {
+                                    first_token = false;
+                                    let tx_opt = event_tx.lock().clone();
+                                    if let Some(tx) = tx_opt {
+                                        let _ = tx.send(AgentEvent::Thinking(None)).await;
+                                        let _ = tx.send(AgentEvent::SubagentStatus(Some("🌊 Stream Active: Receiving tokens...".to_string()))).await;
+                                    }
                                 }
-                            }
-                            let mut text = tag_residue.clone();
-                            text.push_str(&token);
-                            tag_residue.clear();
+                                let mut text = tag_residue.clone();
+                                text.push_str(token);
+                                tag_residue.clear();
 
-                            let mut current_pos = 0;
-                            while current_pos < text.len() {
-                                if !is_thinking && !in_thought_block {
-                                    if let Some(start_idx) = text[current_pos..].find("<think>") {
-                                        let before = &text[current_pos..current_pos + start_idx];
-                                        if !before.trim().is_empty() {
-                                            full_content.push_str(before);
-                                            if let Some(tx) = event_tx.lock().clone() {
-                                                let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
-                                            }
-                                        }
-                                        is_thinking = true;
-                                        if let Some(tx) = event_tx.lock().clone() {
-                                            let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
-                                        }
-                                        current_pos += start_idx + 7;
-                                        continue;
-                                    } else if let Some(last_lt) = text[current_pos..].rfind('<') {
-                                        // Potential partial start tag
-                                        let pot_tag = &text[current_pos + last_lt..];
-                                        if "<think>".starts_with(pot_tag) {
-                                            tag_residue = pot_tag.to_string();
-                                            let before = &text[current_pos..current_pos + last_lt];
-                                            if !before.is_empty() {
+                                let mut current_pos = 0;
+                                while current_pos < text.len() {
+                                    if !is_thinking && !in_thought_block {
+                                        if let Some(start_idx) = text[current_pos..].find("<think>") {
+                                            let before = &text[current_pos..current_pos + start_idx];
+                                            if !before.trim().is_empty() {
                                                 full_content.push_str(before);
                                                 if let Some(tx) = event_tx.lock().clone() {
                                                     let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
                                                 }
                                             }
-                                            break;
+                                            is_thinking = true;
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken("".to_string()));
+                                            }
+                                            current_pos += start_idx + 7;
+                                            continue;
+                                        } else if let Some(last_lt) = text[current_pos..].rfind('<') {
+                                            // Potential partial start tag
+                                            let pot_tag = &text[current_pos + last_lt..];
+                                            if "<think>".starts_with(pot_tag) {
+                                                tag_residue = pot_tag.to_string();
+                                                let before = &text[current_pos..current_pos + last_lt];
+                                                if !before.is_empty() {
+                                                    full_content.push_str(before);
+                                                    if let Some(tx) = event_tx.lock().clone() {
+                                                        let _ = tx.try_send(AgentEvent::StreamToken(before.to_string()));
+                                                    }
+                                                }
+                                                break;
+                                            }
                                         }
+                                    }
+
+                                    if is_thinking {
+                                        if let Some(end_idx) = text[current_pos..].find("</think>") {
+                                            let reasoning = &text[current_pos..current_pos + end_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            is_thinking = false;
+                                            current_pos += end_idx + 8;
+                                            continue;
+                                        } else if let Some(last_lt) = text[current_pos..].rfind('<') {
+                                            // Potential partial end tag
+                                            let pot_tag = &text[current_pos + last_lt..];
+                                            if "</think>".starts_with(pot_tag) {
+                                                tag_residue = pot_tag.to_string();
+                                                let before = &text[current_pos..current_pos + last_lt];
+                                                if !before.is_empty() {
+                                                    reasoning_content.push_str(before);
+                                                    if let Some(tx) = event_tx.lock().clone() {
+                                                        let _ = tx.try_send(AgentEvent::ReasoningToken(before.to_string()));
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        
+                                        let remaining = &text[current_pos..];
+                                        reasoning_content.push_str(remaining);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
+                                        }
+                                        break;
+                                    } else {
+                                        let remaining = &text[current_pos..];
+                                        full_content.push_str(remaining);
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::StreamToken(remaining.to_string()));
+                                        }
+                                        break;
                                     }
                                 }
+                            }
 
-                                if is_thinking {
-                                    if let Some(end_idx) = text[current_pos..].find("</think>") {
-                                        let reasoning = &text[current_pos..current_pos + end_idx];
-                                        reasoning_content.push_str(reasoning);
-                                        if let Some(tx) = event_tx.lock().clone() {
-                                            let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
-                                        }
-                                        is_thinking = false;
-                                        current_pos += end_idx + 8;
-                                        continue;
-                                    } else if let Some(last_lt) = text[current_pos..].rfind('<') {
-                                        // Potential partial end tag
-                                        let pot_tag = &text[current_pos + last_lt..];
-                                        if "</think>".starts_with(pot_tag) {
-                                            tag_residue = pot_tag.to_string();
-                                            let before = &text[current_pos..current_pos + last_lt];
-                                            if !before.is_empty() {
-                                                reasoning_content.push_str(before);
-                                                if let Some(tx) = event_tx.lock().clone() {
-                                                    let _ = tx.try_send(AgentEvent::ReasoningToken(before.to_string()));
-                                                }
+                            if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                for tc in tool_calls {
+                                    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                    while native_tool_calls.len() <= idx {
+                                        native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                            function: ollama_rs::generation::tools::ToolCallFunction {
+                                                name: String::new(),
+                                                arguments: serde_json::Value::Object(serde_json::Map::new()),
+                                            },
+                                        });
+                                    }
+
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                            if !name.is_empty() {
+                                                native_tool_calls[idx].function.name = name.to_string();
                                             }
-                                            break;
+                                        }
+
+                                        if let Some(args_delta) = func.get("arguments").and_then(|a| a.as_str()) {
+                                            let entry = tool_arguments_deltas.entry(idx).or_default();
+                                            entry.push_str(args_delta);
                                         }
                                     }
-                                    
-                                    let remaining = &text[current_pos..];
-                                    reasoning_content.push_str(remaining);
-                                    if let Some(tx) = event_tx.lock().clone() {
-                                        let _ = tx.try_send(AgentEvent::ReasoningToken(remaining.to_string()));
-                                    }
-                                    break;
-                                } else {
-                                    let remaining = &text[current_pos..];
-                                    full_content.push_str(remaining);
-                                    if let Some(tx) = event_tx.lock().clone() {
-                                        let _ = tx.try_send(AgentEvent::StreamToken(remaining.to_string()));
-                                    }
-                                    break;
                                 }
                             }
                         }
+                    }
+                }
+
+                // Finalize tool call arguments
+                for (idx, args_str) in tool_arguments_deltas {
+                    if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
+                        native_tool_calls[idx].function.arguments = args_val;
                     }
                 }
             }
@@ -478,7 +521,7 @@ impl Backend {
                     if elapsed > 0.1 {
                         let tps = (token_count as f64 / elapsed) as u64;
                         if let Some(tx) = event_tx.lock().clone() {
-                            let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, tps: Some(tps) });
+                            let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, ram: None, tps: Some(tps) });
                         }
                     }
 
@@ -924,7 +967,7 @@ impl Backend {
                     if elapsed > 0.1 {
                         let tps = (token_count as f64 / elapsed) as u64;
                         if let Some(tx) = event_tx.lock().clone() {
-                            let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, tps: Some(tps) });
+                            let _ = tx.try_send(AgentEvent::TelemetryMetrics { cpu: None, gpu: None, ram: None, tps: Some(tps) });
                         }
                     }
 

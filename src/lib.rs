@@ -17,8 +17,11 @@ pub mod prompts;
 pub mod checkpoint;
 pub mod mcp;
 pub mod mcp_server;
+pub mod nexus;
+pub mod telemetry;
 pub mod mcp_protocol;
 pub mod ai_bridge;
+pub mod test_types;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,7 +108,7 @@ impl Default for AppConfig {
             sub_agent_model: Some("llama3.2:1b".to_string()),
             mlx_model: Some("/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string()),
             mlx_quant: Some("None".to_string()),
-            paged_attn: None,
+            paged_attn: Some(true),
             planner_model: Some("deepseek-r1:8b".to_string()),
             executor_model: Some("qwen2.5-coder:7b".to_string()),
             verifier_model: Some("deepseek-r1:8b".to_string()),
@@ -118,8 +121,8 @@ impl Default for AppConfig {
             top_p_execution: Some(0.92),
             repeat_penalty_planning: Some(1.18),
             repeat_penalty_execution: Some(1.12),
-            ctx_planning: Some(16384),
-            ctx_execution: Some(16384),
+            ctx_planning: Some(12288),
+            ctx_execution: Some(32768),
             mlx_temp_planning: Some(0.6),
             mlx_temp_execution: Some(0.2),
             mlx_top_p_planning: Some(0.95),

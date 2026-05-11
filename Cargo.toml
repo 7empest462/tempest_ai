@@ -1,6 +1,6 @@
 [package]
 name = "tempest_ai"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version = "1.95"
 
@@ -14,6 +14,7 @@ anyhow = "1.0"
 colored = "2.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 async-trait = "0.1"
+async-stream = "0.3"
 scraper = "0.20"
 html2text = "0.12"
 urlencoding = "2.1"
@@ -79,6 +80,8 @@ arborium = { version = "2.16.0", default-features = false, features = [
   "lang-swift", "lang-kotlin", "lang-scala", "lang-powershell", "lang-elixir", "lang-sql",
   "lang-starlark", "lang-objc", "lang-xml", "lang-vue", "lang-dockerfile"
 ] }
+skg-tool = { version = "0.4.1", features = ["macros"] }
+layer0 = "0.4.1"
 ai = { version = "0.2.16", features = ["ollama_client", "openai_client"] }
 web-sys = { version = "0.3.69", features = [
   "Blob",
@@ -108,6 +111,9 @@ wgpu = { version = "29.0.1", default-features = false, features = [
   "wgsl",
 ] }
 ratatui-textarea = "0.9.0"
+axum = { version = "0.8.9", features = ["ws"] }
+tower-http = { version = "0.6.10", features = ["fs", "cors"] }
+tower = { version = "0.5.3", features = ["full"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.25.3", features = ["metal", "accelerate"] }

@@ -1,0 +1,19 @@
+{
+  "name": "tempest-web",
+  "private": true,
+  "version": "0.3.3",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "rollup": "^4.60.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
+  }
+}

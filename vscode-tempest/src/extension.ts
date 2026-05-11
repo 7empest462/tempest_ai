@@ -420,6 +420,11 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                         <div class="status">
                             <span v-if="isLoading" class="spinner">🌀</span>
                             {{ activeModel }} • {{ currentPhase }}
+                            <div v-if="telemetry" style="font-size: 0.6rem; opacity: 0.8; margin-top: 2px; display: flex; gap: 8px;">
+                                <span v-if="telemetry.gpu !== null">GPU: {{ telemetry.gpu }}%</span>
+                                <span v-if="telemetry.ram !== null">RAM: {{ telemetry.ram }}%</span>
+                                <span v-if="telemetry.tps !== null">TPS: {{ telemetry.tps }}</span>
+                            </div>
                         </div>
                     </div>
 
@@ -514,6 +519,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                 const isLoading = ref(false);
                 const currentPhase = ref('IDLE');
                 const activeModel = ref('TEMPEST');
+                const telemetry = ref({ gpu: null, ram: null, tps: null });
                 const outputRef = ref(null);
                 const isDragging = ref(false);
                 const vortexError = ref(null);
@@ -585,6 +591,18 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                     window.addEventListener('message', event => {
                         const data = event.data;
                         if (data.type === 'tempest-response') {
+                            const method = data.method || (data.payload ? data.payload.method : null);
+                            
+                            if (method === 'tempest/telemetry') {
+                                const params = data.payload?.params || {};
+                                telemetry.value = {
+                                    gpu: params.gpu !== undefined ? params.gpu : telemetry.value.gpu,
+                                    ram: params.ram !== undefined ? params.ram : telemetry.value.ram,
+                                    tps: params.tps !== undefined ? params.tps : telemetry.value.tps
+                                };
+                                return;
+                            }
+
                             const findV = (obj, key) => {
                                 if (!obj || typeof obj !== 'object') return null;
                                 if (obj[key] !== undefined) return obj[key];
@@ -648,7 +666,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
 
                 return { 
                     activeTab, inputMsg, messages, streamingText, streamingThoughts, 
-                    isLoading, currentPhase, activeModel, outputRef, isDragging,
+                    isLoading, currentPhase, activeModel, telemetry, outputRef, isDragging,
                     vortexError,
                     send, renderMarkdown, onDrop, quickAction
                 };

@@ -138,6 +138,7 @@ pub struct Agent {
     pub planning_enabled: bool,
     pub checkpoint_mgr: crate::checkpoint::SharedCheckpointManager,
     pub mcp_clients: Arc<DashMap<String, Arc<tokio::sync::Mutex<crate::mcp::McpClient>>>>,
+    pub tool_registry_skg: Arc<skg_tool::ToolRegistry>,
 }
 
 pub struct AgentStream<'a> {
@@ -648,6 +649,22 @@ impl Agent {
             tools_map.insert(t.name().to_string(), t.clone());
         }
 
+        // --- 🌪️ SKELEGENT TOOL REGISTRY INITIALIZATION ---
+        let mut tool_registry_skg = skg_tool::ToolRegistry::new();
+        
+        // 1. Register Native Skelegent Tools
+        tool_registry_skg.register(Arc::new(crate::tools::skg_test::EchoTool));
+        tool_registry_skg.register(Arc::new(crate::tools::skg_file::ReadFileTool));
+        tool_registry_skg.register(Arc::new(crate::tools::skg_file::WriteFileTool));
+        
+        // 2. Register Adapted Tools (Bridge)
+        for t in &tools_vec {
+            tool_registry_skg.register(Arc::new(crate::tools::skg_adapter::SkgToolAdapter {
+                inner: t.clone(),
+            }));
+        }
+        let tool_registry_skg = Arc::new(tool_registry_skg);
+
         let history_path_obj = Path::new(&history_path);
         let brain_path = history_path_obj.parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
         
@@ -664,13 +681,52 @@ impl Agent {
             "recall_brain", "recall_memory", "recall_skill", "list_skills",
             "ask_user", "query_schema", "update_task_context",
             "system_telemetry", "network_check",
-            "cargo_search", "cargo_add"
+            "cargo_search", "cargo_add",
+            "skg_read_file", "skg_write_file", "skg_echo"
         ];
         
-        let tool_registry: Vec<ollama_rs::generation::tools::ToolInfo> = tools_vec.iter()
-            .filter(|t| core_tool_names.contains(&t.name()))
-            .map(|t| t.tool_info())
-            .collect();
+        // --- 🌪️ TOOL SCHEMA UNIFICATION ---
+        // We build the final schema sent to the model by filtering BOTH 
+        // the legacy and Skelegent registries against the core whitelist.
+        let mut tool_registry = Vec::new();
+        
+        // Add Legacy Tools
+        for t in &tools_vec {
+            if core_tool_names.contains(&t.name()) {
+                tool_registry.push(t.tool_info());
+            }
+        }
+        
+        // Add Native Skelegent Tools
+        for name in &core_tool_names {
+            if let Some(skg_tool) = tool_registry_skg.get(*name) {
+                // If it's native (not in tools_vec), add its schema
+                if !tools_map.contains_key(*name) {
+                    let mut schema = skg_tool.input_schema();
+                    
+                    // MCP to OpenAI schema conversion:
+                    // If the schema has a top-level 'properties' containing ONLY 'args',
+                    // then the actual parameters are inside 'args'.
+                    if let Some(props) = schema.get("properties") {
+                        if props.as_object().map(|m| m.len() == 1 && m.contains_key("args")).unwrap_or(false) {
+                            if let Some(args_schema) = props.get("args") {
+                                schema = args_schema.clone();
+                            }
+                        }
+                    }
+
+                    let info = ollama_rs::generation::tools::ToolInfo {
+                        tool_type: ollama_rs::generation::tools::ToolType::Function,
+                        function: ollama_rs::generation::tools::ToolFunctionInfo {
+                            name: skg_tool.name().to_string(),
+                            description: skg_tool.description().to_string(),
+                            parameters: serde_json::from_value(schema).unwrap_or_default(),
+                        }
+                    };
+                    tool_registry.push(info);
+                }
+            }
+        }
 
         let vector_brain = Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(&brain_path)
             .unwrap_or_else(|_| crate::vector_brain::VectorBrain::new())));
@@ -731,6 +787,7 @@ impl Agent {
             planning_enabled,
             checkpoint_mgr: crate::checkpoint::new_shared(50),
             mcp_clients: Arc::new(DashMap::new()),
+            tool_registry_skg,
             system_prompt: {
                 let mut final_system_prompt = system_prompt.clone();
                 if mode == AgentMode::MLX {
@@ -814,7 +871,7 @@ impl Agent {
             }
             crate::inference::Backend::Bridge(bridge) => {
                 use ai::chat_completions::ChatCompletionMessage;
-                match bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())]).await {
+                match bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
                     Ok(_) => Ok(()),
                     Err(e) => Err(miette!("Bridge connection failed: {}. Ensure your local server (LM Studio/OpenAI) is running and the model '{}' is loaded.", e, self.model.lock())),
                 }?;
@@ -1955,6 +2012,45 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
+        // --- 🌪️ SKELEGENT HYBRID DISPATCH ---
+        // We first check the Skelegent registry. If it's a NATIVE tool (not in legacy map),
+        // we execute it via the Skelegent pipeline.
+        if self.tool_registry_skg.get(&tool_name).is_some() && !self.tools.contains_key(&tool_name) {
+            let skg_tool = self.tool_registry_skg.get(&tool_name).unwrap();
+            
+            if skg_tool.requires_approval() && !skip_approval {
+                if !self.handle_batch_approval(&[tool_call.clone()]).await {
+                    return (tool_name.clone(), 
+                        format!("Error: Tool '{}' was rejected by the user.", tool_name), 
+                        false);
+                }
+            }
+
+            let tx_opt = self.event_tx.lock().clone();
+            if let Some(tx) = tx_opt {
+                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🌪️ [SKELEGENT]: Executing native tool: {}", tool_name)));
+            }
+
+            let context = self.get_tool_context().await;
+            let skg_ctx = skg_tool::ToolCallContext::with_deps(
+                layer0::id::OperatorId::new("tempest-agent"),
+                Arc::new(Arc::new(context))
+            );
+
+            match skg_tool.call(args.clone(), &skg_ctx).await {
+                Ok(res) => {
+                    let res_str = match res {
+                        Value::String(s) => s,
+                        _ => res.to_string(),
+                    };
+                    return (tool_name.to_string(), res_str, true);
+                }
+                Err(e) => {
+                    return (tool_name.to_string(), format!("Skelegent Error: {}", e), false);
+                }
+            }
+        }
+
         if let Some(tool) = self.tools.get(&tool_name).map(|r| r.value().clone()) {
             if tool.is_modifying() && !skip_approval {
                 // Single-tool fallback approval if not already handled by a batch
@@ -2225,7 +2321,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                  if let Err(e) = agent_clone.run(msg_clone, stop_clone).await {
                      let tx_opt = agent_clone.event_tx.lock().clone();
                      if let Some(tx) = tx_opt {
-                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("Error: {}", e))).await;
+                         let _ = tx.send(crate::tui::AgentEvent::AgentError(e.to_string())).await;
                      }
                  }
              }));

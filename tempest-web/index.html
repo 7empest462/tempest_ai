@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tempest AI | Command Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  </head>
+  <body>
+    <div id="vortex-container">
+      <canvas id="vortex-canvas"></canvas>
+    </div>
+    
+    <div id="app">
+      <header id="main-header">
+        <div class="logo">
+          <span class="vortex-icon">🌪️</span>
+          <h1>TEMPEST <span class="accent">AI</span></h1>
+        </div>
+        <div id="telemetry-bar">
+          <div id="cpu-metric" class="metric">CPU: --%</div>
+          <div id="gpu-metric" class="metric">GPU: --%</div>
+          <div id="ram-metric" class="metric">RAM: -- MB</div>
+        </div>
+      </header>
+      
+      <main>
+        <aside id="sidebar">
+          <div class="sidebar-section">
+            <h3>ENGINE BACKEND</h3>
+            <div class="backend-selector">
+              <label class="switch-item">
+                <input type="radio" name="backend" value="mlx" checked>
+                <span class="radio-label">MLX (Native)</span>
+              </label>
+              <label class="switch-item">
+                <input type="radio" name="backend" value="ollama">
+                <span class="radio-label">Ollama</span>
+              </label>
+              <label class="switch-item">
+                <input type="radio" name="backend" value="bridge">
+                <span class="radio-label">AI Bridge</span>
+              </label>
+              <label class="switch-item">
+                <input type="radio" name="backend" value="lmstudio">
+                <span class="radio-label">LM Studio</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="sidebar-section explorer-section">
+            <h3>FILE EXPLORER</h3>
+            <div id="explorer-controls">
+              <button id="back-btn">⬅ BACK</button>
+              <span id="current-path-label">/</span>
+            </div>
+            <div id="file-explorer">
+              <!-- Files populated by WASM -->
+            </div>
+          </div>
+
+          <nav id="bottom-nav">
+            <button class="nav-item active" id="nav-chat">💬 Chat</button>
+            <button class="nav-item" id="nav-atlas">📍 Atlas</button>
+            <button class="nav-item" id="nav-settings">⚙️ Setup</button>
+          </nav>
+        </aside>
+        
+        <div id="workspace">
+          <div id="chat-container">
+            <div id="chat-messages">
+              <div class="message system">
+                <div class="content">🌪️ [SYSTEM]: Neural link established. Environment grounded. Ready for next objective.</div>
+              </div>
+            </div>
+            <div id="chat-input-wrapper">
+              <textarea id="chat-input" placeholder="Enter objective..." rows="1"></textarea>
+              <button id="send-btn">SEND</button>
+            </div>
+          </div>
+
+          <div id="editor-container" class="hidden">
+            <div id="editor-header">
+              <div class="editor-meta">
+                <span id="editor-filename">filename.rs</span>
+                <button id="edit-btn">EDIT</button>
+              </div>
+              <button id="close-editor">✕</button>
+            </div>
+            <pre id="code-display"><code></code></pre>
+          </div>
+        </div>
+      </main>
+      
+      <footer id="status-bar">
+        <div class="status-group">
+          <span class="status-indicator online"></span>
+          <span id="engine-status">Engine: MLX (Metal)</span>
+        </div>
+        <div class="status-group">
+          <span id="token-metrics">TPS: -- | CTX: --/32k</span>
+        </div>
+      </footer>
+    </div>
+    
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

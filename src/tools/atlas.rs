@@ -296,6 +296,8 @@ pub async fn run_semantic_indexing(
                         update(format!("⚠️ Failed to index {} chunk {}: {}", path.display(), i + 1, e).yellow().to_string());
                     }
                 }
+                // 🌪️ Prevent Metal memory spike by yielding to the OS
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
         }
     }

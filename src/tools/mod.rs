@@ -68,3 +68,6 @@ pub mod developer;
 pub mod privilege;
 pub mod rust;
 pub mod ast;
+pub mod skg_adapter;
+pub mod skg_test;
+pub mod skg_file;

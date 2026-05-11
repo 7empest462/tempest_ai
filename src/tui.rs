@@ -41,10 +41,11 @@ pub enum AgentEvent {
     SubagentStatus(Option<String>),
     ContextStatus { used: usize, total: u64 },
     SentinelUpdate { active: Vec<String>, log: String },
-    TelemetryMetrics { cpu: Option<u64>, gpu: Option<u64>, tps: Option<u64> },
+    TelemetryMetrics { cpu: Option<u64>, gpu: Option<u64>, ram: Option<u64>, tps: Option<u64> },
     CommandOutput(String),
     EditorEdit { path: String, content: String },
     ShowManual(String),
+    AgentError(String),
 }
 
 pub enum ToolResponse {
@@ -106,6 +107,7 @@ pub struct App {
     // --- 📊 SPARKLINE STATE ---
     pub cpu_history: Vec<u64>,
     pub gpu_history: Vec<u64>,
+    pub ram_history: Vec<u64>,
     pub tps_history: Vec<u64>, // Tokens Per Second
     // --- ⌨️ COMMAND PALETTE STATE ---
     pub show_command_palette: bool,
@@ -159,6 +161,7 @@ impl App {
             theme_set: ThemeSet::load_defaults(),
             cpu_history: Vec::new(),
             gpu_history: Vec::new(),
+            ram_history: Vec::new(),
             tps_history: Vec::new(),
             show_command_palette: false,
             command_palette_query: String::new(),
@@ -891,7 +894,7 @@ pub async fn run_tui(
                         }
                     }
                 }
-                AgentEvent::TelemetryMetrics { cpu, gpu, tps } => {
+                AgentEvent::TelemetryMetrics { cpu, gpu, ram, tps } => {
                     if let Some(c) = cpu {
                         app.cpu_history.push(c);
                         if app.cpu_history.len() > 100 { app.cpu_history.remove(0); }
@@ -899,6 +902,10 @@ pub async fn run_tui(
                     if let Some(g) = gpu {
                         app.gpu_history.push(g);
                         if app.gpu_history.len() > 100 { app.gpu_history.remove(0); }
+                    }
+                    if let Some(r) = ram {
+                        app.ram_history.push(r);
+                        if app.ram_history.len() > 100 { app.ram_history.remove(0); }
                     }
                     if let Some(t) = tps {
                         app.tps_history.push(t);
@@ -919,6 +926,11 @@ pub async fn run_tui(
                     app.viewer_content = Some(("OPERATIONAL MANUAL".to_string(), content));
                     app.viewer_scroll = 0;
                     app.focused_pane = FocusedPane::Viewer;
+                }
+                AgentEvent::AgentError(e) => {
+                    app.push_message(format!("❌ [CRITICAL ERROR]: {}", e));
+                    app.thinking_msg = None;
+                    app.engine_status = Some("🛑 FAILED".to_string());
                 }
             }
         }
@@ -1377,9 +1389,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     let pulse_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Ratio(1, 3), // CPU
-            Constraint::Ratio(1, 3), // GPU
-            Constraint::Ratio(1, 3), // TPS
+            Constraint::Ratio(1, 4), // CPU
+            Constraint::Ratio(1, 4), // GPU
+            Constraint::Ratio(1, 4), // RAM
+            Constraint::Ratio(1, 4), // TPS
         ])
         .split(pulse_inner);
 
@@ -1406,6 +1419,17 @@ fn ui(f: &mut Frame, app: &mut App) {
         .data(gpu_data)
         .max(10000);
     f.render_widget(gpu_spark, pulse_chunks[1]);
+    
+    let ram_data = if app.ram_history.len() > width {
+        &app.ram_history[app.ram_history.len() - width..]
+    } else {
+        &app.ram_history
+    };
+    let ram_spark = Sparkline::default()
+        .block(Block::default().title(" RAM ").style(Style::default().fg(Color::Yellow)))
+        .data(ram_data)
+        .max(100);
+    f.render_widget(ram_spark, pulse_chunks[2]);
 
     let tps_data = if app.tps_history.len() > width {
         &app.tps_history[app.tps_history.len() - width..]
@@ -1416,7 +1440,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().title(" TPS ").style(Style::default().fg(Color::Magenta)))
         .data(tps_data)
         .max(100);
-    f.render_widget(tps_spark, pulse_chunks[2]);
+    f.render_widget(tps_spark, pulse_chunks[3]);
 
     // --- REASONING TRACE PANE (With Syntax Highlighting) ---
     if app.show_reasoning {

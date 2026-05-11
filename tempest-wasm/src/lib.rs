@@ -30,11 +30,12 @@ impl State {
             let height = canvas.height();
 
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::all(),
+                backends: wgpu::Backends::GL,
                 ..Default::default()
             });
 
-            let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone())).unwrap();
+            let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                .expect("Failed to create wgpu surface");
 
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
@@ -43,12 +44,12 @@ impl State {
                     force_fallback_adapter: false,
                 })
                 .await
-                .unwrap();
+                .expect("Failed to find a suitable wgpu adapter (WebGPU/WebGL might be disabled)");
 
             let (device, queue) = adapter
                 .request_device(
                     &wgpu::DeviceDescriptor {
-                        label: None,
+                        label: Some("Tempest Device"),
                         required_features: wgpu::Features::empty(),
                         required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
                         memory_hints: wgpu::MemoryHints::default(),
@@ -56,7 +57,7 @@ impl State {
                     None,
                 )
                 .await
-                .unwrap();
+                .expect("Failed to create wgpu device");
 
             let surface_caps = surface.get_capabilities(&adapter);
             let surface_format = surface_caps
@@ -143,7 +144,15 @@ impl State {
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn resize(&mut self, new_width: u32, new_height: u32) {
+        if new_width > 0 && new_height > 0 {
+            self._config.width = new_width;
+            self._config.height = new_height;
+            self.surface.configure(&self.device, &self._config);
+        }
+    }
+
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -163,9 +172,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.01,
-                            g: 0.01,
-                            b: 0.05,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -177,6 +186,7 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            // Draw full-screen triangle (3 vertices)
             render_pass.draw(0..3, 0..1);
         }
 
@@ -188,17 +198,44 @@ impl State {
 }
 
 #[wasm_bindgen]
-pub async fn initialize_dashboard(canvas_id: &str) -> Result<(), JsValue> {
-    let window = web_sys::window().expect("no global `window` exists");
-    let document = window.document().expect("should have a document on window");
+pub struct Dashboard {
+    state: State,
+}
+
+#[wasm_bindgen]
+impl Dashboard {
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.state.resize(width, height);
+        let _ = self.state.render();
+    }
+
+    pub fn render(&mut self) {
+        let _ = self.state.render();
+    }
+}
+
+#[wasm_bindgen]
+pub async fn initialize_dashboard(canvas_id: &str) -> Result<Dashboard, JsValue> {
+    log(&format!("📍 Initializing Vortex on canvas: {}", canvas_id));
+    
+    let window = web_sys::window().ok_or("no global `window` exists")?;
+    let document = window.document().ok_or("should have a document on window")?;
     let canvas = document
         .get_element_by_id(canvas_id)
-        .expect("should have canvas")
-        .dyn_into::<web_sys::HtmlCanvasElement>()?;
+        .ok_or_else(|| format!("should have canvas with id {}", canvas_id))?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| "element is not a canvas")?;
 
-    let mut state = State::new(canvas).await;
-    state.render().map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+    let width = canvas.client_width() as u32;
+    let height = canvas.client_height() as u32;
+    canvas.set_width(width);
+    canvas.set_height(height);
 
-    log(&format!("Dashboard initialized on canvas: {}", canvas_id));
-    Ok(())
+    log(&format!("🛠️ WGPU State init: {}x{}", width, height));
+    let state = State::new(canvas).await;
+    let mut dashboard = Dashboard { state };
+
+    dashboard.render();
+    log("✅ Dashboard instance ready");
+    Ok(dashboard)
 }

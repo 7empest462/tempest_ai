@@ -80,6 +80,19 @@ impl McpServer {
                         });
                         let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
                     }
+                    crate::tui::AgentEvent::TelemetryMetrics { cpu, gpu, ram, tps } => {
+                        let envelope = json!({ 
+                            "jsonrpc": "2.0", 
+                            "method": "tempest/telemetry", 
+                            "params": { 
+                                "cpu": cpu, 
+                                "gpu": gpu, 
+                                "ram": ram, 
+                                "tps": tps 
+                            } 
+                        });
+                        let _ = stdout_clone.write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes()).await;
+                    }
                     _ => {}
                 }
                 let _ = stdout_clone.flush().await;
