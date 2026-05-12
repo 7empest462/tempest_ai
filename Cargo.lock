@@ -10427,6 +10427,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unicode-width 0.2.0",
+ "url",
  "urlencoding",
  "uuid 1.23.0",
  "walkdir",

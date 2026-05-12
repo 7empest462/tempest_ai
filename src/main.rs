@@ -364,10 +364,14 @@ async fn main() -> Result<()> {
     // Pre-initialize event channel for MCP mode to capture startup logs
     let event_tx = Arc::new(parking_lot::Mutex::new(None));
     let mut event_rx = None;
-    if cli.mcp_server {
+    let (tool_tx, tool_rx_internal) = tokio::sync::mpsc::channel::<tempest_ai::tui::ToolResponse>(1);
+    let mut tool_tx_opt = None;
+
+    if cli.mcp_server || cli.web {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         *event_tx.lock() = Some(tx);
         event_rx = Some(rx);
+        tool_tx_opt = Some(tool_tx);
     }
 
     let agent = Agent::new(
@@ -402,6 +406,10 @@ async fn main() -> Result<()> {
         config.lmstudio_url.clone(),
     ).await?;
     
+    if cli.web || cli.mcp_server {
+        *agent.tool_rx.lock().await = Some(tool_rx_internal);
+    }
+
     if let Err(e) = agent.check_connection().await {
         if !cli.cli {
             // In TUI mode, we might want to just exit or show an error later?
@@ -429,7 +437,7 @@ async fn main() -> Result<()> {
     if cli.web {
         println!("{} Launching Tempest Nexus...", "🌐".green());
         let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.mlx { "mlx" } else { "ollama" };
-        tempest_ai::nexus::run_nexus(agent, cli.port, backend_id.to_string()).await;
+        tempest_ai::nexus::run_nexus(agent, cli.port, backend_id.to_string(), event_rx, tool_tx_opt).await;
         return Ok(());
     }
 
@@ -497,11 +505,7 @@ async fn main() -> Result<()> {
             // sysinfo process.memory() often misses private Metal heaps on macOS.
             let ai_ram_mb = match mode {
                 tempest_ai::inference::AgentMode::MLX => {
-                    #[cfg(target_os = "macos")]
                     let mut vram_mb = 0;
-                    #[cfg(not(target_os = "macos"))]
-                    let vram_mb = 0;
-
                     #[cfg(target_os = "macos")]
                     {
                         // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.

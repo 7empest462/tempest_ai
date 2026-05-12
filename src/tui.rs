@@ -46,6 +46,9 @@ pub enum AgentEvent {
     EditorEdit { path: String, content: String },
     ShowManual(String),
     AgentError(String),
+    AgentStateChange(String),
+    ActiveTools(Vec<String>),
+    TaskUpdate(String),
 }
 
 pub enum ToolResponse {
@@ -932,6 +935,7 @@ pub async fn run_tui(
                     app.thinking_msg = None;
                     app.engine_status = Some("🛑 FAILED".to_string());
                 }
+                AgentEvent::AgentStateChange(_) | AgentEvent::ActiveTools(_) | AgentEvent::TaskUpdate(_) => {}
             }
         }
 

@@ -31,25 +31,48 @@
       
       <main>
         <aside id="sidebar">
-          <div class="sidebar-section">
-            <h3>ENGINE BACKEND</h3>
-            <div class="backend-selector">
-              <label class="switch-item">
-                <input type="radio" name="backend" value="mlx" checked>
-                <span class="radio-label">MLX (Native)</span>
-              </label>
-              <label class="switch-item">
-                <input type="radio" name="backend" value="ollama">
-                <span class="radio-label">Ollama</span>
-              </label>
-              <label class="switch-item">
-                <input type="radio" name="backend" value="bridge">
-                <span class="radio-label">AI Bridge</span>
-              </label>
-              <label class="switch-item">
-                <input type="radio" name="backend" value="lmstudio">
-                <span class="radio-label">LM Studio</span>
-              </label>
+          <div class="sidebar-section" id="mission-control">
+            <h3>MISSION CONTROL</h3>
+            <div class="mission-control-content">
+              
+              <!-- Lifecycle Stepper -->
+              <div class="lifecycle-tracker">
+                <div class="step" id="step-thinking">
+                  <div class="step-icon">🧠</div>
+                  <div class="step-label">Thinking</div>
+                </div>
+                <div class="step-connector"></div>
+                <div class="step" id="step-planning">
+                  <div class="step-icon">📋</div>
+                  <div class="step-label">Planning</div>
+                </div>
+                <div class="step-connector"></div>
+                <div class="step" id="step-executing">
+                  <div class="step-icon">🛠️</div>
+                  <div class="step-label">Executing</div>
+                </div>
+              </div>
+              
+              <!-- Active Goal/Task (Hidden unless active) -->
+              <div id="active-goal-box" class="hidden">
+                <div class="box-label">CURRENT TASK</div>
+                <div id="active-goal-text">--</div>
+              </div>
+
+              <!-- Reasoning Monitor (Hidden unless reasoning) -->
+              <div id="reasoning-monitor" class="hidden">
+                <div class="box-label">REASONING MONITOR</div>
+                <div id="reasoning-text"></div>
+              </div>
+
+              <!-- Active Tools Stream -->
+              <div id="active-tools-box">
+                <div class="box-label">ACTIVE TOOLS</div>
+                <ul id="active-tools-list">
+                  <li class="empty-tools">No tools running</li>
+                </ul>
+              </div>
+
             </div>
           </div>
 
@@ -148,6 +171,26 @@
               <button class="bg-option" data-bg="dark">Dark</button>
               <button class="bg-option" data-bg="nebula">Nebula</button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Safe Mode Diff Modal -->
+      <div id="safemode-modal" class="modal-overlay hidden">
+        <div class="safemode-content">
+          <div class="safemode-header">
+            <h3>⚠️ SAFETY CHECKPOINT</h3>
+            <span class="safemode-warning">The agent is requesting permission to modify files.</span>
+          </div>
+          <div class="safemode-body">
+            <div id="safemode-rationale"></div>
+            <div id="safemode-diff-container">
+              <!-- Diff chunks will be injected here -->
+            </div>
+          </div>
+          <div class="safemode-footer">
+            <button id="safemode-reject" class="btn-danger">REJECT</button>
+            <button id="safemode-approve" class="btn-success">APPROVE</button>
           </div>
         </div>
       </div>

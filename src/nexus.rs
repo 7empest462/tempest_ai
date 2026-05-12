@@ -24,6 +24,8 @@ pub enum NexusRequest {
     TerminalInput { data: String },
     TerminalResize { cols: u16, rows: u16 },
     SearchFiles { query: String, path: String },
+    SafeModeApprove,
+    SafeModeReject,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,7 +39,18 @@ pub enum NexusResponse {
     Error { message: String },
     TerminalOutput { data: String },
     SearchResults { matches: Vec<SearchMatch> },
-    BackendInfo { backend: String },
+    BackendInfo { 
+        backend: String,
+        planner: String,
+        executor: String,
+        verifier: String,
+    },
+    AgentStateChange { state: String },
+    ActiveTools { tools: Vec<String> },
+    SafeModeRequest { rationale: String, diff: String },
+    TaskUpdate { task: String },
+    ReasoningToken { token: String },
+    StreamToken { token: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,10 +69,93 @@ pub struct SearchMatch {
 pub struct NexusState {
     pub agent: Agent,
     pub backend_id: String,
+    pub planner_model: String,
+    pub executor_model: String,
+    pub verifier_model: String,
+    pub broadcast_tx: tokio::sync::broadcast::Sender<String>,
+    pub tool_tx: Option<tokio::sync::mpsc::Sender<crate::tui::ToolResponse>>,
 }
 
-pub async fn run_nexus(agent: Agent, port: u16, backend_id: String) {
-    let state = Arc::new(NexusState { agent, backend_id });
+pub async fn run_nexus(
+    agent: Agent, 
+    port: u16, 
+    backend_id: String,
+    event_rx: Option<tokio::sync::mpsc::Receiver<crate::tui::AgentEvent>>,
+    tool_tx: Option<tokio::sync::mpsc::Sender<crate::tui::ToolResponse>>,
+) {
+    let (b_tx, _b_rx) = tokio::sync::broadcast::channel(100);
+    
+    let state = Arc::new(NexusState { 
+        planner_model: agent.planner_model.clone().unwrap_or_default(),
+        executor_model: agent.executor_model.clone().unwrap_or_default(),
+        verifier_model: agent.verifier_model.clone().unwrap_or_default(),
+        agent, 
+        backend_id,
+        broadcast_tx: b_tx.clone(),
+        tool_tx,
+    });
+
+    if let Some(mut rx) = event_rx {
+        let b_tx_clone = b_tx.clone();
+        tokio::spawn(async move {
+            while let Some(evt) = rx.recv().await {
+                match evt {
+                    crate::tui::AgentEvent::AgentStateChange(s) => {
+                        let res = NexusResponse::AgentStateChange { state: s };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::ActiveTools(t) => {
+                        let res = NexusResponse::ActiveTools { tools: t };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::TaskUpdate(t) => {
+                        let res = NexusResponse::TaskUpdate { task: t };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::RequestInput(id, prompt) => {
+                        if id == "BATCH_APPROVAL" {
+                            let res = NexusResponse::SafeModeRequest { 
+                                rationale: "The agent is requesting batch approval for the following changes.".to_string(),
+                                diff: prompt 
+                            };
+                            if let Ok(json) = serde_json::to_string(&res) {
+                                let _ = b_tx_clone.send(json);
+                            }
+                        }
+                    }
+                    crate::tui::AgentEvent::RequestPrivileges { rationale, .. } => {
+                        let res = NexusResponse::SafeModeRequest { 
+                            rationale: format!("Privilege Escalation Requested: {}", rationale),
+                            diff: "PERMISSION REQUEST".to_string()
+                        };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::ReasoningToken(t) => {
+                        let res = NexusResponse::ReasoningToken { token: t };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::StreamToken(t) => {
+                        let res = NexusResponse::StreamToken { token: t };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    // Handle Safe Mode diffs here in the future
+                    _ => {}
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
@@ -94,8 +190,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
         }
     });
 
+    // Mux Task 2: Send broadcast events to WebSocket
+    let mut broadcast_rx = state.broadcast_tx.subscribe();
+    let ws_tx_broadcast = ws_tx.clone();
+    tokio::spawn(async move {
+        while let Ok(json) = broadcast_rx.recv().await {
+            let _ = ws_tx_broadcast.send(Message::Text(json.into())).await;
+        }
+    });
+
     // Send initial backend info
-    let backend_info = NexusResponse::BackendInfo { backend: state.backend_id.clone() };
+    let backend_info = NexusResponse::BackendInfo { 
+        backend: state.backend_id.clone(),
+        planner: state.planner_model.clone(),
+        executor: state.executor_model.clone(),
+        verifier: state.verifier_model.clone(),
+    };
     if let Ok(json) = serde_json::to_string(&backend_info) {
         let _ = ws_tx.send(Message::Text(json.into())).await;
     }
@@ -110,8 +220,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
             let used_ram = sys.used_memory() / 1024 / 1024;
             let total_ram = sys.total_memory() / 1024 / 1024;
             
-            let gpu_info = tempest_monitor::macos_helper::get_macos_gpu_info(false);
-            let gpu = gpu_info.usage_pct as f32;
+            #[cfg(target_os = "macos")]
+            let gpu = tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32;
+            #[cfg(not(target_os = "macos"))]
+            let gpu = 0.0;
 
             let res = NexusResponse::Telemetry { 
                 cpu, 
@@ -152,6 +264,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                             }
                             let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&NexusResponse::Done).unwrap().into())).await;
                         });
+                    }
+                    NexusRequest::SafeModeApprove => {
+                        if let Some(tx) = &state.tool_tx {
+                            let _ = tx.send(crate::tui::ToolResponse::Text("yes".to_string())).await;
+                        }
+                    }
+                    NexusRequest::SafeModeReject => {
+                        if let Some(tx) = &state.tool_tx {
+                            let _ = tx.send(crate::tui::ToolResponse::Text("no".to_string())).await;
+                        }
                     }
                     NexusRequest::ListFiles { path } => {
                         let dir_path = if path.is_empty() || path == "." { "." } else { &path };

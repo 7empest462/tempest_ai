@@ -81,6 +81,18 @@ pub enum AgentStreamState {
     Done,
 }
 
+impl AgentStreamState {
+    pub fn name(&self) -> &'static str {
+        match self {
+            AgentStreamState::Thinking { .. } => "Thinking",
+            AgentStreamState::StreamingContent { .. } => "StreamingContent",
+            AgentStreamState::PendingTools { .. } => "PendingTools",
+            AgentStreamState::ExecutingTools { .. } => "ExecutingTools",
+            AgentStreamState::Done => "Done",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Agent {
     #[allow(dead_code)]
@@ -1286,6 +1298,17 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
         self.initialize_session(&initial_user_prompt).await?;
 
+        // Notify Web/HUD of initial task
+        let task_preview = initial_user_prompt.chars().take(200).collect::<String>();
+        {
+            let mut ctx_lock = self.task_context.lock();
+            *ctx_lock = task_preview.clone();
+        }
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.send(crate::tui::AgentEvent::TaskUpdate(task_preview)).await;
+        }
+
         // 🛡️ PRE-TURN CONNECTIVITY SENTINEL
         if let Ok(ollama) = self.get_ollama().await {
             let ping = tokio::time::timeout(
@@ -1326,6 +1349,15 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 AgentStreamState::Done => break,
                 _ => {
                     stream.transition().await?;
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(crate::tui::AgentEvent::AgentStateChange(stream.state.name().to_string())).await;
+                        
+                        if let AgentStreamState::ExecutingTools { tool_calls, .. } = &stream.state {
+                            let tool_names: Vec<String> = tool_calls.iter().map(|t| t.function.name.clone()).collect();
+                            let _ = tx.send(crate::tui::AgentEvent::ActiveTools(tool_names)).await;
+                        }
+                    }
                 }
             }
         }

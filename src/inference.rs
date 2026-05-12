@@ -109,7 +109,16 @@ impl Backend {
 
         match mode {
             AgentMode::Ollama => {
-                Ok((Backend::Ollama(Ollama::default()), model))
+                let client = if let Some(url_str) = base_url {
+                    if let Ok(url) = url::Url::parse(&url_str) {
+                        Ollama::from_url(url)
+                    } else {
+                        Ollama::default()
+                    }
+                } else {
+                    Ollama::default()
+                };
+                Ok((Backend::Ollama(client), model))
             }
             AgentMode::MLX => {
                 #[cfg(target_os = "macos")]
@@ -456,27 +465,36 @@ impl Backend {
                             }
                         }
                     }
-                    let s = s.ok_or_else(|| miette!("Ollama raw stream failed: {:?}", last_err))?;
+                    let mut s = s.ok_or_else(|| miette!("Ollama raw stream failed: {:?}", last_err))?;
                     
                     // Wrap the generation stream to match the chat stream interface
-                    Box::pin(s.map(|res| {
-                        let chunks: Vec<ollama_rs::generation::completion::GenerationResponse> = res.map_err(|_| ())?;
-                        let chunk = chunks.first().ok_or(())?;
-                        Ok(ollama_rs::generation::chat::ChatMessageResponse {
-                            model: "".to_string(),
-                            created_at: "".to_string(),
-                            message: ChatMessage {
-                                role: MessageRole::Assistant,
-                                content: chunk.response.clone(),
-                                images: None,
-                                tool_calls: Vec::new(),
-                                thinking: None,
-                            },
-                            done: chunk.done,
-                            final_data: None,
-                            logprobs: None,
-                        })
-                    })) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, ()>> + Send>>
+                    Box::pin(async_stream::stream! {
+                        while let Some(res) = s.next().await {
+                            match res {
+                                Ok(chunks) => {
+                                    if let Some(chunk) = chunks.first() {
+                                        yield Ok(ollama_rs::generation::chat::ChatMessageResponse {
+                                            model: "".to_string(),
+                                            created_at: "".to_string(),
+                                            message: ChatMessage {
+                                                role: MessageRole::Assistant,
+                                                content: chunk.response.clone(),
+                                                images: None,
+                                                tool_calls: Vec::new(),
+                                                thinking: None,
+                                            },
+                                            done: chunk.done,
+                                            final_data: None,
+                                            logprobs: None,
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    yield Err(miette!("Ollama Gen Stream Error: {}", e));
+                                }
+                            }
+                        }
+                    }) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, miette::Report>> + Send>>
                 } else {
                     let mut request = ChatMessageRequest::new(model, history).options(options);
                     if let Some(registry) = tool_registry {
@@ -503,7 +521,7 @@ impl Backend {
                         }
                     }
                     let s = s.ok_or_else(|| miette!("Ollama chat stream failed"))?;
-                    Box::pin(s.map(|res| res.map_err(|_| ()))) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, ()>> + Send>>
+                    Box::pin(s.map(|res| res.map_err(|_| miette!("Ollama Stream Disconnected")))) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, miette::Report>> + Send>>
                 };
 
                 let mut is_thinking = false;
@@ -526,7 +544,7 @@ impl Backend {
                     }
 
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                    let chunk = res.map_err(|_| miette!("Ollama stream error"))?;
+                    let chunk = res?;
                     
                     let mut got_native_thinking = false;
                     let mut received_any_token = false;

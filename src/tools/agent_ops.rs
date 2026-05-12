@@ -163,8 +163,16 @@ impl AgentTool for UpdateTaskContextTool {
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: UpdateTaskContextArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let new_ctx = typed_args.context;
-        let mut ctx_lock = context.task_context.lock();
-        *ctx_lock = new_ctx.to_string();
+        {
+            let mut ctx_lock = context.task_context.lock();
+            *ctx_lock = new_ctx.to_string();
+        }
+        
+        // Notify HUD/Web
+        if let Some(ref tx) = context.tx {
+            let _ = tx.send(crate::tui::AgentEvent::TaskUpdate(new_ctx.to_string())).await;
+        }
+
         Ok("Task context successfully updated.".to_string())
     }
 }

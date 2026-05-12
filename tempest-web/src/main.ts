@@ -47,6 +47,34 @@ async function startApp() {
   const editBtn = document.getElementById('edit-btn');
   const backBtn = document.getElementById('back-btn');
   const pathLabel = document.getElementById('current-path-label');
+  
+  // Mission Control Elements
+  const stepThinking = document.getElementById('step-thinking');
+  const stepPlanning = document.getElementById('step-planning');
+  const stepExecuting = document.getElementById('step-executing');
+
+  const updateStepper = (state: string) => {
+    [stepThinking, stepPlanning, stepExecuting].forEach(el => el?.classList.remove('active'));
+    if (state === 'Thinking') stepThinking?.classList.add('active');
+    if (state === 'Planning' || state === 'PendingTools') stepPlanning?.classList.add('active');
+    if (state === 'Executing' || state === 'ExecutingTools') stepExecuting?.classList.add('active');
+  };
+  const activeToolsList = document.getElementById('active-tools-list');
+  
+  // Safe Mode Elements
+  const safemodeModal = document.getElementById('safemode-modal');
+  const safemodeRationale = document.getElementById('safemode-rationale');
+  const safemodeDiff = document.getElementById('safemode-diff-container');
+  const safemodeApprove = document.getElementById('safemode-approve');
+  const safemodeReject = document.getElementById('safemode-reject');
+
+  // Task Elements
+  const activeGoalBox = document.getElementById('active-goal-box');
+  const activeGoalText = document.getElementById('active-goal-text');
+
+  // Reasoning Elements
+  const reasoningMonitor = document.getElementById('reasoning-monitor');
+  const reasoningText = document.getElementById('reasoning-text');
 
   // Panel elements
   const terminalPanel = document.getElementById('terminal-panel');
@@ -158,14 +186,62 @@ async function startApp() {
         renderSearchResults(msg.payload.matches);
         break;
       case 'BackendInfo': {
-        const radio = document.querySelector(`input[name="backend"][value="${msg.payload.backend}"]`) as HTMLInputElement;
-        if (radio) {
-          radio.checked = true;
-          if (engineStatus) {
-            const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio' };
-            engineStatus.innerText = `Engine: ${names[msg.payload.backend] || msg.payload.backend}`;
+        if (engineStatus) {
+          const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio' };
+          engineStatus.innerText = `Engine: ${names[msg.payload.backend] || msg.payload.backend}`;
+        }
+        break;
+      }
+      case 'AgentStateChange': {
+        const state = msg.payload.state;
+        updateStepper(state);
+        
+        if (state === 'Done') {
+           // Turn off all
+           if (activeToolsList) activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
+        }
+        break;
+      }
+      case 'ActiveTools': {
+        const tools: string[] = msg.payload.tools;
+        if (activeToolsList) {
+          if (tools.length === 0) {
+            activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
+          } else {
+            activeToolsList.innerHTML = tools.map(t => `<li>${t}</li>`).join('');
           }
         }
+        break;
+      }
+      case 'SafeModeRequest': {
+        if (safemodeModal && safemodeRationale && safemodeDiff) {
+          safemodeRationale.innerText = msg.payload.rationale;
+          safemodeDiff.innerText = msg.payload.diff;
+          safemodeModal.classList.remove('hidden');
+        }
+        break;
+      }
+      case 'TaskUpdate': {
+        if (activeGoalBox && activeGoalText) {
+          activeGoalText.innerText = msg.payload.task;
+          activeGoalBox.classList.remove('hidden');
+        }
+        break;
+      }
+      case 'ReasoningToken': {
+        console.log('Reasoning:', msg.payload.token);
+        updateStepper('Thinking');
+        if (reasoningMonitor && reasoningText) {
+          reasoningMonitor.classList.remove('hidden');
+          reasoningText.innerText += msg.payload.token;
+          reasoningText.scrollTop = reasoningText.scrollHeight;
+        }
+        break;
+      }
+      case 'StreamToken': {
+        console.log('StreamToken:', msg.payload.token);
+        updateStepper('Executing');
+        updateLastMessage(msg.payload.token);
         break;
       }
       case 'Error':
@@ -200,8 +276,12 @@ async function startApp() {
   };
 
   const handleSend = () => {
-    const text = chatInput.value.trim();
+    const text = (chatInput as HTMLTextAreaElement).value.trim();
     if (!text) return;
+
+    // Clear old reasoning
+    if (reasoningText) reasoningText.innerText = '';
+    if (reasoningMonitor) reasoningMonitor.classList.add('hidden');
     appendMessage('user', text);
     chatInput.value = '';
     lastAiMessage = null;
@@ -437,14 +517,15 @@ async function startApp() {
     navSettings?.classList.remove('active');
   });
 
-  // 11. Backend Toggle
-  const backendRadios = document.querySelectorAll('input[name="backend"]');
-  backendRadios.forEach(radio => {
-    radio.addEventListener('change', (e) => {
-      const target = e.target as HTMLInputElement;
-      if (engineStatus) engineStatus.innerText = `Engine: ${target.value.toUpperCase()}`;
-      appendMessage('system', `📡 [BACKEND]: Switching to ${target.value.toUpperCase()}...`);
-    });
+  // 12. Safe Mode Approval
+  safemodeApprove?.addEventListener('click', () => {
+    sendNexus('SafeModeApprove', {});
+    safemodeModal?.classList.add('hidden');
+  });
+
+  safemodeReject?.addEventListener('click', () => {
+    sendNexus('SafeModeReject', {});
+    safemodeModal?.classList.add('hidden');
   });
 }
 
