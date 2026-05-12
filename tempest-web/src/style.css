@@ -227,7 +227,12 @@ main {
 #active-tools-list li::before {
   content: '⚙️';
   font-size: 0.7rem;
-  animation: spin 2s linear infinite;
+  animation: spin 2s linear infinite, glow 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes glow {
+  from { text-shadow: 0 0 2px var(--accent-glow); }
+  to { text-shadow: 0 0 8px var(--accent-color); }
 }
 
 .empty-tools {
@@ -815,23 +820,52 @@ main {
 
 /* Reasoning Monitor */
 #reasoning-monitor {
-  margin-top: 15px;
-  background: rgba(0, 20, 30, 0.85);
-  border: 1px solid rgba(0, 243, 255, 0.4);
+  background: rgba(0, 5, 15, 0.6);
+  border: 1px solid var(--accent-glow);
+  border-left: 3px solid var(--accent-color);
   border-radius: 8px;
-  padding: 10px;
-  box-shadow: 0 0 15px rgba(0, 243, 255, 0.1);
+  padding: 12px;
+  margin-top: 10px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 0 20px rgba(0, 242, 255, 0.05);
+}
+
+#reasoning-monitor::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%,
+    rgba(0, 0, 0, 0.05) 50%
+  );
+  background-size: 100% 4px;
+  pointer-events: none;
+  z-index: 2;
 }
 
 #reasoning-text {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 0.85rem;
-  line-height: 1.4;
-  color: #00f3ff;
-  max-height: 200px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--accent-color);
+  max-height: 180px;
   overflow-y: auto;
   white-space: pre-wrap;
-  scrollbar-width: thin;
+  word-break: break-all;
+  scrollbar-width: none;
+  opacity: 0.95;
+  text-shadow: 0 0 5px rgba(0, 242, 255, 0.4);
+  animation: monitor-flicker 0.15s infinite alternate;
+}
+
+#reasoning-text::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes monitor-flicker {
+  0% { opacity: 0.9; }
+  100% { opacity: 1; }
 }
 
 /* ═══ Safe Mode Modal ═══ */

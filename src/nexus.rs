@@ -220,10 +220,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
             let used_ram = sys.used_memory() / 1024 / 1024;
             let total_ram = sys.total_memory() / 1024 / 1024;
             
-            #[cfg(target_os = "macos")]
-            let gpu = tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32;
-            #[cfg(not(target_os = "macos"))]
-            let gpu = 0.0;
+            let gpu = {
+                #[cfg(target_os = "macos")]
+                {
+                    tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    tempest_monitor::linux_helper::collect_gpu_telemetry().usage_pct as f32
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    0.0
+                }
+            };
 
             let res = NexusResponse::Telemetry { 
                 cpu, 

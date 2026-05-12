@@ -54,10 +54,16 @@ async function startApp() {
   const stepExecuting = document.getElementById('step-executing');
 
   const updateStepper = (state: string) => {
-    [stepThinking, stepPlanning, stepExecuting].forEach(el => el?.classList.remove('active'));
-    if (state === 'Thinking') stepThinking?.classList.add('active');
-    if (state === 'Planning' || state === 'PendingTools') stepPlanning?.classList.add('active');
-    if (state === 'Executing' || state === 'ExecutingTools') stepExecuting?.classList.add('active');
+    [stepThinking, stepPlanning, stepExecuting].forEach(el => el?.classList.remove('active', 'pulse'));
+    if (state === 'Thinking') {
+      stepThinking?.classList.add('active', 'pulse');
+    }
+    if (state === 'Planning' || state === 'PendingTools') {
+      stepPlanning?.classList.add('active', 'pulse');
+    }
+    if (state === 'Executing' || state === 'ExecutingTools') {
+      stepExecuting?.classList.add('active', 'pulse');
+    }
   };
   const activeToolsList = document.getElementById('active-tools-list');
   
@@ -229,12 +235,14 @@ async function startApp() {
         break;
       }
       case 'ReasoningToken': {
-        console.log('Reasoning:', msg.payload.token);
         updateStepper('Thinking');
         if (reasoningMonitor && reasoningText) {
           reasoningMonitor.classList.remove('hidden');
           reasoningText.innerText += msg.payload.token;
-          reasoningText.scrollTop = reasoningText.scrollHeight;
+          // Smooth scroll to bottom
+          requestAnimationFrame(() => {
+            reasoningText.scrollTop = reasoningText.scrollHeight;
+          });
         }
         break;
       }
