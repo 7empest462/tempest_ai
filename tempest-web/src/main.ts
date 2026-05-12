@@ -1,23 +1,16 @@
 import './style.css'
 import * as wasm from './pkg/tempest_wasm.js'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 
 declare var hljs: any;
 
 const extensionMap: Record<string, string> = {
-  'rs': 'rust',
-  'ts': 'typescript',
-  'js': 'javascript',
-  'sh': 'bash',
-  'toml': 'toml',
-  'md': 'markdown',
-  'json': 'json',
-  'html': 'xml',
-  'css': 'css',
-  'py': 'python',
-  'yml': 'yaml',
-  'yaml': 'yaml',
-  'zig': 'zig',
-  'nix': 'nix'
+  'rs': 'rust', 'ts': 'typescript', 'js': 'javascript', 'sh': 'bash',
+  'toml': 'toml', 'md': 'markdown', 'json': 'json', 'html': 'xml',
+  'css': 'css', 'py': 'python', 'yml': 'yaml', 'yaml': 'yaml',
+  'zig': 'zig', 'nix': 'nix', 'c': 'c', 'cpp': 'cpp', 'h': 'cpp'
 };
 
 async function startApp() {
@@ -26,15 +19,12 @@ async function startApp() {
   try {
     dashboard = await wasm.initialize_dashboard('vortex-canvas');
     console.log("🌪️ WASM Dashboard Online");
-
     window.addEventListener('resize', () => {
       const canvas = document.getElementById('vortex-canvas') as HTMLCanvasElement;
       if (canvas) {
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        canvas.width = width;
-        canvas.height = height;
-        dashboard.resize(width, height);
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        dashboard.resize(window.innerWidth, window.innerHeight);
       }
     });
   } catch (e) {
@@ -50,15 +40,21 @@ async function startApp() {
   const ramMetric = document.getElementById('ram-metric');
   const fileExplorer = document.getElementById('file-explorer');
   const engineStatus = document.getElementById('engine-status');
-  
   const editorContainer = document.getElementById('editor-container');
   const editorFilename = document.getElementById('editor-filename');
   const codeDisplay = document.getElementById('code-display')?.querySelector('code');
   const closeEditor = document.getElementById('close-editor');
   const editBtn = document.getElementById('edit-btn');
-  
   const backBtn = document.getElementById('back-btn');
   const pathLabel = document.getElementById('current-path-label');
+
+  // Panel elements
+  const terminalPanel = document.getElementById('terminal-panel');
+  const searchPanel = document.getElementById('search-panel');
+  const setupPanel = document.getElementById('setup-panel');
+  const navSearch = document.getElementById('nav-search');
+  const navTerminal = document.getElementById('nav-terminal');
+  const navSettings = document.getElementById('nav-settings');
 
   // 3. State
   let currentPath = '.';
@@ -66,8 +62,26 @@ async function startApp() {
   let socket: WebSocket | null = null;
   let isEditing = false;
   let currentFileExt = '';
+  let terminalSpawned = false;
 
-  // 4. WebSocket Connection
+  // 4. xterm.js Terminal
+  const term = new Terminal({
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: 13,
+    theme: {
+      background: 'transparent',
+      foreground: '#d0d0e0',
+      cursor: '#00f2ff',
+      cursorAccent: '#05050a',
+      selectionBackground: 'rgba(0, 242, 255, 0.2)',
+    },
+    cursorBlink: true,
+    allowProposedApi: true,
+  });
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
+
+  // 5. WebSocket Connection
   const connect = () => {
     socket = new WebSocket('ws://localhost:8080/ws');
     socket.onopen = () => {
@@ -93,7 +107,6 @@ async function startApp() {
 
   const highlightCode = (content: string, ext: string) => {
     if (!codeDisplay || typeof hljs === 'undefined') return;
-    
     const lang = extensionMap[ext.toLowerCase()];
     try {
       if (lang && hljs.getLanguage(lang)) {
@@ -106,7 +119,6 @@ async function startApp() {
         codeDisplay.className = `hljs ${result.language || ''}`;
       }
     } catch (e) {
-      console.warn("⚠️ Highlighting error, falling back to plaintext:", e);
       codeDisplay.innerText = content;
       codeDisplay.className = 'hljs plaintext';
     }
@@ -118,7 +130,6 @@ async function startApp() {
         updateLastMessage(msg.payload.text);
         break;
       case 'Done':
-        // Silently handle generic "Done" for writes
         break;
       case 'Telemetry':
         if (cpuMetric) cpuMetric.innerText = `CPU: ${msg.payload.cpu.toFixed(1)}%`;
@@ -140,6 +151,12 @@ async function startApp() {
           codeDisplay.contentEditable = 'false';
         }
         break;
+      case 'TerminalOutput':
+        term.write(msg.payload.data);
+        break;
+      case 'SearchResults':
+        renderSearchResults(msg.payload.matches);
+        break;
       case 'Error':
         appendMessage('system', `❌ [ERROR]: ${msg.payload.message}`);
         break;
@@ -148,7 +165,7 @@ async function startApp() {
 
   connect();
 
-  // 5. Chat Logic
+  // 6. Chat Logic
   let lastAiMessage: HTMLElement | null = null;
 
   const appendMessage = (role: 'user' | 'ai' | 'system', content: string) => {
@@ -174,11 +191,9 @@ async function startApp() {
   const handleSend = () => {
     const text = chatInput.value.trim();
     if (!text) return;
-    
     appendMessage('user', text);
     chatInput.value = '';
     lastAiMessage = null;
-    
     sendNexus('Chat', { message: text });
   };
 
@@ -190,7 +205,7 @@ async function startApp() {
     }
   });
 
-  // 6. File Explorer Logic
+  // 7. File Explorer Logic
   const fetchExplorer = (path: string) => {
     sendNexus('ListFiles', { path });
   };
@@ -198,7 +213,6 @@ async function startApp() {
   const renderExplorer = (items: any[]) => {
     if (!fileExplorer) return;
     fileExplorer.innerHTML = '';
-    
     items.sort((a, b) => (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)).forEach(item => {
       const div = document.createElement('div');
       div.className = `explorer-item ${item.is_dir ? 'folder' : 'file'}`;
@@ -219,8 +233,7 @@ async function startApp() {
   };
 
   backBtn?.addEventListener('click', () => {
-    const parentPath = `${currentPath}/..`;
-    fetchExplorer(parentPath);
+    fetchExplorer(`${currentPath}/..`);
   });
 
   closeEditor?.addEventListener('click', () => {
@@ -230,37 +243,195 @@ async function startApp() {
 
   editBtn?.addEventListener('click', () => {
     if (!codeDisplay) return;
-    
     isEditing = !isEditing;
     if (isEditing) {
-      // Switch to editing mode
       codeDisplay.contentEditable = 'true';
       editBtn.innerText = 'SAVE';
       codeDisplay.focus();
       codeDisplay.className = 'hljs plaintext';
       codeDisplay.innerText = codeDisplay.innerText;
     } else {
-      // Save changes
       const content = codeDisplay.innerText;
       if (currentOpenFile) {
         sendNexus('WriteFile', { path: currentOpenFile, content });
         appendMessage('system', `💾 [NEXUS]: Successfully saved ${editorFilename?.innerText} to disk.`);
       }
-      
       codeDisplay.contentEditable = 'false';
       editBtn.innerText = 'EDIT';
       highlightCode(content, currentFileExt);
     }
   });
 
-  // 7. Backend Toggle
+  // 8. Terminal Panel Logic
+  const openTerminal = () => {
+    terminalPanel?.classList.remove('panel-hidden');
+    navTerminal?.classList.add('active');
+
+    if (!terminalSpawned) {
+      const container = document.getElementById('terminal-container');
+      if (container) {
+        term.open(container);
+        fitAddon.fit();
+        term.onData((data: string) => {
+          sendNexus('TerminalInput', { data });
+        });
+        term.onResize(({ cols, rows }) => {
+          sendNexus('TerminalResize', { cols, rows });
+        });
+        sendNexus('TerminalSpawn', {});
+        terminalSpawned = true;
+      }
+    } else {
+      // Re-fit when reopening
+      setTimeout(() => fitAddon.fit(), 50);
+    }
+  };
+
+  navTerminal?.addEventListener('click', () => {
+    const isVisible = !terminalPanel?.classList.contains('panel-hidden');
+    if (isVisible) {
+      terminalPanel?.classList.add('panel-hidden');
+      navTerminal?.classList.remove('active');
+    } else {
+      openTerminal();
+    }
+  });
+
+  document.getElementById('close-terminal')?.addEventListener('click', () => {
+    terminalPanel?.classList.add('panel-hidden');
+    navTerminal?.classList.remove('active');
+  });
+
+  // Auto-fit terminal on window resize
+  window.addEventListener('resize', () => {
+    if (terminalSpawned && !terminalPanel?.classList.contains('panel-hidden')) {
+      fitAddon.fit();
+    }
+  });
+
+  // 9. Search Panel Logic
+  const searchInput = document.getElementById('search-input') as HTMLInputElement;
+  const searchGoBtn = document.getElementById('search-go-btn');
+  const searchResults = document.getElementById('search-results');
+
+  const doSearch = () => {
+    const query = searchInput?.value.trim();
+    if (!query) return;
+    if (searchResults) searchResults.innerHTML = '<div style="color: var(--text-secondary); padding: 12px; font-size: 0.8rem;">Searching...</div>';
+    sendNexus('SearchFiles', { query, path: '.' });
+  };
+
+  const renderSearchResults = (matches: any[]) => {
+    if (!searchResults) return;
+    if (matches.length === 0) {
+      searchResults.innerHTML = '<div style="color: var(--text-secondary); padding: 12px; font-size: 0.8rem;">No results found.</div>';
+      return;
+    }
+    searchResults.innerHTML = '';
+    matches.forEach(match => {
+      const div = document.createElement('div');
+      div.className = 'search-result';
+      div.innerHTML = `
+        <span class="search-result-file">${match.file}</span>
+        <span class="search-result-line">:${match.line}</span>
+        <div class="search-result-content">${escapeHtml(match.content)}</div>
+      `;
+      div.onclick = () => {
+        // Open the file in the editor
+        const ext = match.file.split('.').pop() || '';
+        currentFileExt = ext;
+        currentOpenFile = match.file;
+        if (editorFilename) editorFilename.innerText = match.file.split('/').pop() || match.file;
+        sendNexus('ReadFile', { path: match.file });
+        // Close search panel
+        searchPanel?.classList.add('panel-hidden');
+        navSearch?.classList.remove('active');
+      };
+      searchResults.appendChild(div);
+    });
+  };
+
+  const escapeHtml = (str: string) => {
+    const div = document.createElement('div');
+    div.innerText = str;
+    return div.innerHTML;
+  };
+
+  navSearch?.addEventListener('click', () => {
+    const isVisible = !searchPanel?.classList.contains('panel-hidden');
+    if (isVisible) {
+      searchPanel?.classList.add('panel-hidden');
+      navSearch?.classList.remove('active');
+    } else {
+      searchPanel?.classList.remove('panel-hidden');
+      navSearch?.classList.add('active');
+      searchInput?.focus();
+    }
+  });
+
+  searchGoBtn?.addEventListener('click', doSearch);
+  searchInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSearch();
+  });
+
+  document.getElementById('close-search')?.addEventListener('click', () => {
+    searchPanel?.classList.add('panel-hidden');
+    navSearch?.classList.remove('active');
+  });
+
+  // 10. Setup Panel Logic
+  const tempSlider = document.getElementById('temp-slider') as HTMLInputElement;
+  const tempValue = document.getElementById('temp-value');
+  const tokensSlider = document.getElementById('tokens-slider') as HTMLInputElement;
+  const tokensValue = document.getElementById('tokens-value');
+
+  tempSlider?.addEventListener('input', () => {
+    const val = (parseInt(tempSlider.value) / 100).toFixed(2);
+    if (tempValue) tempValue.innerText = val;
+  });
+
+  tokensSlider?.addEventListener('input', () => {
+    if (tokensValue) tokensValue.innerText = tokensSlider.value;
+  });
+
+  // Background options
+  document.querySelectorAll('.bg-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.bg-option').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const bg = (btn as HTMLElement).dataset.bg;
+      const vortexContainer = document.getElementById('vortex-container');
+      if (bg === 'dark' && vortexContainer) {
+        vortexContainer.style.display = 'none';
+      } else if (vortexContainer) {
+        vortexContainer.style.display = 'block';
+      }
+      appendMessage('system', `🎨 [SETTINGS]: Background changed to ${bg}.`);
+    });
+  });
+
+  navSettings?.addEventListener('click', () => {
+    const isVisible = !setupPanel?.classList.contains('panel-hidden');
+    if (isVisible) {
+      setupPanel?.classList.add('panel-hidden');
+      navSettings?.classList.remove('active');
+    } else {
+      setupPanel?.classList.remove('panel-hidden');
+      navSettings?.classList.add('active');
+    }
+  });
+
+  document.getElementById('close-setup')?.addEventListener('click', () => {
+    setupPanel?.classList.add('panel-hidden');
+    navSettings?.classList.remove('active');
+  });
+
+  // 11. Backend Toggle
   const backendRadios = document.querySelectorAll('input[name="backend"]');
   backendRadios.forEach(radio => {
     radio.addEventListener('change', (e) => {
       const target = e.target as HTMLInputElement;
-      if (engineStatus) {
-        engineStatus.innerText = `Engine: ${target.value.toUpperCase()}`;
-      }
+      if (engineStatus) engineStatus.innerText = `Engine: ${target.value.toUpperCase()}`;
       appendMessage('system', `📡 [BACKEND]: Switching to ${target.value.toUpperCase()}...`);
     });
   });

@@ -60,13 +60,13 @@
               <span id="current-path-label">/</span>
             </div>
             <div id="file-explorer">
-              <!-- Files populated by WASM -->
+              <!-- Files populated dynamically -->
             </div>
           </div>
 
           <nav id="bottom-nav">
-            <button class="nav-item active" id="nav-chat">💬 Chat</button>
-            <button class="nav-item" id="nav-atlas">📍 Atlas</button>
+            <button class="nav-item" id="nav-search">🔍 Search</button>
+            <button class="nav-item" id="nav-terminal">🖥️ Terminal</button>
             <button class="nav-item" id="nav-settings">⚙️ Setup</button>
           </nav>
         </aside>
@@ -96,6 +96,61 @@
           </div>
         </div>
       </main>
+
+      <!-- Terminal Panel — bottom center overlay -->
+      <div id="terminal-panel" class="panel-hidden">
+        <div id="terminal-header">
+          <span class="terminal-title">🖥️ TERMINAL</span>
+          <button id="close-terminal">✕</button>
+        </div>
+        <div id="terminal-container"></div>
+      </div>
+
+      <!-- Search Panel — modal overlay -->
+      <div id="search-panel" class="panel-hidden">
+        <div id="search-header">
+          <span class="search-title">🔍 CODE SEARCH</span>
+          <button id="close-search">✕</button>
+        </div>
+        <div id="search-input-wrapper">
+          <input type="text" id="search-input" placeholder="Search across project..." />
+          <button id="search-go-btn">SEARCH</button>
+        </div>
+        <div id="search-results"></div>
+      </div>
+
+      <!-- Setup Panel — modal overlay -->
+      <div id="setup-panel" class="panel-hidden">
+        <div id="setup-header">
+          <span class="setup-title">⚙️ SETTINGS</span>
+          <button id="close-setup">✕</button>
+        </div>
+        <div id="setup-content">
+          <div class="setting-group">
+            <label class="setting-label">Temperature</label>
+            <div class="slider-row">
+              <input type="range" id="temp-slider" min="0" max="200" value="70" />
+              <span id="temp-value">0.70</span>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Context Window</label>
+            <div class="slider-row">
+              <input type="range" id="tokens-slider" min="2048" max="32768" value="32768" step="1024" />
+              <span id="tokens-value">32768</span>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Background</label>
+            <div class="bg-options">
+              <button class="bg-option active" data-bg="vortex">Vortex</button>
+              <button class="bg-option" data-bg="grid">Grid</button>
+              <button class="bg-option" data-bg="dark">Dark</button>
+              <button class="bg-option" data-bg="nebula">Nebula</button>
+            </div>
+          </div>
+        </div>
+      </div>
       
       <footer id="status-bar">
         <div class="status-group">
