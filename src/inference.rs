@@ -747,6 +747,7 @@ impl Backend {
                                 // Heuristic: If we see a double newline and then a transition phrase, end thoughts
                                 let after_nl = &text[current_pos + newline_idx + 2..];
                                 let lower = after_nl.to_lowercase();
+                                let transitions = [
                                     "i will", "i'll", "i'm going to", "now", "starting", "let's begin",
                                     "here is", "i have", "first,", "certainly!", "certainly,", "hello!", "hi!", "okay,"
                                 ];
