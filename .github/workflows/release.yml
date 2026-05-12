@@ -62,6 +62,19 @@ jobs:
         run: |
           brew install pkg-config openssl fontconfig freetype llvm cmake
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build Web Assets
+        run: |
+          cd tempest-wasm && wasm-pack build --target bundler --out-dir ../tempest-web/src/pkg && cd ..
+          cd tempest-web && npm install && npm run build && cd ..
+
       - name: Build Release
         env:
           MACOSX_DEPLOYMENT_TARGET: "13.0"
