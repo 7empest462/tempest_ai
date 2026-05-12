@@ -712,12 +712,10 @@ impl Backend {
                                     let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
                                 }
                                 in_thought_block = false;
-                                current_pos += json_idx; // Don't skip ```json, it belongs to full_content
-                                in_thought_block = false;
                                 if let Some(tx) = event_tx.lock().clone() {
                                     let _ = tx.try_send(AgentEvent::Thinking(None));
                                 }
-                                current_pos += done_idx; // Don't skip DONE:
+                                current_pos += json_idx; // Don't skip ```json, it belongs to full_content
                             } else if let Some(mission_idx) = text[current_pos..].to_uppercase().find("[/MISSION]") {
                                 let reasoning = &text[current_pos..current_pos + mission_idx];
                                 reasoning_content.push_str(reasoning);
@@ -727,13 +725,30 @@ impl Backend {
                                 }
                                 in_thought_block = false;
                                 current_pos += mission_idx + 10;
+                            } else if let Some(think_idx) = text[current_pos..].to_uppercase().find("</THINK>") {
+                                let reasoning = &text[current_pos..current_pos + think_idx];
+                                reasoning_content.push_str(reasoning);
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    let _ = tx.try_send(AgentEvent::Thinking(None));
+                                }
+                                in_thought_block = false;
+                                current_pos += think_idx + 8;
+                            } else if let Some(done_idx) = text[current_pos..].find("DONE:") {
+                                let reasoning = &text[current_pos..current_pos + done_idx];
+                                reasoning_content.push_str(reasoning);
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    let _ = tx.try_send(AgentEvent::Thinking(None));
+                                }
+                                in_thought_block = false;
+                                current_pos += done_idx;
                             } else if let Some(newline_idx) = text[current_pos..].find("\n\n") {
                                 // Heuristic: If we see a double newline and then a transition phrase, end thoughts
                                 let after_nl = &text[current_pos + newline_idx + 2..];
                                 let lower = after_nl.to_lowercase();
-                                let transitions = [
                                     "i will", "i'll", "i'm going to", "now", "starting", "let's begin",
-                                    "here is", "i have", "first,"
+                                    "here is", "i have", "first,", "certainly!", "certainly,", "hello!", "hi!", "okay,"
                                 ];
                                 
                                 if transitions.iter().any(|&t| lower.starts_with(t)) {
@@ -1261,12 +1276,10 @@ impl Backend {
                                                 let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
                                             }
                                             in_thought_block = false;
-                                            current_pos += json_idx;
-                                            in_thought_block = false;
                                             if let Some(tx) = event_tx.lock().clone() {
                                                 let _ = tx.try_send(AgentEvent::Thinking(None));
                                             }
-                                            current_pos += done_idx;
+                                            current_pos += json_idx;
                                         } else if let Some(mission_idx) = text[current_pos..].to_uppercase().find("[/MISSION]") {
                                             let reasoning = &text[current_pos..current_pos + mission_idx];
                                             reasoning_content.push_str(reasoning);
@@ -1276,13 +1289,22 @@ impl Backend {
                                             }
                                             in_thought_block = false;
                                             current_pos += mission_idx + 10;
+                                        } else if let Some(done_idx) = text[current_pos..].find("DONE:") {
+                                            let reasoning = &text[current_pos..current_pos + done_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                                let _ = tx.try_send(AgentEvent::Thinking(None));
+                                            }
+                                            in_thought_block = false;
+                                            current_pos += done_idx;
                                         } else if let Some(newline_idx) = text[current_pos..].find("\n\n") {
                                             // Heuristic: Transition from thought to message (MLX)
                                             let after_nl = &text[current_pos + newline_idx + 2..];
                                             let lower = after_nl.to_lowercase();
                                             let transitions = [
                                                 "i will", "i'll", "i'm going to", "now", "starting", "let's begin",
-                                                "here is", "i have", "first,"
+                                                "here is", "i have", "first,", "certainly!", "certainly,", "hello!", "hi!", "okay,"
                                             ];
                                             
                                             if transitions.iter().any(|&t| lower.starts_with(t)) {
