@@ -32,8 +32,9 @@ A glassmorphic, browser-based development environment served by the Nexus WebSoc
 
 ```bash
 # Launch the Web Command Center
-./tempest.sh web --mlx    # Apple Silicon (Metal + Neural Engine)
-./tempest.sh web --ollama # Cross-platform via Ollama
+./tempest.sh web              # Default: Ollama backend
+./tempest.sh web --mlx        # Apple Silicon (Metal + Neural Engine)
+./tempest.sh web --lmstudio   # LM Studio (local OpenAI-compatible API)
 ```
 
 ### 📟 "Cyber-Orchestrator" TUI

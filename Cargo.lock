@@ -10305,9 +10305,9 @@ dependencies = [
 
 [[package]]
 name = "tempest-monitor"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89a7fc8a074cdb0efc01b84d25bff39970b9c6fb28af54ce8ab26a9eca9a38b3"
+checksum = "4bae0196c2e8467c6d3fe0c974b3517e3ec41814cde8f1b068404373e17c5093"
 dependencies = [
  "battery",
  "chrono",

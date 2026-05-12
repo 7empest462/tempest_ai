@@ -37,6 +37,7 @@ pub enum NexusResponse {
     Error { message: String },
     TerminalOutput { data: String },
     SearchResults { matches: Vec<SearchMatch> },
+    BackendInfo { backend: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,10 +55,11 @@ pub struct SearchMatch {
 
 pub struct NexusState {
     pub agent: Agent,
+    pub backend_id: String,
 }
 
-pub async fn run_nexus(agent: Agent, port: u16) {
-    let state = Arc::new(NexusState { agent });
+pub async fn run_nexus(agent: Agent, port: u16, backend_id: String) {
+    let state = Arc::new(NexusState { agent, backend_id });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
@@ -91,6 +93,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
             }
         }
     });
+
+    // Send initial backend info
+    let backend_info = NexusResponse::BackendInfo { backend: state.backend_id.clone() };
+    if let Ok(json) = serde_json::to_string(&backend_info) {
+        let _ = ws_tx.send(Message::Text(json.into())).await;
+    }
 
     // Telemetry Task
     let ws_tx_tele = ws_tx.clone();

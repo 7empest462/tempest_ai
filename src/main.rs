@@ -428,7 +428,8 @@ async fn main() -> Result<()> {
 
     if cli.web {
         println!("{} Launching Tempest Nexus...", "🌐".green());
-        tempest_ai::nexus::run_nexus(agent, cli.port).await;
+        let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.mlx { "mlx" } else { "ollama" };
+        tempest_ai::nexus::run_nexus(agent, cli.port, backend_id.to_string()).await;
         return Ok(());
     }
 

@@ -157,6 +157,17 @@ async function startApp() {
       case 'SearchResults':
         renderSearchResults(msg.payload.matches);
         break;
+      case 'BackendInfo': {
+        const radio = document.querySelector(`input[name="backend"][value="${msg.payload.backend}"]`) as HTMLInputElement;
+        if (radio) {
+          radio.checked = true;
+          if (engineStatus) {
+            const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio' };
+            engineStatus.innerText = `Engine: ${names[msg.payload.backend] || msg.payload.backend}`;
+          }
+        }
+        break;
+      }
       case 'Error':
         appendMessage('system', `❌ [ERROR]: ${msg.payload.message}`);
         break;

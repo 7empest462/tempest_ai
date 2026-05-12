@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
-tempest-monitor = { version = "0.4.1", default-features = false }
+tempest-monitor = { version = "0.4.2", default-features = false }
 tokio = { version = "1.0", features = ["full"] }
 ollama-rs = { version = "0.3.4", features = ["stream", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
