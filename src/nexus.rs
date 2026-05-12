@@ -12,6 +12,9 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use sysinfo::System;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use include_dir::{include_dir, Dir};
+
+static WEB_DIR: Dir<'_> = include_dir!("tempest-web/dist");
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
@@ -159,7 +162,7 @@ pub async fn run_nexus(
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .fallback_service(tower_http::services::ServeDir::new("tempest-web/dist"))
+        .fallback(static_handler)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -469,6 +472,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                         });
                     }
                 }
+            }
+        }
+    }
+}
+async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    
+    // Default to index.html if path is empty
+    let path = if path.is_empty() { "index.html" } else { path };
+    
+    match WEB_DIR.get_file(path) {
+        Some(file) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                file.contents(),
+            ).into_response()
+        }
+        None => {
+            // SPA Fallback: If file not found, serve index.html
+            if let Some(index) = WEB_DIR.get_file("index.html") {
+                (
+                    axum::http::StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/html")],
+                    index.contents(),
+                ).into_response()
+            } else {
+                axum::http::StatusCode::NOT_FOUND.into_response()
             }
         }
     }

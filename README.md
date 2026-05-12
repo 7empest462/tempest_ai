@@ -12,29 +12,28 @@
 
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
-Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.3 release, Tempest introduces the **Web Command Center** — a browser-based development environment with a real PTY terminal, persistent file editing, live hardware telemetry, and multi-language syntax highlighting, all powered by a unified WebSocket bridge.
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.3 release, Tempest introduces the **Standalone Web Command Center** — a browser-based development environment with a real PTY terminal, persistent file editing, live hardware telemetry, and multi-language syntax highlighting, all powered by a unified WebSocket bridge and **embedded directly into the binary.**
 
 ---
 
 ## 🕹️ Available Interfaces
 
-### 🌐 Web Command Center *(New in v0.3.3)*
-A glassmorphic, browser-based development environment served by the Nexus WebSocket engine.
-
+- **🧠 Reasoning Monitor**: Live-streaming "Internal Monologue" stream showing the agent's thought process in real-time.
+- **🚀 Mission Control Stepper**: Visual lifecycle tracking (Thinking → Planning → Executing) with pulse animations.
+- **📦 Single-Binary Portable**: Web assets are embedded in the Rust binary — no external `dist` folder required.
 - **💬 Neural Chat**: Conversational AI interface for autonomous engineering tasks
 - **📂 File Explorer**: Full filesystem traversal with scrollable navigation and back-button support
 - **📄 Code Deck**: Syntax-highlighted file viewer with inline editing and persistent save-to-disk
 - **🖥️ PTY Terminal**: Real `zsh` session via `portable-pty` + `xterm.js` with auto-resize
 - **🔍 Code Search**: Project-wide `grep` search — click results to open files in the editor
-- **⚙️ Settings Panel**: Temperature, context window, and background theme controls
-- **📊 Live Telemetry**: Real-time CPU, GPU (Metal), and RAM metrics in the header bar
+- **📊 Live Telemetry**: Real-time CPU, GPU (Metal/Linux), and RAM metrics in the header bar
 - **🔀 Backend Switcher**: Toggle between MLX, Ollama, AI Bridge, and LM Studio
 
 ```bash
-# Launch the Web Command Center
-./tempest.sh web              # Default: Ollama backend
-./tempest.sh web --mlx        # Apple Silicon (Metal + Neural Engine)
-./tempest.sh web --lmstudio   # LM Studio (local OpenAI-compatible API)
+# Launch the Standalone Web Command Center
+./target/release/tempest_ai --web --mlx        # Apple Silicon (Metal + Neural Engine)
+./target/release/tempest_ai --web              # Default: Ollama backend
+./target/release/tempest_ai --web --lmstudio   # LM Studio (local OpenAI-compatible API)
 ```
 
 ### 📟 "Cyber-Orchestrator" TUI
@@ -111,7 +110,8 @@ Tempest supports four inference backends, selectable at launch:
 - **🔌 MCP Protocol Support**: Native integration with any Model Context Protocol server
 - **⚡ Parallel Tool Execution**: Independent tool calls dispatched concurrently
 - **⏪ Multi-Level Undo**: Automatic file snapshots before every modification — `/undo` to revert
-- **📊 Real-Time Telemetry**: CPU, GPU (Metal), and RAM monitoring via `tempest-monitor`
+- **📊 Real-Time Telemetry**: CPU, GPU (Metal/Linux), and RAM monitoring via `tempest-monitor`
+- **📦 Standalone Portable**: Web Command Center assets embedded via `include_dir` for single-file deployment
 - **🛡️ Safe Mode**: Visual diff previews for all proposed changes during the approval phase
 - **📦 Unified Library**: Core engine as a standalone Rust crate for WASM, VS Code, and CLI targets
 
@@ -135,8 +135,8 @@ cd tempest_ai
 ### 2. Launch
 
 ```bash
-# Web Command Center (recommended)
-./tempest.sh web --mlx
+# Web Command Center (Standalone)
+./target/release/tempest_ai --web --mlx
 
 # TUI Mode
 ./target/release/tempest_ai --mlx

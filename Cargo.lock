@@ -10377,6 +10377,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "miette",
+ "mime_guess",
  "mistralrs",
  "mlx-macros",
  "mlx-rs",

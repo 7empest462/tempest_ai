@@ -25,7 +25,7 @@ use std::sync::Arc;
     name = "tempest_ai", 
     version, 
     about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.", 
-    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.2 Operational Manual, launch the TUI and type '/help'."
+    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --web    Launch Standalone Web Command Center\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.3 Operational Manual, launch the TUI and type '/help'."
 )]
 struct Cli {
     /// Ollama model to use (overrides config and OLLAMA_MODEL env var)
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
             ),
             (
                 "tempest_identity",
-                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.2` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.3` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
                 vec!["identity", "branding", "instructions", "architecture"]
             )
         ];
@@ -505,22 +505,26 @@ async fn main() -> Result<()> {
             // sysinfo process.memory() often misses private Metal heaps on macOS.
             let ai_ram_mb = match mode {
                 tempest_ai::inference::AgentMode::MLX => {
-                    let mut vram_mb = 0;
-                    #[cfg(target_os = "macos")]
-                    {
-                        // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
-                        // We'll peek at the PerformanceStatistics from AGX specifically.
-                        if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
-                            let s = String::from_utf8_lossy(&output.stdout);
-                            // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
-                            let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
-                            for caps in vram_re.captures_iter(&s) {
-                                if let Some(m) = caps.get(1) {
-                                    vram_mb += m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024;
-                                }
+                    let vram_mb: u64 = {
+                        #[cfg(target_os = "macos")]
+                        {
+                            // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
+                            // We'll peek at the PerformanceStatistics from AGX specifically.
+                            if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
+                                let s = String::from_utf8_lossy(&output.stdout);
+                                // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
+                                let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
+                                vram_re.captures_iter(&s)
+                                    .filter_map(|caps| caps.get(1))
+                                    .map(|m| m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024)
+                                    .sum()
+                            } else {
+                                0
                             }
                         }
-                    }
+                        #[cfg(not(target_os = "macos"))]
+                        0
+                    };
                     (tempest_mem_bytes / 1024 / 1024) + vram_mb
                 }
                 tempest_ai::inference::AgentMode::Ollama => {

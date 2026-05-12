@@ -116,6 +116,7 @@ ratatui-textarea = "0.9.0"
 axum = { version = "0.8.9", features = ["ws"] }
 tower-http = { version = "0.6.10", features = ["fs", "cors"] }
 tower = { version = "0.5.3", features = ["full"] }
+mime_guess = "2.0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.25.3", features = ["metal", "accelerate"] }
