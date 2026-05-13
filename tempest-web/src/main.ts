@@ -114,6 +114,7 @@ async function startApp() {
   let currentFileExt = '';
   let terminalSpawned = false;
   // (streaming state tracked by button visibility)
+  let inLeakedThink = false;
 
   // Session stats
   const sessionStart = Date.now();
@@ -307,9 +308,39 @@ async function startApp() {
         break;
       }
       case 'StreamToken': {
-        console.log('StreamToken:', msg.payload.token);
+        let token: string = msg.payload.token;
+
+        // Strip DeepSeek prompt template artifacts
+        token = token.replace(/\<｜begin of sentence｜\>/g, '');
+        token = token.replace(/\<｜end of sentence｜\>/g, '');
+
+        // Handle leaked <think> blocks — redirect to reasoning monitor
+        if (token.includes('<think>')) {
+          inLeakedThink = true;
+          token = token.replace(/<think>/g, '');
+        }
+        if (token.includes('</think>')) {
+          inLeakedThink = false;
+          token = token.replace(/<\/think>/g, '');
+        }
+
+        // If we're inside a leaked think block, send to reasoning monitor instead
+        if (inLeakedThink) {
+          if (reasoningMonitor && reasoningText) {
+            reasoningMonitor.classList.remove('hidden');
+            reasoningText.innerText += token;
+          }
+          break;
+        }
+
+        // Strip echoed prompt turn markers
+        token = token.replace(/Human:\s*/g, '');
+
+        // Skip if nothing left after filtering
+        if (token.length === 0) break;
+
         updateStepper('Executing');
-        updateLastMessage(msg.payload.token);
+        updateLastMessage(token);
         // Estimate tokens
         sessionTokens++;
         if (ddTokens) ddTokens.innerText = sessionTokens.toString();
@@ -383,6 +414,7 @@ async function startApp() {
     // Clear old reasoning
     if (reasoningText) reasoningText.innerText = '';
     if (reasoningMonitor) reasoningMonitor.classList.add('hidden');
+    inLeakedThink = false;
     appendMessage('user', text);
     chatInput.value = '';
     lastAiMessage = null;
