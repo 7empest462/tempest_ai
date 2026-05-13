@@ -411,6 +411,14 @@ impl<'a> AgentStream<'a> {
             AgentStreamState::StreamingContent { content } => {
                 let content = content.clone();
                 // Expanded detection to catch .py, .json, and naked blocks
+                // Check if ```json blocks contain tool-shaped JSON (not raw code)
+                let json_is_tool_call = if content.contains("```json") {
+                    let lower = content.to_lowercase();
+                    lower.contains("\"tool\"") || lower.contains("\"name\"") || lower.contains("\"function\"")
+                } else {
+                    false
+                };
+
                 let contains_raw_code = content.contains("```rust") || 
                                       content.contains("```python") || 
                                       content.contains("```py") || 
@@ -418,8 +426,8 @@ impl<'a> AgentStream<'a> {
                                       content.contains("```js") || 
                                       content.contains("```sh") || 
                                       content.contains("```bash") || 
-                                      content.contains("```json") ||
-                                      (content.contains("```") && content.len() > 20); // Catch naked blocks with actual content
+                                      (content.contains("```json") && !json_is_tool_call) ||
+                                      (content.contains("```") && content.len() > 20 && !json_is_tool_call); // Catch naked blocks with actual content
 
                 let lower_content = content.to_lowercase();
                 let is_delegating = lower_content.contains("you generate") || 
@@ -805,8 +813,8 @@ impl Agent {
                 if mode == AgentMode::MLX {
                     final_system_prompt.push_str("\n\n⚠️ AGENT OPERATIONAL RULES:
 1. YOU ARE THE ACTOR: You possess the tools (`write_file`, `run_command`).
-2. REASONING BOUNDARY: You MUST wrap your internal planning, logic, and thoughts inside `[MISSION]` and `[/MISSION]` tags.
-3. ACTIONS ARE EXTERNAL: All JSON tool calls MUST be placed OUTSIDE and AFTER the `[/MISSION]` tag.
+2. REASONING BOUNDARY: You MUST wrap your internal planning, logic, and thoughts inside `<think>` and `</think>` tags.
+3. ACTIONS ARE EXTERNAL: All JSON tool calls and conversational responses MUST be placed OUTSIDE and AFTER the `</think>` tag.
 4. CODE DELIVERY: You are FORBIDDEN from using Markdown code blocks (```python) in your responses unless they are for explanation. 
 5. THE JSON IS YOUR WORK: Your only way to 'do' work is by outputting a JSON tool call. A JSON tool call is NOT 'raw code'; it is your mandatory delivery mechanism.
 6. EDITOR AWARENESS: You have direct visibility into the user's active editor. ALWAYS prioritize the file path and content provided in the `[EDITOR]` block. Never guess a path if one is provided in context.
@@ -2232,10 +2240,34 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let mut calls = Vec::new();
         for caps in block_regex.captures_iter(content) {
             if let Some(m) = caps.get(1) {
-                if let Ok(val) = serde_json::from_str::<Value>(m.as_str().trim()) {
+                let block_text = m.as_str().trim();
+                if let Ok(val) = serde_json::from_str::<Value>(block_text) {
+                    // Single valid JSON value
                     if let Some(obj) = val.as_object() {
                         if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") {
                             calls.push(val);
+                        }
+                    } else if let Some(arr) = val.as_array() {
+                        // Already a JSON array of tool calls
+                        for item in arr {
+                            if let Some(obj) = item.as_object() {
+                                if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") {
+                                    calls.push(item.clone());
+                                }
+                            }
+                        }
+                    }
+                } else if let Ok(val) = serde_json::from_str::<Value>(&format!("[{}]", block_text)) {
+                    // 🛡️ MULTI-CALL RECOVERY: LM Studio models often output multiple JSON objects
+                    // separated by commas in a single ```json block (e.g., `{...}, {...}`).
+                    // This is invalid JSON on its own, but valid when wrapped in array brackets.
+                    if let Some(arr) = val.as_array() {
+                        for item in arr {
+                            if let Some(obj) = item.as_object() {
+                                if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") {
+                                    calls.push(item.clone());
+                                }
+                            }
                         }
                     }
                 }
