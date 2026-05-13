@@ -443,7 +443,10 @@ async function startApp() {
   });
 
   // 9. File Explorer Logic
+  let selectedItem: { name: string, is_dir: boolean, path: string } | null = null;
+
   const fetchExplorer = (path: string) => {
+    selectedItem = null;
     sendNexus('ListFiles', { path });
   };
 
@@ -454,8 +457,18 @@ async function startApp() {
       const div = document.createElement('div');
       div.className = `explorer-item ${item.is_dir ? 'folder' : 'file'}`;
       div.innerText = item.name;
-      div.onclick = () => {
-        const fullPath = `${currentPath}/${item.name}`;
+      const fullPath = `${currentPath}/${item.name}`;
+
+      // Single click = select
+      div.onclick = (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('.explorer-item').forEach(el => el.classList.remove('selected'));
+        div.classList.add('selected');
+        selectedItem = { name: item.name, is_dir: item.is_dir, path: fullPath };
+      };
+
+      // Double click = open file or navigate folder
+      div.ondblclick = () => {
         if (!item.is_dir) {
           if (editorFilename) editorFilename.innerText = item.name;
           currentFileExt = item.name.split('.').pop() || '';
@@ -468,6 +481,65 @@ async function startApp() {
       fileExplorer.appendChild(div);
     });
   };
+
+  // Deselect on clicking empty explorer area
+  fileExplorer?.addEventListener('click', () => {
+    document.querySelectorAll('.explorer-item').forEach(el => el.classList.remove('selected'));
+    selectedItem = null;
+  });
+
+  // New File
+  document.getElementById('new-file-btn')?.addEventListener('click', () => {
+    const name = prompt('New file name:');
+    if (!name) return;
+    const path = `${currentPath}/${name}`;
+    sendNexus('CreateFile', { path });
+    appendMessage('system', `📄 [NEXUS]: Created file ${name}`);
+    setTimeout(() => fetchExplorer(currentPath), 200);
+  });
+
+  // New Folder
+  document.getElementById('new-folder-btn')?.addEventListener('click', () => {
+    const name = prompt('New folder name:');
+    if (!name) return;
+    const path = `${currentPath}/${name}`;
+    sendNexus('CreateFolder', { path });
+    appendMessage('system', `📁 [NEXUS]: Created folder ${name}`);
+    setTimeout(() => fetchExplorer(currentPath), 200);
+  });
+
+  // Rename
+  document.getElementById('rename-btn')?.addEventListener('click', () => {
+    if (!selectedItem) {
+      appendMessage('system', '⚠️ [NEXUS]: Select a file or folder first.');
+      return;
+    }
+    const newName = prompt(`Rename "${selectedItem.name}" to:`, selectedItem.name);
+    if (!newName || newName === selectedItem.name) return;
+    const newPath = `${currentPath}/${newName}`;
+    sendNexus('RenameItem', { old_path: selectedItem.path, new_path: newPath });
+    appendMessage('system', `✏️ [NEXUS]: Renamed ${selectedItem.name} → ${newName}`);
+    selectedItem = null;
+    setTimeout(() => fetchExplorer(currentPath), 200);
+  });
+
+  // Delete
+  document.getElementById('delete-btn')?.addEventListener('click', () => {
+    if (!selectedItem) {
+      appendMessage('system', '⚠️ [NEXUS]: Select a file or folder first.');
+      return;
+    }
+    const ok = confirm(`Delete "${selectedItem.name}"? This cannot be undone.`);
+    if (!ok) return;
+    sendNexus('DeleteItem', { path: selectedItem.path });
+    appendMessage('system', `🗑️ [NEXUS]: Deleted ${selectedItem.name}`);
+    if (currentOpenFile === selectedItem.path) {
+      if (editorContainer) editorContainer.classList.add('hidden');
+      currentOpenFile = null;
+    }
+    selectedItem = null;
+    setTimeout(() => fetchExplorer(currentPath), 200);
+  });
 
   backBtn?.addEventListener('click', () => {
     fetchExplorer(`${currentPath}/..`);

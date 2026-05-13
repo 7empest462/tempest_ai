@@ -23,6 +23,10 @@ pub enum NexusRequest {
     ListFiles { path: String },
     ReadFile { path: String },
     WriteFile { path: String, content: String },
+    CreateFile { path: String },
+    CreateFolder { path: String },
+    DeleteItem { path: String },
+    RenameItem { old_path: String, new_path: String },
     TerminalSpawn {},
     TerminalInput { data: String },
     TerminalResize { cols: u16, rows: u16 },
@@ -365,6 +369,64 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                         } else {
                             let res = NexusResponse::Error { message: format!("Failed to write to {}", path) };
                             let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                        }
+                    }
+                    NexusRequest::CreateFile { path } => {
+                        // Create parent dirs if needed, then create empty file
+                        if let Some(parent) = std::path::Path::new(&path).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::File::create(&path) {
+                            Ok(_) => {
+                                let res = NexusResponse::Done;
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                            Err(e) => {
+                                let res = NexusResponse::Error { message: format!("Failed to create file: {}", e) };
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                        }
+                    }
+                    NexusRequest::CreateFolder { path } => {
+                        match std::fs::create_dir_all(&path) {
+                            Ok(_) => {
+                                let res = NexusResponse::Done;
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                            Err(e) => {
+                                let res = NexusResponse::Error { message: format!("Failed to create folder: {}", e) };
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                        }
+                    }
+                    NexusRequest::DeleteItem { path } => {
+                        let target = std::path::Path::new(&path);
+                        let result = if target.is_dir() {
+                            std::fs::remove_dir_all(target)
+                        } else {
+                            std::fs::remove_file(target)
+                        };
+                        match result {
+                            Ok(_) => {
+                                let res = NexusResponse::Done;
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                            Err(e) => {
+                                let res = NexusResponse::Error { message: format!("Failed to delete: {}", e) };
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                        }
+                    }
+                    NexusRequest::RenameItem { old_path, new_path } => {
+                        match std::fs::rename(&old_path, &new_path) {
+                            Ok(_) => {
+                                let res = NexusResponse::Done;
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
+                            Err(e) => {
+                                let res = NexusResponse::Error { message: format!("Failed to rename: {}", e) };
+                                let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
+                            }
                         }
                     }
                     NexusRequest::TerminalSpawn {} => {

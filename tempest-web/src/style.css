@@ -408,6 +408,42 @@ main {
   white-space: nowrap;
 }
 
+#explorer-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.explorer-action {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.explorer-action:hover {
+  background: rgba(0, 242, 255, 0.1);
+  border-color: var(--accent-color);
+  color: var(--text-primary);
+}
+
+#delete-btn:hover {
+  background: rgba(255, 59, 92, 0.15);
+  border-color: #ff3b5c;
+  color: #ff3b5c;
+}
+
+.explorer-item.selected {
+  background: rgba(0, 242, 255, 0.1);
+  border-left: 2px solid var(--accent-color);
+}
+
 /* ═══ Bottom Nav ═══ */
 #bottom-nav {
   display: flex;
