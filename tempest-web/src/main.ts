@@ -388,7 +388,7 @@ async function startApp() {
     lastAiMessage = null;
     sessionMessages++;
     if (ddMessages) ddMessages.innerText = sessionMessages.toString();
-    sendNexus('Chat', { message: text });
+    sendNexus('Chat', { message: text, editor_context: currentOpenFile || undefined });
     setStreamingState(true);
   };
 

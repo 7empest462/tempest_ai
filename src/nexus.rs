@@ -19,7 +19,7 @@ static WEB_DIR: Dir<'_> = include_dir!("tempest-web/dist");
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum NexusRequest {
-    Chat { message: String },
+    Chat { message: String, #[serde(default)] editor_context: Option<String> },
     ListFiles { path: String },
     ReadFile { path: String },
     WriteFile { path: String, content: String },
@@ -293,12 +293,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                 let pty_pair_clone = pty_pair.clone();
                 
                 match req {
-                    NexusRequest::Chat { message } => {
+                    NexusRequest::Chat { message, editor_context } => {
                         // Reset stop flag before starting a new run
                         state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         let stop_flag = state.stop_flag.clone();
+                        
+                        // Inject editor context if user has a file open
+                        let full_message = if let Some(ref path) = editor_context {
+                            format!("[EDITOR] Active File: {}\n\n{}", path, message)
+                        } else {
+                            message
+                        };
                         tokio::spawn(async move {
-                            if let Err(e) = agent.run(message, stop_flag).await {
+                            if let Err(e) = agent.run(full_message, stop_flag).await {
                                 let res = NexusResponse::Error { message: e.to_string() };
                                 let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
                             }
