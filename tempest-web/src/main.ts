@@ -115,6 +115,7 @@ async function startApp() {
   let terminalSpawned = false;
   // (streaming state tracked by button visibility)
   let inLeakedThink = false;
+  let streamAccum = '';
 
   // Session stats
   const sessionStart = Date.now();
@@ -311,10 +312,10 @@ async function startApp() {
         let token: string = msg.payload.token;
 
         // Strip DeepSeek prompt template artifacts
-        token = token.replace(/\<｜begin of sentence｜\>/g, '');
-        token = token.replace(/\<｜end of sentence｜\>/g, '');
+        token = token.replace(/<｜begin of sentence｜>/g, '');
+        token = token.replace(/<｜end of sentence｜>/g, '');
 
-        // Handle leaked <think> blocks — redirect to reasoning monitor
+        // Handle leaked <think> blocks
         if (token.includes('<think>')) {
           inLeakedThink = true;
           token = token.replace(/<think>/g, '');
@@ -324,7 +325,7 @@ async function startApp() {
           token = token.replace(/<\/think>/g, '');
         }
 
-        // If we're inside a leaked think block, send to reasoning monitor instead
+        // If inside a leaked think block, redirect to reasoning monitor
         if (inLeakedThink) {
           if (reasoningMonitor && reasoningText) {
             reasoningMonitor.classList.remove('hidden');
@@ -333,15 +334,40 @@ async function startApp() {
           break;
         }
 
-        // Strip echoed prompt turn markers
-        token = token.replace(/Human:\s*/g, '');
+        // Buffer tokens to detect multi-token leaked patterns
+        streamAccum += token;
 
-        // Skip if nothing left after filtering
-        if (token.length === 0) break;
+        // If accumulator contains a leaked prompt echo, buffer until newline
+        if (streamAccum.includes('Human:') || streamAccum.includes('[EDITOR]') || streamAccum.includes('Assistant:')) {
+          if (!streamAccum.includes('\n')) {
+            break;
+          }
+          streamAccum = streamAccum
+            .split('\n')
+            .filter(line => {
+              const t = line.trim();
+              return !t.startsWith('Human:') &&
+                     !t.startsWith('[EDITOR]') &&
+                     !t.startsWith('Assistant:') &&
+                     t !== '';
+            })
+            .join('\n');
+        }
+
+        // Check if buffer ends with a partial pattern
+        const partials = ['Human', 'Human:', '[EDITOR', '[EDITOR]', 'Assistant', 'Assistant:'];
+        if (partials.some(p => streamAccum.endsWith(p)) && streamAccum.length < 200) {
+          break;
+        }
+
+        // Flush accumulator
+        token = streamAccum;
+        streamAccum = '';
+
+        if (token.trim().length === 0) break;
 
         updateStepper('Executing');
         updateLastMessage(token);
-        // Estimate tokens
         sessionTokens++;
         if (ddTokens) ddTokens.innerText = sessionTokens.toString();
         break;
@@ -415,6 +441,7 @@ async function startApp() {
     if (reasoningText) reasoningText.innerText = '';
     if (reasoningMonitor) reasoningMonitor.classList.add('hidden');
     inLeakedThink = false;
+    streamAccum = '';
     appendMessage('user', text);
     chatInput.value = '';
     lastAiMessage = null;
