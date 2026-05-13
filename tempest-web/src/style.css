@@ -103,7 +103,7 @@ body {
 /* ═══ Header Dropdowns ═══ */
 #header-controls {
   display: flex;
-  gap: 12px;
+  gap: 20px;
 }
 
 .header-dropdown {
@@ -140,7 +140,7 @@ body {
   border: 1px solid var(--border-color);
   border-radius: 12px;
   padding: 8px 0;
-  z-index: 1000;
+  z-index: 9999;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
 }
 
