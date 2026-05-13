@@ -22,6 +22,29 @@
           <span class="vortex-icon">🌪️</span>
           <h1>TEMPEST <span class="accent">AI</span></h1>
         </div>
+        <div id="header-controls">
+          <div class="header-dropdown">
+            <button class="dropdown-trigger" id="model-dropdown-btn">🧠 Models</button>
+            <div class="dropdown-panel" id="model-dropdown">
+              <div class="dropdown-header">Active Models</div>
+              <div class="dropdown-item"><span class="dropdown-label">Planner</span><span id="dd-planner" class="dropdown-value">--</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Executor</span><span id="dd-executor" class="dropdown-value">--</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Verifier</span><span id="dd-verifier" class="dropdown-value">--</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Backend</span><span id="dd-backend" class="dropdown-value">--</span></div>
+            </div>
+          </div>
+          <div class="header-dropdown">
+            <button class="dropdown-trigger" id="session-dropdown-btn">📊 Session</button>
+            <div class="dropdown-panel" id="session-dropdown">
+              <div class="dropdown-header">Session Statistics</div>
+              <div class="dropdown-item"><span class="dropdown-label">Duration</span><span id="dd-duration" class="dropdown-value">00:00</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Messages</span><span id="dd-messages" class="dropdown-value">0</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Tool Calls</span><span id="dd-tool-calls" class="dropdown-value">0</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Tokens (est)</span><span id="dd-tokens" class="dropdown-value">0</span></div>
+              <div class="dropdown-item"><span class="dropdown-label">Peak TPS</span><span id="dd-peak-tps" class="dropdown-value">--</span></div>
+            </div>
+          </div>
+        </div>
         <div id="telemetry-bar">
           <div id="cpu-metric" class="metric">CPU: --%</div>
           <div id="gpu-metric" class="metric">GPU: --%</div>
@@ -104,6 +127,7 @@
             <div id="chat-input-wrapper">
               <textarea id="chat-input" placeholder="Enter objective..." rows="1"></textarea>
               <button id="send-btn">SEND</button>
+              <button id="stop-btn" class="hidden">STOP</button>
             </div>
           </div>
 
@@ -201,7 +225,9 @@
           <span id="engine-status">Engine: MLX (Metal)</span>
         </div>
         <div class="status-group">
-          <span id="token-metrics">TPS: -- | CTX: --/32k</span>
+          <span id="tps-metric" class="footer-metric">TPS: --</span>
+          <span class="footer-divider">│</span>
+          <span id="ctx-metric" class="footer-metric">CTX: --/32k</span>
         </div>
       </footer>
     </div>

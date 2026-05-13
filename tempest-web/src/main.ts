@@ -34,6 +34,7 @@ async function startApp() {
   // 2. UI Elements
   const chatInput = document.getElementById('chat-input') as HTMLTextAreaElement;
   const sendBtn = document.getElementById('send-btn');
+  const stopBtn = document.getElementById('stop-btn');
   const chatMessages = document.getElementById('chat-messages');
   const cpuMetric = document.getElementById('cpu-metric');
   const gpuMetric = document.getElementById('gpu-metric');
@@ -90,6 +91,21 @@ async function startApp() {
   const navTerminal = document.getElementById('nav-terminal');
   const navSettings = document.getElementById('nav-settings');
 
+  // Footer metrics
+  const tpsMetric = document.getElementById('tps-metric');
+  const ctxMetric = document.getElementById('ctx-metric');
+
+  // Dropdown elements
+  const ddPlanner = document.getElementById('dd-planner');
+  const ddExecutor = document.getElementById('dd-executor');
+  const ddVerifier = document.getElementById('dd-verifier');
+  const ddBackend = document.getElementById('dd-backend');
+  const ddDuration = document.getElementById('dd-duration');
+  const ddMessages = document.getElementById('dd-messages');
+  const ddToolCalls = document.getElementById('dd-tool-calls');
+  const ddTokens = document.getElementById('dd-tokens');
+  const ddPeakTps = document.getElementById('dd-peak-tps');
+
   // 3. State
   let currentPath = '.';
   let currentOpenFile: string | null = null;
@@ -97,6 +113,25 @@ async function startApp() {
   let isEditing = false;
   let currentFileExt = '';
   let terminalSpawned = false;
+  // (streaming state tracked by button visibility)
+
+  // Session stats
+  const sessionStart = Date.now();
+  let sessionMessages = 0;
+  let sessionToolCalls = 0;
+  let sessionTokens = 0;
+  let peakTps = 0;
+  let lastTps = 0;
+  let lastCtxUsed = 0;
+  let lastCtxTotal = 0;
+
+  // Duration ticker
+  setInterval(() => {
+    const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
+    const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const secs = (elapsed % 60).toString().padStart(2, '0');
+    if (ddDuration) ddDuration.innerText = `${mins}:${secs}`;
+  }, 1000);
 
   // 4. xterm.js Terminal
   const term = new Terminal({
@@ -115,7 +150,18 @@ async function startApp() {
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
 
-  // 5. WebSocket Connection
+  // 5. Send/Stop Toggle
+  const setStreamingState = (streaming: boolean) => {
+    if (streaming) {
+      sendBtn?.classList.add('hidden');
+      stopBtn?.classList.remove('hidden');
+    } else {
+      stopBtn?.classList.add('hidden');
+      sendBtn?.classList.remove('hidden');
+    }
+  };
+
+  // 6. WebSocket Connection
   const connect = () => {
     socket = new WebSocket('ws://localhost:8080/ws');
     socket.onopen = () => {
@@ -164,6 +210,12 @@ async function startApp() {
         updateLastMessage(msg.payload.text);
         break;
       case 'Done':
+        setStreamingState(false);
+        // Reset TPS to idle
+        if (tpsMetric) {
+          tpsMetric.innerText = 'TPS: idle';
+          tpsMetric.classList.remove('live');
+        }
         break;
       case 'Telemetry':
         if (cpuMetric) cpuMetric.innerText = `CPU: ${msg.payload.cpu.toFixed(1)}%`;
@@ -192,10 +244,15 @@ async function startApp() {
         renderSearchResults(msg.payload.matches);
         break;
       case 'BackendInfo': {
+        const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio' };
         if (engineStatus) {
-          const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio' };
           engineStatus.innerText = `Engine: ${names[msg.payload.backend] || msg.payload.backend}`;
         }
+        // Populate model dropdown
+        if (ddPlanner) ddPlanner.innerText = msg.payload.planner || '--';
+        if (ddExecutor) ddExecutor.innerText = msg.payload.executor || '--';
+        if (ddVerifier) ddVerifier.innerText = msg.payload.verifier || '--';
+        if (ddBackend) ddBackend.innerText = names[msg.payload.backend] || msg.payload.backend;
         break;
       }
       case 'AgentStateChange': {
@@ -215,6 +272,9 @@ async function startApp() {
             activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
           } else {
             activeToolsList.innerHTML = tools.map(t => `<li>${t}</li>`).join('');
+            // Track tool call count
+            sessionToolCalls += tools.length;
+            if (ddToolCalls) ddToolCalls.innerText = sessionToolCalls.toString();
           }
         }
         break;
@@ -250,6 +310,39 @@ async function startApp() {
         console.log('StreamToken:', msg.payload.token);
         updateStepper('Executing');
         updateLastMessage(msg.payload.token);
+        // Estimate tokens
+        sessionTokens++;
+        if (ddTokens) ddTokens.innerText = sessionTokens.toString();
+        break;
+      }
+      case 'InferenceMetrics': {
+        if (msg.payload.tps != null) {
+          lastTps = msg.payload.tps;
+          if (tpsMetric) {
+            tpsMetric.innerText = `TPS: ${lastTps}`;
+            tpsMetric.classList.add('live');
+          }
+          // Track peak
+          if (lastTps > peakTps) {
+            peakTps = lastTps;
+            if (ddPeakTps) ddPeakTps.innerText = `${peakTps} t/s`;
+          }
+        }
+        if (msg.payload.ctx_used != null && msg.payload.ctx_total != null) {
+          lastCtxUsed = msg.payload.ctx_used;
+          lastCtxTotal = msg.payload.ctx_total;
+          const totalK = (lastCtxTotal / 1024).toFixed(0);
+          const usedK = (lastCtxUsed / 1024).toFixed(1);
+          if (ctxMetric) {
+            ctxMetric.innerText = `CTX: ${usedK}k/${totalK}k`;
+            ctxMetric.classList.add('live');
+          }
+        }
+        break;
+      }
+      case 'SentinelLog': {
+        // Count sentinel events in session stats
+        appendMessage('system', `🛡️ [${msg.payload.sentinel}]: ${msg.payload.message}`);
         break;
       }
       case 'Error':
@@ -260,7 +353,7 @@ async function startApp() {
 
   connect();
 
-  // 6. Chat Logic
+  // 7. Chat Logic
   let lastAiMessage: HTMLElement | null = null;
 
   const appendMessage = (role: 'user' | 'ai' | 'system', content: string) => {
@@ -293,10 +386,20 @@ async function startApp() {
     appendMessage('user', text);
     chatInput.value = '';
     lastAiMessage = null;
+    sessionMessages++;
+    if (ddMessages) ddMessages.innerText = sessionMessages.toString();
     sendNexus('Chat', { message: text });
+    setStreamingState(true);
+  };
+
+  const handleStop = () => {
+    sendNexus('StopStream', {});
+    setStreamingState(false);
+    appendMessage('system', '⏹️ [SYSTEM]: Stream aborted by user.');
   };
 
   sendBtn?.addEventListener('click', handleSend);
+  stopBtn?.addEventListener('click', handleStop);
   chatInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -304,7 +407,42 @@ async function startApp() {
     }
   });
 
-  // 7. File Explorer Logic
+  // 8. Dropdown Logic
+  const modelDropdownBtn = document.getElementById('model-dropdown-btn');
+  const modelDropdown = document.getElementById('model-dropdown');
+  const sessionDropdownBtn = document.getElementById('session-dropdown-btn');
+  const sessionDropdown = document.getElementById('session-dropdown');
+
+  const toggleDropdown = (panel: HTMLElement | null) => {
+    if (!panel) return;
+    // Close all other dropdowns first
+    document.querySelectorAll('.dropdown-panel').forEach(p => {
+      if (p !== panel) p.classList.remove('open');
+    });
+    panel.classList.toggle('open');
+  };
+
+  modelDropdownBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleDropdown(modelDropdown);
+  });
+
+  sessionDropdownBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleDropdown(sessionDropdown);
+  });
+
+  // Close dropdowns on outside click
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.dropdown-panel').forEach(p => p.classList.remove('open'));
+  });
+
+  // Prevent clicks inside dropdowns from closing them
+  document.querySelectorAll('.dropdown-panel').forEach(panel => {
+    panel.addEventListener('click', (e) => e.stopPropagation());
+  });
+
+  // 9. File Explorer Logic
   const fetchExplorer = (path: string) => {
     sendNexus('ListFiles', { path });
   };
@@ -361,7 +499,7 @@ async function startApp() {
     }
   });
 
-  // 8. Terminal Panel Logic
+  // 10. Terminal Panel Logic
   const openTerminal = () => {
     terminalPanel?.classList.remove('panel-hidden');
     navTerminal?.classList.add('active');
@@ -408,7 +546,7 @@ async function startApp() {
     }
   });
 
-  // 9. Search Panel Logic
+  // 11. Search Panel Logic
   const searchInput = document.getElementById('search-input') as HTMLInputElement;
   const searchGoBtn = document.getElementById('search-go-btn');
   const searchResults = document.getElementById('search-results');
@@ -478,7 +616,7 @@ async function startApp() {
     navSearch?.classList.remove('active');
   });
 
-  // 10. Setup Panel Logic
+  // 12. Setup Panel Logic
   const tempSlider = document.getElementById('temp-slider') as HTMLInputElement;
   const tempValue = document.getElementById('temp-value');
   const tokensSlider = document.getElementById('tokens-slider') as HTMLInputElement;
@@ -521,11 +659,11 @@ async function startApp() {
   });
 
   document.getElementById('close-setup')?.addEventListener('click', () => {
-    setupPanel?.classList.add('panel-hidden');
+    setupPanel?.classList.add('hidden');
     navSettings?.classList.remove('active');
   });
 
-  // 12. Safe Mode Approval
+  // 13. Safe Mode Approval
   safemodeApprove?.addEventListener('click', () => {
     sendNexus('SafeModeApprove', {});
     safemodeModal?.classList.add('hidden');

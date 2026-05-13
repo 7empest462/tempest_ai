@@ -29,6 +29,7 @@ pub enum NexusRequest {
     SearchFiles { query: String, path: String },
     SafeModeApprove,
     SafeModeReject,
+    StopStream,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,6 +55,8 @@ pub enum NexusResponse {
     TaskUpdate { task: String },
     ReasoningToken { token: String },
     StreamToken { token: String },
+    InferenceMetrics { tps: Option<u64>, ctx_used: Option<usize>, ctx_total: Option<u64> },
+    SentinelLog { sentinel: String, message: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +80,7 @@ pub struct NexusState {
     pub verifier_model: String,
     pub broadcast_tx: tokio::sync::broadcast::Sender<String>,
     pub tool_tx: Option<tokio::sync::mpsc::Sender<crate::tui::ToolResponse>>,
+    pub stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub async fn run_nexus(
@@ -96,6 +100,7 @@ pub async fn run_nexus(
         backend_id,
         broadcast_tx: b_tx.clone(),
         tool_tx,
+        stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     if let Some(mut rx) = event_rx {
@@ -153,7 +158,27 @@ pub async fn run_nexus(
                             let _ = b_tx_clone.send(json);
                         }
                     }
-                    // Handle Safe Mode diffs here in the future
+                    crate::tui::AgentEvent::TelemetryMetrics { tps, .. } => {
+                        if tps.is_some() {
+                            let res = NexusResponse::InferenceMetrics { tps, ctx_used: None, ctx_total: None };
+                            if let Ok(json) = serde_json::to_string(&res) {
+                                let _ = b_tx_clone.send(json);
+                            }
+                        }
+                    }
+                    crate::tui::AgentEvent::ContextStatus { used, total } => {
+                        let res = NexusResponse::InferenceMetrics { tps: None, ctx_used: Some(used), ctx_total: Some(total) };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::SentinelUpdate { active, log } => {
+                        let sentinel_name = active.first().cloned().unwrap_or_else(|| "Unknown".to_string());
+                        let res = NexusResponse::SentinelLog { sentinel: sentinel_name, message: log };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -269,14 +294,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                 
                 match req {
                     NexusRequest::Chat { message } => {
+                        // Reset stop flag before starting a new run
+                        state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                        let stop_flag = state.stop_flag.clone();
                         tokio::spawn(async move {
-                            let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                             if let Err(e) = agent.run(message, stop_flag).await {
                                 let res = NexusResponse::Error { message: e.to_string() };
                                 let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&res).unwrap().into())).await;
                             }
                             let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&NexusResponse::Done).unwrap().into())).await;
                         });
+                    }
+                    NexusRequest::StopStream => {
+                        state.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     NexusRequest::SafeModeApprove => {
                         if let Some(tx) = &state.tool_tx {
