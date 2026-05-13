@@ -177,10 +177,13 @@ pub async fn run_nexus(
                         }
                     }
                     crate::tui::AgentEvent::SentinelUpdate { active, log } => {
-                        let sentinel_name = active.first().cloned().unwrap_or_else(|| "Unknown".to_string());
-                        let res = NexusResponse::SentinelLog { sentinel: sentinel_name, message: log };
-                        if let Ok(json) = serde_json::to_string(&res) {
-                            let _ = b_tx_clone.send(json);
+                        // Only forward to WebSocket when a sentinel actually triggered
+                        if !log.is_empty() {
+                            let sentinel_name = active.first().cloned().unwrap_or_else(|| "Unknown".to_string());
+                            let res = NexusResponse::SentinelLog { sentinel: sentinel_name, message: log };
+                            if let Ok(json) = serde_json::to_string(&res) {
+                                let _ = b_tx_clone.send(json);
+                            }
                         }
                     }
                     _ => {}
