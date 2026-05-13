@@ -429,16 +429,43 @@ impl<'a> AgentStream<'a> {
                                       (content.contains("```json") && !json_is_tool_call) ||
                                       (content.contains("```") && content.len() > 20 && !json_is_tool_call); // Catch naked blocks with actual content
 
-                let lower_content = content.to_lowercase();
+                let mut stripped_content = content.clone();
+                if let Some(start) = stripped_content.find("<think>") {
+                    if let Some(end) = stripped_content.find("</think>") {
+                        if end > start {
+                            stripped_content.replace_range(start..end + 8, "");
+                        }
+                    } else {
+                        stripped_content.replace_range(start.., "");
+                    }
+                }
+
+                let lower_content = stripped_content.to_lowercase();
                 let is_delegating = lower_content.contains("you generate") || 
                                     lower_content.contains("you write") || 
                                     lower_content.contains("you create") || 
                                     lower_content.contains("let me know when you") ||
                                     (lower_content.contains("please use the tool") && !lower_content.contains("i will"));
 
-                let model_name = self.agent.model.lock().to_lowercase();
+                let model_name_raw = self.agent.model.lock().clone();
+                let model_name = model_name_raw.to_lowercase();
+                
+                // MLX presets use short keys (e.g. "battle_ready"). We must check the actual path/repo.
+                let mlx_path = if let Some(preset) = self.agent.mlx_presets.get(&model_name_raw) {
+                    if let Some(path) = &preset.path {
+                        path.to_lowercase()
+                    } else if let Some(repo) = &preset.repo {
+                        repo.to_lowercase()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+
                 let planner_name = self.agent.planner_model.clone().unwrap_or_default().to_lowercase();
                 let is_r1 = model_name.contains("r1") || model_name.contains("deepseek") ||
+                           mlx_path.contains("r1") || mlx_path.contains("deepseek") ||
                            planner_name.contains("r1") || planner_name.contains("deepseek");
 
                 if (contains_raw_code && !is_r1) || is_delegating {
