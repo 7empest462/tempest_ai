@@ -1455,8 +1455,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
             if is_reasoning {
                 full_system_prompt.push_str("\n\n[ACTOR PROTOCOL]:\n- You are the ACTOR. Your response MUST start with a `<think>` block.\n- [THOUGHT BOUNDARY]: Your `<think>` block is for internal logic ONLY. Do NOT place tool calls inside thoughts.\n- [TOOL CALL FORMAT]: After `</think>`, explain your action briefly, then output the JSON tool call directly. NEVER use markdown code blocks (```json) for tool calls.\n- [FORMAT]:\n<think>\n[Reasoning]\n</think>\nExplanation text...\n{\"tool\": \"name\", \"arguments\": {}}\n\n- [COLLABORATION]: After performing actions and verifying results, provide a concise summary to the user and ask for the next step in the roadmap.");
-            } else {
                 full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_TAIL.replace("{OS}", os_name));
+            } else {
+                full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_NON_REASONING_TAIL.replace("{OS}", os_name));
             }
 
             if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
