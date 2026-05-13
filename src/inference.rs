@@ -670,6 +670,22 @@ impl Backend {
                                 }
                                 is_thinking = false;
                                 current_pos += end_idx + 8; // Skip "</think>"
+                            } else if !is_reasoning && text[current_pos..].find("```json").is_some() {
+                                // FORGETFUL MODEL RECOVERY: Non-reasoning models (like Qwen) forced to use <think>
+                                // often forget to output </think> and dive straight into the tool call.
+                                let json_idx = text[current_pos..].find("```json").unwrap();
+                                let reasoning = &text[current_pos..current_pos + json_idx];
+                                if !got_native_thinking {
+                                    reasoning_content.push_str(reasoning);
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                    }
+                                }
+                                is_thinking = false;
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::Thinking(None));
+                                }
+                                current_pos += json_idx; // Don't skip ```json, it belongs to full_content
                             } else if let Some(last_lt) = text[current_pos..].rfind('<') {
                                 // Potential partial end tag
                                 let pot_tag = &text[current_pos + last_lt..];
