@@ -28,6 +28,7 @@ use crate::tui::AgentEvent;
 use rig::completion::CompletionModel;
 use rig::embeddings::EmbeddingModel;
 use tool_parser::ToolParser;
+#[cfg(target_os = "macos")]
 use sysinfo::System;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
