@@ -10342,7 +10342,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_ai"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "ai",

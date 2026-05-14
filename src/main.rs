@@ -176,28 +176,43 @@ async fn main() -> Result<()> {
 
     // Determine base ports from CLI -> Config -> Defaults
     let config = load_config(cli.config.as_deref(), !cli.web && !cli.cli && !cli.mcp_server);
-    let nexus_port = cli.port.or(config.nexus_port).unwrap_or(8080);
-    let mut metrics_port = cli.metrics_port.or(config.metrics_port).unwrap_or(7777);
 
-    // Initialize Prometheus metrics exporter with automatic port fallback
-    let mut metrics_installed = false;
-    while !metrics_installed && metrics_port < 7800 {
-        let addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse().expect("Invalid metrics address");
-        match PrometheusBuilder::new().with_http_listener(addr).install() {
-            Ok(_) => {
-                metrics_installed = true;
-                if metrics_port != 7777 && metrics_port != cli.metrics_port.or(config.metrics_port).unwrap_or(7777) {
-                    println!("{} Target metrics port occupied. Metrics live on: {}", "⚠️".yellow(), metrics_port);
-                }
-            },
-            Err(e) => {
-                if metrics_port >= 7799 {
-                    return Err(miette::miette!("Could not find an available port for metrics exporter after 20 attempts. Last error: {}", e));
-                }
-                metrics_port += 1;
-            }
+    // 1. Resolve Nexus Port with automatic fallback
+    let nexus_pref = cli.port.or(config.nexus_port).unwrap_or(8080);
+    let mut nexus_port = nexus_pref;
+    let mut nexus_found = false;
+    while !nexus_found && nexus_port < nexus_pref + 20 {
+        if std::net::TcpListener::bind(format!("0.0.0.0:{}", nexus_port)).is_ok() {
+            nexus_found = true;
+        } else {
+            nexus_port += 1;
         }
     }
+    if nexus_port != nexus_pref {
+        println!("{} Port {} occupied. Nexus live on: http://localhost:{}", "⚠️".yellow(), nexus_pref, nexus_port);
+    }
+
+    // 2. Resolve Metrics Port with automatic fallback
+    let metrics_pref = cli.metrics_port.or(config.metrics_port).unwrap_or(7777);
+    let mut metrics_port = metrics_pref;
+    let mut metrics_found = false;
+    while !metrics_found && metrics_port < metrics_pref + 20 {
+        if std::net::TcpListener::bind(format!("0.0.0.0:{}", metrics_port)).is_ok() {
+            metrics_found = true;
+        } else {
+            metrics_port += 1;
+        }
+    }
+    if metrics_port != metrics_pref {
+        println!("{} Port {} occupied. Metrics live on: {}", "⚠️".yellow(), metrics_pref, metrics_port);
+    }
+
+    // 3. Initialize Prometheus metrics exporter on the resolved port
+    let addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse().expect("Invalid metrics address");
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .install()
+        .expect("failed to install Prometheus recorder");
 
     // Initialize tracing for performance monitoring
     tracing_subscriber::fmt()
