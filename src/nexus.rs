@@ -31,9 +31,9 @@ pub enum NexusRequest {
     TerminalInput { data: String },
     TerminalResize { cols: u16, rows: u16 },
     SearchFiles { query: String, path: String },
-    SafeModeApprove,
-    SafeModeReject,
-    StopStream,
+    SafeModeApprove {},
+    SafeModeReject {},
+    StopStream {},
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,6 +61,7 @@ pub enum NexusResponse {
     StreamToken { token: String },
     InferenceMetrics { tps: Option<u64>, ctx_used: Option<usize>, ctx_total: Option<u64> },
     SentinelLog { sentinel: String, message: String },
+    ToolResult { name: String, success: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -298,7 +299,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                 let agent = state.agent.clone();
                 let pty_writer_clone = pty_writer.clone();
                 let pty_pair_clone = pty_pair.clone();
-                
                 match req {
                     NexusRequest::Chat { message, editor_context } => {
                         // Reset stop flag before starting a new run
@@ -319,18 +319,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                             let _ = ws_tx_req.send(Message::Text(serde_json::to_string(&NexusResponse::Done).unwrap().into())).await;
                         });
                     }
-                    NexusRequest::StopStream => {
-                        state.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    NexusRequest::SafeModeApprove => {
+                    NexusRequest::SafeModeApprove {} => {
                         if let Some(tx) = &state.tool_tx {
                             let _ = tx.send(crate::tui::ToolResponse::Text("yes".to_string())).await;
                         }
                     }
-                    NexusRequest::SafeModeReject => {
+                    NexusRequest::SafeModeReject {} => {
                         if let Some(tx) = &state.tool_tx {
                             let _ = tx.send(crate::tui::ToolResponse::Text("no".to_string())).await;
                         }
+                    }
+                    NexusRequest::StopStream {} => {
+                        state.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     NexusRequest::ListFiles { path } => {
                         let dir_path = if path.is_empty() || path == "." { "." } else { &path };
@@ -574,6 +574,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                         });
                     }
                 }
+            } else {
+                eprintln!("⚠️ [NEXUS]: Failed to parse NexusRequest: {}", text);
             }
         }
     }

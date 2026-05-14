@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.3` — "Command Center"
+# 🌪️ Tempest AI `v0.3.4` — "Command Center"
 
 [![Download Latest Release](https://img.shields.io/badge/Download-Latest%20Release-blue?style=for-the-badge&logo=github)](https://github.com/7empest462/tempest_ai/releases/latest)
 
@@ -12,7 +12,7 @@
 
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
-Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.3 release, Tempest introduces the **Standalone Web Command Center** — a browser-based development environment with a real PTY terminal, persistent file editing, live hardware telemetry, and multi-language syntax highlighting, all powered by a unified WebSocket bridge and **embedded directly into the binary.**
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.4 release, Tempest introduces **MLX Memory Stabilization** (hard RAM capping and prefix cache eviction) and a **Smart Port Negotiation** system to eliminate startup collisions.
 
 ---
 
@@ -113,6 +113,8 @@ Tempest supports four inference backends, selectable at launch:
 - **📊 Real-Time Telemetry**: CPU, GPU (Metal/Linux), and RAM monitoring via `tempest-monitor`
 - **📦 Standalone Portable**: Web Command Center assets embedded via `include_dir` for single-file deployment
 - **🛡️ Safe Mode**: Visual diff previews for all proposed changes during the approval phase
+- **🧠 MLX Stabilization**: Hard hardware RAM capping (90% ceiling) and Prefix Cache eviction (16 sequences) for unbounded uptime on Apple Silicon
+- **📡 Port Negotiation**: Automatic upward port scanning for Nexus (8080+) and Metrics (7777+) to prevent startup collisions
 - **📦 Unified Library**: Core engine as a standalone Rust crate for WASM, VS Code, and CLI targets
 
 ---
@@ -187,6 +189,7 @@ Key fields:
 - `planner_model` / `executor_model` — Model routing for planning vs. execution phases
 - `safe_mode` — Persistent toggle for execution safety (diff approval before changes)
 - `tui_theme` — Persistent TUI aesthetic (Ocean, Mocha, Solarized)
+- `nexus_port` / `metrics_port` — Custom overrides for web and telemetry services
 
 ---
 

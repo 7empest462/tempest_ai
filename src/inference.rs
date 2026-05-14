@@ -22,12 +22,13 @@ use mistralrs::{
     Response as MistralResponse, RequestBuilder, SamplingParams,
     Tool, ToolChoice, Function, ToolType,
     PagedAttentionMetaBuilder, MemoryGpuConfig,
-    EmbeddingModelBuilder, EmbeddingRequest
+    EmbeddingRequest
 };
 use crate::tui::AgentEvent;
 use rig::completion::CompletionModel;
 use rig::embeddings::EmbeddingModel;
 use tool_parser::ToolParser;
+use sysinfo::System;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AgentMode {
@@ -45,6 +46,7 @@ pub enum Backend {
         model: std::sync::Arc<Model>,
         _ctx_limit: usize,
         embedder: Option<std::sync::Arc<Model>>,
+        ollama_fallback: Option<Ollama>,
     },
     Bridge(crate::ai_bridge::TempestAiBridge),
 }
@@ -163,13 +165,21 @@ impl Backend {
                         let gguf_file = format!("{}-{}.gguf", filename_prefix, quant);
                         let mut builder = GgufModelBuilder::new(&repo, vec![gguf_file.clone()])
                             .with_logging()
+                            .with_prefix_cache_n(Some(16))
                             .with_max_num_seqs(1);
 
                         if paged_attn {
                             println!("{} MLX: Initializing Paged Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
+                            
+                            // Calculate 90% of physical RAM as a hard ceiling for the MLX pool
+                            let mut sys = System::new_all();
+                            sys.refresh_memory();
+                            let total_mb = sys.total_memory() / 1024 / 1024;
+                            let safety_limit_mb = (total_mb as f32 * 0.90) as usize;
+
                             let paged_attn_cfg = PagedAttentionMetaBuilder::default()
-                                .with_block_size(16)
-                                .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
+                                .with_block_size(32)
+                                .with_gpu_memory(MemoryGpuConfig::MbAmount(safety_limit_mb))
                                 .build()
                                 .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
                             builder = builder.with_paged_attn(paged_attn_cfg);
@@ -179,12 +189,19 @@ impl Backend {
                         println!("{} MLX: Initializing Native Safetensors Backend...", "⚡".yellow());
                         let mut builder = TextModelBuilder::new(&repo)
                             .with_logging()
+                            .with_prefix_cache_n(Some(16))
                             .with_max_num_seqs(1);
                         
                         if paged_attn {
+                             // Calculate 90% of physical RAM for Native SafeTensors as well
+                             let mut sys = System::new_all();
+                             sys.refresh_memory();
+                             let total_mb = sys.total_memory() / 1024 / 1024;
+                             let safety_limit_mb = (total_mb as f32 * 0.90) as usize;
+
                              let paged_attn_cfg = PagedAttentionMetaBuilder::default()
-                                .with_block_size(16)
-                                .with_gpu_memory(MemoryGpuConfig::ContextSize(ctx_limit))
+                                .with_block_size(32)
+                                .with_gpu_memory(MemoryGpuConfig::MbAmount(safety_limit_mb))
                                 .build()
                                 .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
                             builder = builder.with_paged_attn(paged_attn_cfg);
@@ -192,15 +209,16 @@ impl Backend {
                         builder.build().await.map_err(|e| miette!("Failed to load MLX Native model: {}", e))?
                     };
 
-                    let embed_model = EmbeddingModelBuilder::new("sentence-transformers/all-MiniLM-L6-v2")
-                        .build()
-                        .await
-                        .ok(); // Fallback to None if embedding model fails to load
-
+                    // The MLX backend in Mistral.rs currently lacks support for BertModel 
+                    // architectures (like all-minilm or nomic). We bypass the native embedder 
+                    // and rely entirely on the Ollama fallback for semantic indexing.
+                    let embed_model = None;
+                    
                     Ok((Backend::MLX { 
                         model: std::sync::Arc::new(mlx_model), 
                         _ctx_limit: ctx_limit,
-                        embedder: embed_model.map(std::sync::Arc::new)
+                        embedder: embed_model,
+                        ollama_fallback: Some(Ollama::default())
                     }, model))
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -239,9 +257,15 @@ impl Backend {
         on_tool_call: Option<tokio::sync::mpsc::UnboundedSender<ollama_rs::generation::tools::ToolCall>>,
         tool_registry: Option<Vec<ollama_rs::generation::tools::ToolInfo>>,
     ) -> Result<InferenceOutput> {
-        let mut full_content = String::new();
-        let mut reasoning_content = String::new();
+        // Pre-allocate with capacity to reduce reallocations during streaming
+        // ~8192 tokens at ~4-5 chars per token ≈ 32-40KB; allocate 64KB to be safe
+        let mut full_content = String::with_capacity(65536);
+        let mut reasoning_content = String::with_capacity(65536);
         let mut native_tool_calls = Vec::new();
+        
+        // 🧠 REASONING CAP: Prevent unbounded thinking from causing loops
+        // 20KB ≈ 5000 tokens; enough for detailed reasoning, prevents accumulation bloat
+        const REASONING_CAP: usize = 20480;
 
         let options = ModelOptions::default()
             .num_ctx(sampling.context_size)
@@ -553,7 +577,11 @@ impl Backend {
                         if !thinking.is_empty() {
                             got_native_thinking = true;
                             received_any_token = true;
-                            reasoning_content.push_str(thinking);
+                            // Cap reasoning to prevent unbounded accumulation
+                            if reasoning_content.len() < REASONING_CAP {
+                                let space_left = REASONING_CAP - reasoning_content.len();
+                                reasoning_content.push_str(&thinking[..space_left.min(thinking.len())]);
+                            }
                             if let Some(tx) = event_tx.lock().clone() {
                                 let _ = tx.try_send(AgentEvent::ReasoningToken(thinking.to_string()));
                             }
@@ -663,7 +691,11 @@ impl Backend {
                                 // Reasoning before </think>
                                 let reasoning = &text[current_pos..current_pos + end_idx];
                                 if !got_native_thinking {
-                                    reasoning_content.push_str(reasoning);
+                                    // Cap reasoning to prevent unbounded accumulation
+                                    if reasoning_content.len() < REASONING_CAP {
+                                        let space_left = REASONING_CAP - reasoning_content.len();
+                                        reasoning_content.push_str(&reasoning[..space_left.min(reasoning.len())]);
+                                    }
                                     if let Some(tx) = event_tx.lock().clone() {
                                         let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
                                     }
@@ -1064,7 +1096,16 @@ impl Backend {
 
                             if let Some(reasoning) = &chunk.choices[0].delta.reasoning_content {
                                 if !reasoning.is_empty() {
-                                    reasoning_content.push_str(reasoning);
+                                    // CAP REASONING: Prevent unbounded accumulation (20KB max ≈ 5000 tokens)
+                                    let reasoning_cap = 20480;
+                                    if reasoning_content.len() + reasoning.len() <= reasoning_cap {
+                                        reasoning_content.push_str(reasoning);
+                                    } else if reasoning_content.len() < reasoning_cap {
+                                        // Fill to capacity, then stop
+                                        let remaining = reasoning_cap - reasoning_content.len();
+                                        reasoning_content.push_str(&reasoning[..remaining.min(reasoning.len())]);
+                                    }
+                                    
                                     if let Some(tx) = event_tx.lock().clone() {
                                         let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
                                     }
@@ -1079,9 +1120,8 @@ impl Backend {
                             }
 
                             if let Some(content) = &chunk.choices[0].delta.content {
-                                let mut text = tag_residue.clone();
+                                let mut text = std::mem::take(&mut tag_residue);
                                 text.push_str(content);
-                                tag_residue.clear();
 
                                 let mut current_pos = 0;
                                 
@@ -1242,6 +1282,23 @@ impl Backend {
                                             }
                                         } else if let Some(json_idx) = text[current_pos..].find("```json") {
                                             // FAILSAFE: Implicit end of explicit thinking block
+                                            let reasoning = &text[current_pos..current_pos + json_idx];
+                                            reasoning_content.push_str(reasoning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::ReasoningToken(reasoning.to_string()));
+                                            }
+                                            is_thinking = false;
+                                            current_pos += json_idx;
+                                            
+                                            if first_token {
+                                                first_token = false;
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::Thinking(None));
+                                                    let _ = tx.try_send(AgentEvent::SubagentStatus(None));
+                                                }
+                                            }
+                                        } else if let Some(json_idx) = text[current_pos..].find("{\"tool\":") {
+                                            // FAILSAFE: Implicit end of thinking block via raw tool call JSON
                                             let reasoning = &text[current_pos..current_pos + json_idx];
                                             reasoning_content.push_str(reasoning);
                                             if let Some(tx) = event_tx.lock().clone() {
@@ -1515,14 +1572,22 @@ impl Backend {
                 Ok(res.embeddings.first().cloned().unwrap_or_default())
             }
             #[cfg(target_os = "macos")]
-            Backend::MLX { embedder, .. } => {
+            Backend::MLX { embedder, ollama_fallback, .. } => {
                 if let Some(embed) = embedder {
                     let request = EmbeddingRequest::builder().add_prompt(format!("passage: {}", text));
                     let res = embed.generate_embeddings(request).await
                         .map_err(|e| miette!("MLX embedding failed: {}", e))?;
                     Ok(res.first().cloned().unwrap_or_default())
+                } else if let Some(ollama) = ollama_fallback {
+                    let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                        "all-minilm".to_string(), 
+                        text.to_string().into()
+                    );
+                    let res = ollama.generate_embeddings(req).await
+                        .map_err(|e| miette!("Ollama embedding fallback failed: {}", e))?;
+                    Ok(res.embeddings.first().cloned().unwrap_or_default())
                 } else {
-                    Err(miette!("MLX Embedder not loaded"))
+                    Err(miette!("MLX Embedder not loaded and no Ollama fallback available"))
                 }
             }
             Backend::Bridge(bridge) => {

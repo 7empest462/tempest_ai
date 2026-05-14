@@ -87,3 +87,5 @@ history_path = "history.json"
 db_path = "~/fleet.db"
 encrypt_history = false
 tui_theme = "Solarized (dark)"
+nexus_port = 8080
+metrics_port = 7777

@@ -123,6 +123,7 @@
           </nav>
         </aside>
         
+        <div id="resize-handle-sidebar" class="resize-handle resize-handle-vertical"></div>
         <div id="workspace">
           <div id="chat-container">
             <div id="chat-messages">
@@ -137,6 +138,7 @@
             </div>
           </div>
 
+          <div id="resize-handle-editor" class="resize-handle resize-handle-vertical"></div>
           <div id="editor-container" class="hidden">
             <div id="editor-header">
               <div class="editor-meta">
@@ -205,22 +207,36 @@
         </div>
       </div>
 
-      <!-- Safe Mode Diff Modal -->
+      <!-- Visual Diff & Approval Center -->
       <div id="safemode-modal" class="modal-overlay hidden">
         <div class="safemode-content">
           <div class="safemode-header">
-            <h3>⚠️ SAFETY CHECKPOINT</h3>
-            <span class="safemode-warning">The agent is requesting permission to modify files.</span>
+            <div class="safemode-header-left">
+              <h3>⚠️ APPROVAL CENTER</h3>
+              <span class="safemode-warning">Review proposed changes before they are applied.</span>
+            </div>
+            <div class="safemode-header-right">
+              <div class="diff-view-toggle">
+                <button class="diff-toggle-btn active" data-view="unified" id="diff-view-unified">Unified</button>
+                <button class="diff-toggle-btn" data-view="split" id="diff-view-split">Split</button>
+              </div>
+            </div>
           </div>
           <div class="safemode-body">
             <div id="safemode-rationale"></div>
             <div id="safemode-diff-container">
-              <!-- Diff chunks will be injected here -->
+              <!-- Rendered diff chunks injected here -->
             </div>
           </div>
           <div class="safemode-footer">
-            <button id="safemode-reject" class="btn-danger">REJECT</button>
-            <button id="safemode-approve" class="btn-success">APPROVE</button>
+            <div class="safemode-footer-left">
+              <span id="diff-stats" class="diff-stats"></span>
+            </div>
+            <div class="safemode-footer-right">
+              <button id="safemode-reject" class="btn-danger">✕ REJECT</button>
+              <button id="safemode-edit" class="btn-edit">✎ EDIT</button>
+              <button id="safemode-approve" class="btn-success">✓ APPROVE</button>
+            </div>
           </div>
         </div>
       </div>

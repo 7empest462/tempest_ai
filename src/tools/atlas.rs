@@ -302,13 +302,17 @@ pub async fn run_semantic_indexing(
         }
     }
 
-    // Final save
-    {
+    let entries_count = {
         let brain = brain_lock.lock();
         let _ = brain.save_to_disk(brain_path);
-    }
+        brain.entries.len()
+    };
     
-    update("✅ Project indexing complete. Conceptual search is now ENABLED.".green().bold().to_string());
+    if entries_count > 0 {
+        update("✅ Project indexing complete. Conceptual search is now ENABLED.".green().bold().to_string());
+    } else {
+        update("⚠️ Project indexing finished, but no conceptual embeddings were created. Semantic search will be limited.".yellow().to_string());
+    }
     
     Ok(())
 }

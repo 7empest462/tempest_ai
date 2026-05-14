@@ -299,11 +299,19 @@ impl<'a> AgentStream<'a> {
                     }
                     
                     // INJECT REASONING INTO HISTORY: This links the phases!
+                    // CAP REASONING: Prevent unbounded accumulation causing thinking loops
                     if !planner_output.reasoning.is_empty() {
+                        let max_reasoning_chars = 2000; // ~500 tokens max, keeps thinking bounded
+                        let reasoning_to_inject = if planner_output.reasoning.len() > max_reasoning_chars {
+                            format!("{}...[truncated]", &planner_output.reasoning[..max_reasoning_chars])
+                        } else {
+                            planner_output.reasoning.clone()
+                        };
+                        
                         let mut history = self.agent.history.lock();
                         history.push(ollama_rs::generation::chat::ChatMessage::new(
                             ollama_rs::generation::chat::MessageRole::Assistant,
-                            format!("<think>\n{}\n</think>", planner_output.reasoning),
+                            format!("<think>\n{}\n</think>", reasoning_to_inject),
                         ));
                     }
 
@@ -1048,6 +1056,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         Ok(())
     }
 
+    pub fn set_safe_mode(&self, enabled: bool) {
+        self.safe_mode.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub async fn resume_session(&self) -> Result<()> {
         let history_len = self.history.lock().len();
         if history_len > 0 {
@@ -1192,17 +1204,18 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
         let feedback = if is_success {
             format!(
-                "=== TOOL RESULT ===\nTool: {}\nResult: {}\n\nYou MUST use the information above exactly as shown. Do not override it with your own knowledge or guess versions.",
+                "=== SYSTEM OBSERVATION ===\nTool: {}\nResult: {}\n\n(Verify this data against your plan and proceed to the next step.)",
                 tool_name, result
             )
         } else {
             format!(
-                "=== TOOL ERROR ===\nTool: {}\nError: {}\n\nPlease analyze this error carefully and adjust your strategy. Do NOT repeat the same mistake.",
+                "=== SYSTEM ERROR ===\nTool: {}\nError: {}\n\nPlease analyze this error carefully and adjust your strategy. Do NOT repeat the same mistake.",
                 tool_name, result
             )
         };
 
-        self.history.lock().push(ChatMessage::new(MessageRole::User, feedback));
+        // CRITICAL: Tool results must be System/Observation role, not User.
+        self.history.lock().push(ChatMessage::new(MessageRole::System, feedback));
         self.save_history()?;
         
         // --- 📊 RESTORE TOOL RESULT TRACKER ---
@@ -1383,15 +1396,20 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             match &stream.state {
                 AgentStreamState::Done => break,
                 _ => {
-                    stream.transition().await?;
-                    let tx_opt = self.event_tx.lock().clone();
-                    if let Some(tx) = tx_opt {
-                        let _ = tx.send(crate::tui::AgentEvent::AgentStateChange(stream.state.name().to_string())).await;
-                        
-                        if let AgentStreamState::ExecutingTools { tool_calls, .. } = &stream.state {
+                    // 📊 TELEMETRY PRE-EMPTION: Send ActiveTools BEFORE transition if we are about to execute
+                    if let AgentStreamState::ExecutingTools { tool_calls, .. } = &stream.state {
+                        let tx_opt = self.event_tx.lock().clone(); // Clone the sender to avoid holding the lock across await
+                        if let Some(tx) = tx_opt {
                             let tool_names: Vec<String> = tool_calls.iter().map(|t| t.function.name.clone()).collect();
                             let _ = tx.send(crate::tui::AgentEvent::ActiveTools(tool_names)).await;
                         }
+                    }
+
+                    stream.transition().await?;
+                    
+                    let tx_opt = self.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(crate::tui::AgentEvent::AgentStateChange(stream.state.name().to_string())).await;
                     }
                 }
             }
@@ -1450,8 +1468,30 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
 
             // If EITHER the main model or the planner is a reasoning model, use the minimalist prompt
-            let is_reasoning = current_model.contains("r1") || current_model.contains("deepseek") || current_model.contains("deep-seek") ||
+            let mut is_reasoning = current_model.contains("r1") || current_model.contains("deepseek") || current_model.contains("deep-seek") ||
                               planner_model.contains("r1") || planner_model.contains("deepseek") || planner_model.contains("deep-seek");
+                              
+            // Check MLX presets to see if the underlying path/repo is a reasoning model
+            if let Some(preset) = self.mlx_presets.get(&current_model) {
+                let path_lower = preset.path.clone().unwrap_or_default().to_lowercase();
+                let repo_lower = preset.repo.clone().unwrap_or_default().to_lowercase();
+                if path_lower.contains("r1") || path_lower.contains("deepseek") || path_lower.contains("deep-seek") ||
+                   path_lower.contains("battle") || path_lower.contains("centurion") ||
+                   repo_lower.contains("r1") || repo_lower.contains("deepseek") || repo_lower.contains("deep-seek") ||
+                   repo_lower.contains("battle") || repo_lower.contains("centurion") {
+                    is_reasoning = true;
+                }
+            }
+            if let Some(preset) = self.mlx_presets.get(&planner_model) {
+                let path_lower = preset.path.clone().unwrap_or_default().to_lowercase();
+                let repo_lower = preset.repo.clone().unwrap_or_default().to_lowercase();
+                if path_lower.contains("r1") || path_lower.contains("deepseek") || path_lower.contains("deep-seek") ||
+                   path_lower.contains("battle") || path_lower.contains("centurion") ||
+                   repo_lower.contains("r1") || repo_lower.contains("deepseek") || repo_lower.contains("deep-seek") ||
+                   repo_lower.contains("battle") || repo_lower.contains("centurion") {
+                    is_reasoning = true;
+                }
+            }
 
             if is_reasoning {
                 full_system_prompt.push_str("\n\n[ACTOR PROTOCOL]:\n- You are the ACTOR. Your response MUST start with a `<think>` block.\n- [THOUGHT BOUNDARY]: Your `<think>` block is for internal logic ONLY. Do NOT place tool calls inside thoughts.\n- [TOOL CALL FORMAT]: After `</think>`, explain your action briefly, then output the JSON tool call directly. NEVER use markdown code blocks (```json) for tool calls.\n- [FORMAT]:\n<think>\n[Reasoning]\n</think>\nExplanation text...\n{\"tool\": \"name\", \"arguments\": {}}\n\n- [COLLABORATION]: After performing actions and verifying results, provide a concise summary to the user and ask for the next step in the roadmap.");
@@ -1572,12 +1612,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                         true
                     )
                 } else {
-                    let is_modifying = self.tools.get(&tool_name).map(|t| t.is_modifying()).unwrap_or(false);
-                    let mut base_res = format!("SUCCESS: Tool '{}' executed.\nRESULT:\n{}", tool_name, result);
-                    if is_modifying {
-                        base_res.push_str("\n\n⚠️ SYSTEM DIRECTIVE: You have just modified a physical file. Before doing ANYTHING else, you MUST rigorously test and verify your changes.");
-                    }
-                    (base_res, format!("✅ SUCCESS: '{}'", tool_name), true)
+                    (result, format!("✅ SUCCESS: '{}'", tool_name), true)
                 }
             } else { 
                 let fail_key = if result.contains("os error 2") || result.contains("No such file") {
@@ -1696,7 +1731,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         };
         
-        let mut final_history = history_snapshot.clone();
+        let mut final_history = history_snapshot;
         
         // --- 🧠 DYNAMIC CONTEXT INJECTION ---
         // We prepend the editor context to the LAST user message in this turn's memory ONLY.
@@ -1952,6 +1987,19 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
+        // --- 📡 TELEMETRY EMISSION ---
+        // Emit events for every result so the UI can update session statistics.
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            for (name, _output, success) in &results {
+                if *success {
+                    let _ = tx.try_send(crate::tui::AgentEvent::ToolSuccess { name: name.clone() });
+                } else {
+                    let _ = tx.try_send(crate::tui::AgentEvent::ToolError { name: name.clone(), error: "Execution failed".to_string() });
+                }
+            }
+        }
+
         Ok(results)
     }
 
@@ -2165,6 +2213,11 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                             .and_modify(|(s, _)| *s += 1)
                             .or_insert((1, 0));
                         
+                        // Prune tracking maps periodically to prevent unbounded growth
+                        if (self.recent_tool_calls.len() + self.tool_stats.len()) % 20 == 0 {
+                            self.prune_tracking_maps();
+                        }
+                        
                         metrics::counter!("tool.success", "tool" => tool_name.clone()).increment(1);
                             
                         return result;
@@ -2302,22 +2355,59 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
-        // 🧠 RAW JSON CATCHER: If no markdown blocks, try parsing the entire content
+        // 🧠 RAW JSON CATCHER: If no markdown blocks, try parsing the entire content or isolating a JSON block
         if calls.is_empty() {
             let trimmed = content.trim();
+            let mut val_opt = None;
+            
+            // Try parsing the whole thing first
             if (trimmed.starts_with('{') && trimmed.ends_with('}')) || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
-                if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-                    if let Some(obj) = val.as_object() {
-                        if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
-                            calls.push(val);
+                val_opt = serde_json::from_str::<Value>(trimmed).ok();
+            }
+            
+            // If that fails, look for the first `{` and last `}`
+            if val_opt.is_none() {
+                if let Some(start_idx) = content.find('{') {
+                    if let Some(end_idx) = content.rfind('}') {
+                        if start_idx < end_idx {
+                            let json_str = &content[start_idx..=end_idx];
+                            val_opt = serde_json::from_str::<Value>(json_str).ok();
                         }
-                    } else if let Some(arr) = val.as_array() {
-                        // Handle batch tool calls in a single JSON array
-                        for item in arr {
-                            if let Some(obj) = item.as_object() {
-                                if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
-                                    calls.push(item.clone());
-                                }
+                    }
+                }
+            }
+
+            if let Some(val) = val_opt {
+                if let Some(obj) = val.as_object() {
+                    if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
+                        calls.push(val);
+                    }
+                } else if let Some(arr) = val.as_array() {
+                    // Handle batch tool calls in a single JSON array
+                    for item in arr {
+                        if let Some(obj) = item.as_object() {
+                            if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
+                                calls.push(item.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 🧠 FUZZY JSON CATCHER: Search for anything that looks like a tool call JSON object anywhere in the text.
+        // This handles cases where models put tool calls inside <think> blocks or raw text without markdown.
+        if calls.is_empty() {
+            let fuzzy_regex = regex::Regex::new(r#"(\{\s*\\?\"(tool|name|function|action)\\?\"\s*:[\s\S]*?\})"#).unwrap();
+            for m in fuzzy_regex.find_iter(content) {
+                let json_candidate = m.as_str();
+                let cleaned = json_candidate.replace("\\\"", "\"").replace("\\n", "\n");
+                
+                if let Ok(val) = serde_json::from_str::<Value>(&cleaned) {
+                    if let Some(obj) = val.as_object() {
+                        if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function") || obj.contains_key("action") {
+                            if !calls.iter().any(|existing: &Value| existing == &val) {
+                                calls.push(val);
                             }
                         }
                     }
@@ -2447,7 +2537,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 context_size: 1024,
             },
             Arc::new(parking_lot::Mutex::new(None)),           // event_tx
-            Arc::new(std::sync::atomic::AtomicBool::new(true)), // stop
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), // stop
             "warmup".to_string(), // system prompt
             None, // on_tool_call
             None, // tool_registry
@@ -2459,6 +2549,56 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         }
 
         Ok(())
+    }
+
+    /// Prune tracking maps to prevent unbounded memory growth.
+    /// Called periodically to limit the size of recent_failures, recent_tool_calls, and tool_stats.
+    fn prune_tracking_maps(&self) {
+        const MAX_RECENT_FAILURES: usize = 50;
+        const MAX_RECENT_CALLS: usize = 100;
+        const MAX_TOOL_STATS: usize = 100;
+
+        // Prune recent_failures if it exceeds max size
+        if self.recent_failures.len() > MAX_RECENT_FAILURES {
+            let to_remove: Vec<String> = self.recent_failures
+                .iter()
+                .take(self.recent_failures.len() - MAX_RECENT_FAILURES + 10)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for key in to_remove {
+                self.recent_failures.remove(&key);
+            }
+        }
+
+        // Prune recent_tool_calls if it exceeds max size
+        if self.recent_tool_calls.len() > MAX_RECENT_CALLS {
+            let to_remove: Vec<String> = self.recent_tool_calls
+                .iter()
+                .take(self.recent_tool_calls.len() - MAX_RECENT_CALLS + 10)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for key in to_remove {
+                self.recent_tool_calls.remove(&key);
+            }
+        }
+
+        // Prune tool_stats if it exceeds max size (keep highest success-to-failure ratio)
+        if self.tool_stats.len() > MAX_TOOL_STATS {
+            let mut stats: Vec<_> = self.tool_stats
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect();
+            // Sort by success count (descending), then remove bottom entries
+            stats.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+            let to_remove: Vec<String> = stats
+                .into_iter()
+                .skip(MAX_TOOL_STATS - 10)
+                .map(|(k, _)| k)
+                .collect();
+            for key in to_remove {
+                self.tool_stats.remove(&key);
+            }
+        }
     }
 
     /// Explicitly unload the model from Ollama's memory (GPU) by sending a request with keep_alive: 0.

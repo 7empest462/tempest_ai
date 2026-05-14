@@ -76,6 +76,8 @@ pub struct AppConfig {
     pub mlx_repeat_penalty_execution: Option<f32>,
     pub planning_enabled: Option<bool>,
     pub tui_theme: Option<String>,
+    pub nexus_port: Option<u16>,
+    pub metrics_port: Option<u16>,
 }
 
 impl Default for AppConfig {
@@ -132,6 +134,8 @@ impl Default for AppConfig {
             planning_enabled: Some(true),
             tui_theme: Some("base16-ocean.dark".to_string()),
             mcp_servers: None,
+            nexus_port: Some(8080),
+            metrics_port: Some(7777),
         }
     }
 }

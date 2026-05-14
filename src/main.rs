@@ -85,8 +85,16 @@ struct Cli {
     web: bool,
 
     /// Port for the Tempest Nexus Web Server (Default: 8080)
-    #[arg(short, long, default_value_t = 8080)]
-    port: u16,
+    #[arg(short, long)]
+    pub port: Option<u16>,
+
+    /// Port for the Prometheus Metrics Exporter (Default: 7777)
+    #[arg(long)]
+    pub metrics_port: Option<u16>,
+
+    /// Enable Safe Mode (block for approvals on file modifications)
+    #[arg(short, long)]
+    pub safe: bool,
 }
 
 use tempest_ai::AppConfig;
@@ -164,17 +172,32 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    // Initialize Prometheus metrics exporter on port 7777
-    let addr: SocketAddr = "0.0.0.0:7777".parse().expect("Invalid metrics address");
-    PrometheusBuilder::new()
-        .with_http_listener(addr)
-        .install()
-        .expect("failed to install Prometheus recorder");
-
-    // Install error handlers
-    color_eyre::install().map_err(|e| miette::miette!("Failed to install color-eyre: {}", e))?;
-
     let cli = Cli::parse();
+
+    // Determine base ports from CLI -> Config -> Defaults
+    let config = load_config(cli.config.as_deref(), !cli.web && !cli.cli && !cli.mcp_server);
+    let nexus_port = cli.port.or(config.nexus_port).unwrap_or(8080);
+    let mut metrics_port = cli.metrics_port.or(config.metrics_port).unwrap_or(7777);
+
+    // Initialize Prometheus metrics exporter with automatic port fallback
+    let mut metrics_installed = false;
+    while !metrics_installed && metrics_port < 7800 {
+        let addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse().expect("Invalid metrics address");
+        match PrometheusBuilder::new().with_http_listener(addr).install() {
+            Ok(_) => {
+                metrics_installed = true;
+                if metrics_port != 7777 && metrics_port != cli.metrics_port.or(config.metrics_port).unwrap_or(7777) {
+                    println!("{} Target metrics port occupied. Metrics live on: {}", "⚠️".yellow(), metrics_port);
+                }
+            },
+            Err(e) => {
+                if metrics_port >= 7799 {
+                    return Err(miette::miette!("Could not find an available port for metrics exporter after 20 attempts. Last error: {}", e));
+                }
+                metrics_port += 1;
+            }
+        }
+    }
 
     // Initialize tracing for performance monitoring
     tracing_subscriber::fmt()
@@ -423,8 +446,19 @@ async fn main() -> Result<()> {
     let _ = agent.load_history();
     let _ = agent.initialize_mcp(config.mcp_servers.unwrap_or_default()).await;
     let _ = agent.resume_session().await;
+
+    // Explicitly set safe mode from CLI flag
+    if cli.safe {
+        agent.set_safe_mode(true);
+    }
     if !cli.cli {
         let agent_init = agent.clone();
+        let backend_id = if cli.bridge { "bridge".to_string() } else if cli.lmstudio { "lmstudio".to_string() } else if cli.mlx { "mlx".to_string() } else { "ollama".to_string() };
+        let final_nexus_port = nexus_port;
+        let agent_nexus = agent_init.clone();
+        tokio::spawn(async move {
+            tempest_ai::nexus::run_nexus(agent_nexus, final_nexus_port, backend_id, None, None).await;
+        });
         tokio::spawn(async move {
             let _ = agent_init.initialize_atlas(false).await;
             let _ = agent_init.warmup().await;
@@ -437,7 +471,7 @@ async fn main() -> Result<()> {
     if cli.web {
         println!("{} Launching Tempest Nexus...", "🌐".green());
         let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.mlx { "mlx" } else { "ollama" };
-        tempest_ai::nexus::run_nexus(agent, cli.port, backend_id.to_string(), event_rx, tool_tx_opt).await;
+        tempest_ai::nexus::run_nexus(agent, nexus_port, backend_id.to_string(), event_rx, tool_tx_opt).await;
         return Ok(());
     }
 

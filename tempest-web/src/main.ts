@@ -282,9 +282,10 @@ async function startApp() {
         break;
       }
       case 'SafeModeRequest': {
-        if (safemodeModal && safemodeRationale && safemodeDiff) {
+        if (safemodeModal && safemodeRationale) {
           safemodeRationale.innerText = msg.payload.rationale;
-          safemodeDiff.innerText = msg.payload.diff;
+          // Render diff using the new visual renderer
+          renderDiff(msg.payload.diff);
           safemodeModal.classList.remove('hidden');
         }
         break;
@@ -803,6 +804,294 @@ async function startApp() {
   safemodeReject?.addEventListener('click', () => {
     sendNexus('SafeModeReject', {});
     safemodeModal?.classList.add('hidden');
+  });
+
+  // Edit button toggles contentEditable on added lines
+  const safemodeEdit = document.getElementById('safemode-edit');
+  safemodeEdit?.addEventListener('click', () => {
+    const container = document.getElementById('safemode-diff-container');
+    if (!container) return;
+    container.classList.toggle('diff-editable');
+    const isEditable = container.classList.contains('diff-editable');
+    container.querySelectorAll('.diff-line-add .diff-line-content').forEach(el => {
+      (el as HTMLElement).contentEditable = isEditable ? 'true' : 'false';
+    });
+    if (safemodeEdit) {
+      safemodeEdit.textContent = isEditable ? '✎ DONE' : '✎ EDIT';
+    }
+  });
+
+  // Diff view toggle (Unified / Split)
+  let currentDiffView: 'unified' | 'split' = 'unified';
+  let lastDiffRaw = '';
+
+  document.getElementById('diff-view-unified')?.addEventListener('click', () => {
+    currentDiffView = 'unified';
+    document.querySelectorAll('.diff-toggle-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('diff-view-unified')?.classList.add('active');
+    if (lastDiffRaw) renderDiff(lastDiffRaw);
+  });
+
+  document.getElementById('diff-view-split')?.addEventListener('click', () => {
+    currentDiffView = 'split';
+    document.querySelectorAll('.diff-toggle-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('diff-view-split')?.classList.add('active');
+    if (lastDiffRaw) renderDiff(lastDiffRaw);
+  });
+
+  // ═══ Visual Diff Renderer ═══
+  const renderDiff = (rawDiff: string) => {
+    lastDiffRaw = rawDiff;
+    if (!safemodeDiff) return;
+
+    const lines = rawDiff.split('\n');
+    let addCount = 0;
+    let delCount = 0;
+
+    // Detect file name from diff header
+    let fileName = '';
+    for (const line of lines) {
+      if (line.startsWith('+++ ')) {
+        fileName = line.slice(4).replace(/^b\//, '');
+        break;
+      }
+      if (line.startsWith('--- ')) {
+        fileName = line.slice(4).replace(/^a\//, '');
+      }
+    }
+
+    // Determine badge type
+    const isCreate = lines.some(l => l.startsWith('--- /dev/null'));
+    const isDelete = lines.some(l => l.startsWith('+++ /dev/null'));
+    const badgeClass = isCreate ? 'created' : isDelete ? 'deleted' : 'modified';
+    const badgeText = isCreate ? 'NEW' : isDelete ? 'DEL' : 'MOD';
+
+    // Build file header
+    let html = `<div class="diff-file-header">
+      <span class="diff-file-icon">📄</span>
+      <span class="diff-file-name">${escapeHtml(fileName || 'unknown')}</span>
+      <span class="diff-file-badge ${badgeClass}">${badgeText}</span>
+    </div>`;
+
+    if (currentDiffView === 'unified') {
+      html += renderUnifiedDiff(lines);
+    } else {
+      html += renderSplitDiff(lines);
+    }
+
+    // Count stats
+    for (const line of lines) {
+      if (line.startsWith('+') && !line.startsWith('+++')) addCount++;
+      if (line.startsWith('-') && !line.startsWith('---')) delCount++;
+    }
+
+    safemodeDiff.innerHTML = html;
+
+    // Update stats
+    const diffStats = document.getElementById('diff-stats');
+    if (diffStats) {
+      diffStats.innerHTML = `<span class="stat-add">+${addCount}</span> / <span class="stat-del">-${delCount}</span> lines`;
+    }
+  };
+
+  const renderUnifiedDiff = (lines: string[]): string => {
+    let html = '<table class="diff-table"><tbody>';
+    let oldLine = 0;
+    let newLine = 0;
+
+    for (const line of lines) {
+      // Skip diff meta headers
+      if (line.startsWith('diff ') || line.startsWith('index ') || 
+          line.startsWith('--- ') || line.startsWith('+++ ')) continue;
+
+      // Hunk header
+      if (line.startsWith('@@')) {
+        const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);
+        if (match) {
+          oldLine = parseInt(match[1]) - 1;
+          newLine = parseInt(match[2]) - 1;
+        }
+        html += `<tr class="diff-hunk-header">
+          <td colspan="4">${escapeHtml(line)}</td>
+        </tr>`;
+        continue;
+      }
+
+      if (line.startsWith('+')) {
+        newLine++;
+        html += `<tr class="diff-line-add">
+          <td class="diff-line-num"></td>
+          <td class="diff-line-num">${newLine}</td>
+          <td class="diff-line-prefix">+</td>
+          <td class="diff-line-content">${escapeHtml(line.slice(1))}</td>
+        </tr>`;
+      } else if (line.startsWith('-')) {
+        oldLine++;
+        html += `<tr class="diff-line-del">
+          <td class="diff-line-num">${oldLine}</td>
+          <td class="diff-line-num"></td>
+          <td class="diff-line-prefix">−</td>
+          <td class="diff-line-content">${escapeHtml(line.slice(1))}</td>
+        </tr>`;
+      } else {
+        oldLine++;
+        newLine++;
+        const content = line.startsWith(' ') ? line.slice(1) : line;
+        html += `<tr class="diff-line-ctx">
+          <td class="diff-line-num">${oldLine}</td>
+          <td class="diff-line-num">${newLine}</td>
+          <td class="diff-line-prefix"> </td>
+          <td class="diff-line-content">${escapeHtml(content)}</td>
+        </tr>`;
+      }
+    }
+
+    html += '</tbody></table>';
+    return html;
+  };
+
+  const renderSplitDiff = (lines: string[]): string => {
+    // Collect left (old) and right (new) lines
+    const leftLines: { num: number | null; content: string; type: string }[] = [];
+    const rightLines: { num: number | null; content: string; type: string }[] = [];
+    let oldLine = 0;
+    let newLine = 0;
+
+    for (const line of lines) {
+      if (line.startsWith('diff ') || line.startsWith('index ') || 
+          line.startsWith('--- ') || line.startsWith('+++ ')) continue;
+
+      if (line.startsWith('@@')) {
+        const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);
+        if (match) {
+          oldLine = parseInt(match[1]) - 1;
+          newLine = parseInt(match[2]) - 1;
+        }
+        leftLines.push({ num: null, content: line, type: 'hunk' });
+        rightLines.push({ num: null, content: line, type: 'hunk' });
+        continue;
+      }
+
+      if (line.startsWith('-')) {
+        oldLine++;
+        leftLines.push({ num: oldLine, content: line.slice(1), type: 'del' });
+        rightLines.push({ num: null, content: '', type: 'empty' });
+      } else if (line.startsWith('+')) {
+        newLine++;
+        leftLines.push({ num: null, content: '', type: 'empty' });
+        rightLines.push({ num: newLine, content: line.slice(1), type: 'add' });
+      } else {
+        oldLine++;
+        newLine++;
+        const content = line.startsWith(' ') ? line.slice(1) : line;
+        leftLines.push({ num: oldLine, content, type: 'ctx' });
+        rightLines.push({ num: newLine, content, type: 'ctx' });
+      }
+    }
+
+    const renderPane = (paneLines: typeof leftLines): string => {
+      let html = '<table class="diff-table"><tbody>';
+      for (const ln of paneLines) {
+        if (ln.type === 'hunk') {
+          html += `<tr class="diff-hunk-header"><td colspan="3">${escapeHtml(ln.content)}</td></tr>`;
+          continue;
+        }
+        const cls = ln.type === 'add' ? 'diff-line-add' : ln.type === 'del' ? 'diff-line-del' : ln.type === 'empty' ? 'diff-line-ctx' : 'diff-line-ctx';
+        const prefix = ln.type === 'add' ? '+' : ln.type === 'del' ? '−' : ' ';
+        html += `<tr class="${cls}">
+          <td class="diff-line-num">${ln.num ?? ''}</td>
+          <td class="diff-line-prefix">${ln.type === 'empty' ? '' : prefix}</td>
+          <td class="diff-line-content">${escapeHtml(ln.content)}</td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      return html;
+    };
+
+    return `<div class="diff-split-container">
+      <div class="diff-split-pane">
+        <div class="diff-pane-label">ORIGINAL</div>
+        ${renderPane(leftLines)}
+      </div>
+      <div class="diff-split-pane">
+        <div class="diff-pane-label">PROPOSED</div>
+        ${renderPane(rightLines)}
+      </div>
+    </div>`;
+  };
+
+  // 14. Resizable Panel Logic
+  const setupResize = (handleId: string, getLeft: () => HTMLElement | null, getRight: () => HTMLElement | null, minLeft: number) => {
+    const handle = document.getElementById(handleId);
+    if (!handle) return;
+
+    let isResizing = false;
+    let startX = 0;
+    let startLeftWidth = 0;
+
+    handle.addEventListener('mousedown', (e: MouseEvent) => {
+      e.preventDefault();
+      const left = getLeft();
+      const right = getRight();
+      if (!left || !right) return;
+
+      isResizing = true;
+      startX = e.clientX;
+      startLeftWidth = left.getBoundingClientRect().width;
+      handle.classList.add('active');
+      document.body.classList.add('resizing');
+    });
+
+    document.addEventListener('mousemove', (e: MouseEvent) => {
+      if (!isResizing) return;
+      const left = getLeft();
+      const right = getRight();
+      if (!left || !right) return;
+
+      const dx = e.clientX - startX;
+      // Use flex-basis for better resizing behavior
+      const newLeftWidth = Math.max(minLeft, startLeftWidth + dx);
+      left.style.width = `${newLeftWidth}px`;
+      left.style.flex = `0 0 ${newLeftWidth}px`;
+      
+      // We don't necessarily need to set the right width if it's the last element
+      // but for middle elements like the chat, we might want to.
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        handle.classList.remove('active');
+        document.body.classList.remove('resizing');
+        // Re-fit terminal if visible
+        if (terminalSpawned && !terminalPanel?.classList.contains('panel-hidden')) {
+          fitAddon?.fit();
+        }
+      }
+    });
+  };
+
+  // Sidebar ↔ Workspace resize
+  setupResize(
+    'resize-handle-sidebar',
+    () => document.getElementById('sidebar'),
+    () => document.getElementById('workspace'),
+    180
+  );
+
+  // Chat ↔ Editor resize
+  setupResize(
+    'resize-handle-editor',
+    () => document.getElementById('chat-container'),
+    () => document.getElementById('editor-container'),
+    300
+  );
+
+  // Handle window resize to re-fit components
+  window.addEventListener('resize', () => {
+    if (terminalSpawned && !terminalPanel?.classList.contains('panel-hidden')) {
+      fitAddon?.fit();
+    }
   });
 }
 

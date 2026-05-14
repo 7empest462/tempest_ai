@@ -67,15 +67,31 @@ impl SentinelManager {
             ],
         };
         
-        // 0. Repetition Check
-        if repetition_stack.len() >= 3 {
+        // 0. Repetition & Redundancy Check
+        if !repetition_stack.is_empty() {
             let last = &repetition_stack[repetition_stack.len() - 1];
-            let prev1 = &repetition_stack[repetition_stack.len() - 2];
-            let prev2 = &repetition_stack[repetition_stack.len() - 3];
             
-            if last == prev1 && last == prev2 {
-                action.message.push_str(&format!("⚠️ [SENTINEL - REPETITION]: You have called '{}' with the same arguments 3 times in a row. YOU ARE LOOPING.\n", last.0));
-                
+            // A: Strict Loop (3 in a row)
+            if repetition_stack.len() >= 3 {
+                let prev1 = &repetition_stack[repetition_stack.len() - 2];
+                let prev2 = &repetition_stack[repetition_stack.len() - 3];
+                if last == prev1 && last == prev2 {
+                    action.message.push_str(&format!("⚠️ [SENTINEL - REPETITION]: You have called '{}' with the same arguments 3 times in a row. YOU ARE LOOPING.\n", last.0));
+                }
+            }
+
+            // B: Redundant Success (Calling a successful tool again with same args)
+            if repetition_stack.len() >= 2 {
+                for i in 0..repetition_stack.len() - 1 {
+                    let prev = &repetition_stack[i];
+                    if prev.0 == last.0 && prev.1 == last.1 && prev.2.is_some() {
+                        // If it's a read operation, it's definitely redundant
+                        if last.0 == "read_file" || last.0 == "search_files" || last.0 == "ls" {
+                             action.message.push_str(&format!("⚠️ [SENTINEL - REDUNDANCY]: You already successfully called '{}' with these arguments in this session. CHECK YOUR CONTEXT.\n", last.0));
+                             break;
+                        }
+                    }
+                }
             }
         }
 

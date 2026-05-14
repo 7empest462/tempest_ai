@@ -49,6 +49,8 @@ pub enum AgentEvent {
     AgentStateChange(String),
     ActiveTools(Vec<String>),
     TaskUpdate(String),
+    ToolSuccess { name: String },
+    ToolError { name: String, error: String },
 }
 
 pub enum ToolResponse {
@@ -936,6 +938,12 @@ pub async fn run_tui(
                     app.engine_status = Some("🛑 FAILED".to_string());
                 }
                 AgentEvent::AgentStateChange(_) | AgentEvent::ActiveTools(_) | AgentEvent::TaskUpdate(_) => {}
+                AgentEvent::ToolSuccess { name } => {
+                    app.push_message(format!("✅ [TOOL]: {} completed successfully.", name.to_uppercase()));
+                }
+                AgentEvent::ToolError { name, error } => {
+                    app.push_message(format!("❌ [TOOL]: {} failed: {}", name.to_uppercase(), error));
+                }
             }
         }
 

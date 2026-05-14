@@ -1,6 +1,6 @@
 [package]
 name = "tempest_ai"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.95"
 
@@ -139,3 +139,8 @@ debug = true
 [target.'cfg(target_os = "linux")'.dependencies]
 nvml-wrapper = "0.12.0"
 procfs = "0.18.0"
+
+[[bin]]
+name = "test_regex"
+path = "src/test_regex.rs"
+
