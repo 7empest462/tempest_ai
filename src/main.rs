@@ -466,7 +466,7 @@ async fn main() -> Result<()> {
     if cli.safe {
         agent.set_safe_mode(true);
     }
-    if !cli.cli {
+    if !cli.cli && !cli.web && !cli.mcp_server {
         let agent_init = agent.clone();
         let backend_id = if cli.bridge { "bridge".to_string() } else if cli.lmstudio { "lmstudio".to_string() } else if cli.mlx { "mlx".to_string() } else { "ollama".to_string() };
         let final_nexus_port = nexus_port;
@@ -474,6 +474,12 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             tempest_ai::nexus::run_nexus(agent_nexus, final_nexus_port, backend_id, None, None).await;
         });
+        tokio::spawn(async move {
+            let _ = agent_init.initialize_atlas(false).await;
+            let _ = agent_init.warmup().await;
+        });
+    } else if !cli.cli {
+        let agent_init = agent.clone();
         tokio::spawn(async move {
             let _ = agent_init.initialize_atlas(false).await;
             let _ = agent_init.warmup().await;
