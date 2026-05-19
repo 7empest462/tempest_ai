@@ -17,6 +17,44 @@ verifier_model = "deepseek-r1:8b"
 mlx_model = "battle_ready"
 mlx_quant = "None"
 
+# ==========================================
+# ⚙️ SAMPLING PARAMETERS
+# ==========================================
+# Fine-tune the creativity and stiffness of the models.
+temp_planning = 0.05
+temp_execution = 0.25
+top_p_planning = 0.95
+top_p_execution = 0.92
+repeat_penalty_planning = 1.18
+repeat_penalty_execution = 1.12
+ctx_planning = 32768
+ctx_execution = 65536
+
+# ==========================================
+# ⚡ MLX SAMPLING PARAMETERS
+# ==========================================
+# MLX models (especially 7B distilled) require higher temperatures to trigger reasoning.
+mlx_temp_planning = 0.4
+mlx_temp_execution = 0.15
+mlx_top_p_planning = 0.9
+mlx_top_p_execution = 0.85
+mlx_repeat_penalty_planning = 1.02
+mlx_repeat_penalty_execution = 1.02
+
+# ==========================================
+# 🧹 BASE SETTINGS
+# ==========================================
+model = "qwen2.5-coder:7b"
+sub_agent_model = "llama3.2:1b"
+history_path = "history.json"
+db_path = "~/fleet.db"
+encrypt_history = false
+tui_theme = "Solarized (dark)"
+nexus_port = 8080
+metrics_port = 7777
+pa_memory_mb = 8192
+paged_attn = true
+
 # Available MLX presets (May 2026 8GB GGUF Fleet - Non-Gated)
 [mlx_presets.battle_ready]
 path = "/Volumes/Corsair_Lab/Home/mlx_models/DeepSeek-R1-Distill-Qwen3-8B"
@@ -54,38 +92,3 @@ quant = "Q8_0"
 repo = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
 quant = "Q8_0"
 
-# ==========================================
-# ⚙️ SAMPLING PARAMETERS
-# ==========================================
-# Fine-tune the creativity and stiffness of the models.
-temp_planning = 0.05
-temp_execution = 0.25
-top_p_planning = 0.95
-top_p_execution = 0.92
-repeat_penalty_planning = 1.18
-repeat_penalty_execution = 1.12
-ctx_planning = 32768
-ctx_execution = 65536
-
-# ==========================================
-# ⚡ MLX SAMPLING PARAMETERS
-# ==========================================
-# MLX models (especially 7B distilled) require higher temperatures to trigger reasoning.
-mlx_temp_planning = 0.4
-mlx_temp_execution = 0.15
-mlx_top_p_planning = 0.9
-mlx_top_p_execution = 0.85
-mlx_repeat_penalty_planning = 1.02
-mlx_repeat_penalty_execution = 1.02
-
-# ==========================================
-# 🧹 BASE SETTINGS
-# ==========================================
-model = "qwen2.5-coder:7b"
-sub_agent_model = "llama3.2:1b"
-history_path = "history.json"
-db_path = "~/fleet.db"
-encrypt_history = false
-tui_theme = "Solarized (dark)"
-nexus_port = 8080
-metrics_port = 7777

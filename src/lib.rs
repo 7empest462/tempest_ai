@@ -22,6 +22,7 @@ pub mod telemetry;
 pub mod mcp_protocol;
 pub mod ai_bridge;
 pub mod test_types;
+pub mod overwatch;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -211,6 +211,8 @@ impl Backend {
                                  let total_mb = sys.total_memory() / 1024 / 1024;
                                  (total_mb as f32 * 0.90) as usize
                              };
+                             
+                             println!("{} PagedAttention Budget: {} MB (KV Cache Quantization: F8)", "⚡".yellow(), limit_mb);
 
                              let paged_attn_cfg = PagedAttentionMetaBuilder::default()
                                 .with_block_size(32)

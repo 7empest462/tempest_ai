@@ -64,6 +64,8 @@ impl SentinelManager {
                 "Thermal Guard".into(),
                 "Code Guard".into(),
                 "Hallucination Guard".into(),
+                "File I/O Overwatch".into(),
+                "Fake Result Guard".into(),
             ],
         };
         

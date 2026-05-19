@@ -149,6 +149,7 @@ pub struct Agent {
     pub paged_attn: bool,
     pub pa_memory_mb: Option<usize>,
     pub planning_enabled: bool,
+    pub overwatch: crate::overwatch::OverwatchEngine,
     pub checkpoint_mgr: crate::checkpoint::SharedCheckpointManager,
     pub mcp_clients: Arc<DashMap<String, Arc<tokio::sync::Mutex<crate::mcp::McpClient>>>>,
     pub tool_registry_skg: Arc<skg_tool::ToolRegistry>,
@@ -419,117 +420,140 @@ impl<'a> AgentStream<'a> {
             }
             AgentStreamState::StreamingContent { content } => {
                 let content = content.clone();
-                // Expanded detection to catch .py, .json, and naked blocks
-                // Check if ```json blocks contain tool-shaped JSON (not raw code)
-                let json_is_tool_call = if content.contains("```json") {
-                    let lower = content.to_lowercase();
-                    lower.contains("\"tool\"") || lower.contains("\"name\"") || lower.contains("\"function\"")
-                } else {
-                    false
-                };
 
-                let contains_raw_code = content.contains("```rust") || 
-                                      content.contains("```python") || 
-                                      content.contains("```py") || 
-                                      content.contains("```javascript") || 
-                                      content.contains("```js") || 
-                                      content.contains("```sh") || 
-                                      content.contains("```bash") || 
-                                      (content.contains("```json") && !json_is_tool_call) ||
-                                      (content.contains("```") && content.len() > 20 && !json_is_tool_call); // Catch naked blocks with actual content
-
-                let mut stripped_content = content.clone();
-                if let Some(start) = stripped_content.find("<think>") {
-                    if let Some(end) = stripped_content.find("</think>") {
-                        if end > start {
-                            stripped_content.replace_range(start..end + 8, "");
-                        }
-                    } else {
-                        stripped_content.replace_range(start.., "");
-                    }
-                }
-
-                let lower_content = stripped_content.to_lowercase();
-                let is_delegating = lower_content.contains("you generate") || 
-                                    lower_content.contains("you write") || 
-                                    lower_content.contains("you create") || 
-                                    lower_content.contains("let me know when you") ||
-                                    (lower_content.contains("please use the tool") && !lower_content.contains("i will"));
-
-                let model_name_raw = self.agent.model.lock().clone();
-                let model_name = model_name_raw.to_lowercase();
+                // ============================================================
+                // 🛡️ OVERWATCH ENGINE — Pre-Reaction Context Rules
+                // ============================================================
+                // Run the Overwatch engine FIRST. If it intercepts, we force
+                // the model to re-roll immediately without any further checks.
+                let overwatch_verdict = self.agent.overwatch.evaluate_pre_reaction(&content);
                 
-                // MLX presets use short keys (e.g. "battle_ready"). We must check the actual path/repo.
-                let mlx_path = if let Some(preset) = self.agent.mlx_presets.get(&model_name_raw) {
-                    if let Some(path) = &preset.path {
-                        path.to_lowercase()
-                    } else if let Some(repo) = &preset.repo {
-                        repo.to_lowercase()
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-
-                let planner_name = self.agent.planner_model.clone().unwrap_or_default().to_lowercase();
-                let is_r1 = model_name.contains("r1") || model_name.contains("deepseek") ||
-                           mlx_path.contains("r1") || mlx_path.contains("deepseek") ||
-                           planner_name.contains("r1") || planner_name.contains("deepseek");
-
-                if (contains_raw_code && !is_r1) || is_delegating {
-                    let reprimand = if is_delegating {
-                        "⚠️ [ROLE REMINDER]: Assistant, YOU are the engineer with the tools. The User cannot help you with file operations. Please re-issue your response and use the correct `write_file` or `run_command` JSON tool call yourself.".to_string()
-                    } else {
-                        "🛑 CRITICAL ERROR: Your previous response was REJECTED because it contained raw markdown code blocks. YOU ARE FORBIDDEN from using backticks for code. Use the `write_file` tool call ONLY. Please re-think your strategy and use the tool now.".to_string()
-                    };
-                    
-                    let sentinel_name = if is_delegating { "Identity Guard" } else { "Tool Guard" };
-                    let log_msg = if is_delegating { "Blocked delegation to user" } else { "Blocked raw code output" };
-
+                if let crate::overwatch::OverwatchVerdict::Intercept { correction, log, rule_name } = overwatch_verdict {
                     let tx_opt = self.agent.event_tx.lock().clone();
                     if let Some(tx) = tx_opt {
                         let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
-                            active: vec![sentinel_name.to_string()],
-                            log: log_msg.to_string() 
+                            active: vec![rule_name],
+                            log 
                         });
                     }
 
-                    // System role prevents AI from blaming the User
-                    self.agent.history.lock().push(ChatMessage::new(MessageRole::System, reprimand));
+                    // Inject harsh backpressure into history
+                    self.agent.history.lock().push(ChatMessage::new(MessageRole::System, correction));
                     self.agent.save_history()?;
                     
-                    // BREAK THE HABIT: Clear accumulated reasoning so it doesn't just repeat the same thought
+                    // Force re-roll: clear accumulated reasoning
                     self.state = AgentStreamState::Thinking { accumulated: String::new() };
                 } else {
-                    let is_done = lower_content.contains("done:") || 
-                                 lower_content.contains("task complete") || 
-                                 lower_content.contains("all tasks finished");
-                    
-                    if is_done {
-                        self.state = AgentStreamState::Done;
+                    // ============================================================
+                    // 🔧 LEGACY GUARDS — Raw Code & Delegation Detection
+                    // ============================================================
+                    let json_is_tool_call = if content.contains("```json") {
+                        let lower = content.to_lowercase();
+                        lower.contains("\"tool\"") || lower.contains("\"name\"") || lower.contains("\"function\"")
                     } else {
-                        // FIX: Maintain momentum! If the model is reporting progress, give it one more turn to verify or finish.
-                        let tx_opt = self.agent.event_tx.lock().clone();
-                        
-                        // RESTORE SILENT FAILURE NUDGE:
-                        let is_silent_failure = content.len() < 15 && !self.agent.history.lock().is_empty() && {
-                            let last_msg = self.agent.history.lock().last().cloned();
-                            let reasoning_len = last_msg.and_then(|m| m.thinking).map(|s| s.len()).unwrap_or(0);
-                            reasoning_len > 100
-                        };
+                        false
+                    };
 
-                        if is_silent_failure {
-                             let nudge = "⚠️ [SILENT FAILURE]: You reasoned about an action but didn't output a tool call. YOU must output the JSON tool call now to finish the task.".to_string();
-                             self.agent.history.lock().push(ollama_rs::generation::chat::ChatMessage::new(ollama_rs::generation::chat::MessageRole::System, nudge));
-                        } else if let Some(tx) = tx_opt {
-                             let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("🔄 MOMENTUM: Technical report received. Re-assessing next steps...".to_string()));
+                    let contains_raw_code = content.contains("```rust") || 
+                                          content.contains("```python") || 
+                                          content.contains("```py") || 
+                                          content.contains("```javascript") || 
+                                          content.contains("```js") || 
+                                          content.contains("```sh") || 
+                                          content.contains("```bash") || 
+                                          (content.contains("```json") && !json_is_tool_call) ||
+                                          (content.contains("```") && content.len() > 20 && !json_is_tool_call);
+
+                    let mut stripped_content = content.clone();
+                    if let Some(start) = stripped_content.find("<think>") {
+                        if let Some(end) = stripped_content.find("</think>") {
+                            if end > start {
+                                stripped_content.replace_range(start..end + 8, "");
+                            }
+                        } else {
+                            stripped_content.replace_range(start.., "");
                         }
+                    }
+
+                    let lower_content = stripped_content.to_lowercase();
+                    let is_delegating = lower_content.contains("you generate") || 
+                                        lower_content.contains("you write") || 
+                                        lower_content.contains("you create") || 
+                                        lower_content.contains("let me know when you") ||
+                                        (lower_content.contains("please use the tool") && !lower_content.contains("i will"));
+
+                    let model_name_raw = self.agent.model.lock().clone();
+                    let model_name = model_name_raw.to_lowercase();
+                    
+                    let mlx_path = if let Some(preset) = self.agent.mlx_presets.get(&model_name_raw) {
+                        if let Some(path) = &preset.path {
+                            path.to_lowercase()
+                        } else if let Some(repo) = &preset.repo {
+                            repo.to_lowercase()
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    let planner_name = self.agent.planner_model.clone().unwrap_or_default().to_lowercase();
+                    let is_r1 = model_name.contains("r1") || model_name.contains("deepseek") ||
+                               mlx_path.contains("r1") || mlx_path.contains("deepseek") ||
+                               planner_name.contains("r1") || planner_name.contains("deepseek");
+
+                    if (contains_raw_code && !is_r1) || is_delegating {
+                        let reprimand = if is_delegating {
+                            "⚠️ [ROLE REMINDER]: Assistant, YOU are the engineer with the tools. The User cannot help you with file operations. Please re-issue your response and use the correct `write_file` or `run_command` JSON tool call yourself.".to_string()
+                        } else {
+                            "🛑 CRITICAL ERROR: Your previous response was REJECTED because it contained raw markdown code blocks. YOU ARE FORBIDDEN from using backticks for code. Use the `write_file` tool call ONLY. Please re-think your strategy and use the tool now.".to_string()
+                        };
+                        
+                        let sentinel_name = if is_delegating { "Identity Guard" } else { "Tool Guard" };
+                        let log_msg = if is_delegating { "Blocked delegation to user" } else { "Blocked raw code output" };
+
+                        let tx_opt = self.agent.event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
+                                active: vec![sentinel_name.to_string()],
+                                log: log_msg.to_string() 
+                            });
+                        }
+
+                        self.agent.history.lock().push(ChatMessage::new(MessageRole::System, reprimand));
+                        self.agent.save_history()?;
                         
                         self.state = AgentStreamState::Thinking { accumulated: String::new() };
+                    } else {
+                        let is_done = lower_content.contains("done:") || 
+                                     lower_content.contains("task complete") || 
+                                     lower_content.contains("all tasks finished");
+                        
+                        if is_done {
+                            self.state = AgentStreamState::Done;
+                        } else {
+                            let tx_opt = self.agent.event_tx.lock().clone();
+                            
+                            // Silent failure nudge
+                            let is_silent_failure = content.len() < 15 && !self.agent.history.lock().is_empty() && {
+                                let last_msg = self.agent.history.lock().last().cloned();
+                                let reasoning_len = last_msg.and_then(|m| m.thinking).map(|s| s.len()).unwrap_or(0);
+                                reasoning_len > 100
+                            };
+
+                            if is_silent_failure {
+                                 let nudge = "⚠️ [SILENT FAILURE]: You reasoned about an action but didn't output a tool call. YOU must output the JSON tool call now to finish the task.".to_string();
+                                 self.agent.history.lock().push(ollama_rs::generation::chat::ChatMessage::new(ollama_rs::generation::chat::MessageRole::System, nudge));
+                            } else if let Some(tx) = tx_opt {
+                                 let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate("🔄 MOMENTUM: Technical report received. Re-assessing next steps...".to_string()));
+                            }
+                            
+                            self.state = AgentStreamState::Thinking { accumulated: String::new() };
+                        }
                     }
                 }
             }
+
             AgentStreamState::ExecutingTools { tool_calls, results } => {
                 // Log the execution summary to ensure fields are read
                 let tx_opt = self.agent.event_tx.lock().clone();
@@ -843,6 +867,7 @@ impl Agent {
             paged_attn,
             pa_memory_mb,
             planning_enabled,
+            overwatch: crate::overwatch::OverwatchEngine::new(),
             checkpoint_mgr: crate::checkpoint::new_shared(50),
             mcp_clients: Arc::new(DashMap::new()),
             tool_registry_skg,
@@ -2662,6 +2687,7 @@ mod tests {
             true,
             Arc::new(Mutex::new(None)),
             None, // lmstudio_url
+            None, // pa_memory_mb
         ).await;
         assert!(agent.is_ok());
         let agent = agent.unwrap();

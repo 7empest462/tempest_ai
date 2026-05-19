@@ -9684,6 +9684,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c6f73aeb92d671e0cc4dca167e59b2deb6387c375391bc99ee743f326994a2b"
 
 [[package]]
+name = "skg-context"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1141cd7c720bbb8fb8b3ac9d1e1b9f82c92943cfc26788ef8118137967188414"
+dependencies = [
+ "layer0",
+ "serde_json",
+ "skg-turn",
+]
+
+[[package]]
+name = "skg-context-engine"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d907e97e00f171ce7cd6c33c91e159773717a025ef71f83595f11d518969390"
+dependencies = [
+ "async-trait",
+ "layer0",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "skg-context",
+ "skg-tool",
+ "skg-turn",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skg-tool"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9705,6 +9735,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "skg-turn"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "999e92777fc33a956c5caaea2e1399bd8e9463cfd48a1525fc90b97080bb9473"
+dependencies = [
+ "async-trait",
+ "layer0",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -10407,6 +10451,7 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "similar",
+ "skg-context-engine",
  "skg-tool",
  "streaming-iterator",
  "syntect",
