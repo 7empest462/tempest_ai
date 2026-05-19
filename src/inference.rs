@@ -470,6 +470,15 @@ impl Backend {
                             }
                         }
                     }
+
+                    // 🛑 HARD STOP / YIELD: Truncate generation the millisecond the JSON tool is complete
+                    if crate::overwatch::is_complete_tool_json(&full_content) {
+                        let tx_opt = event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.try_send(AgentEvent::SystemUpdate("🛑 Hard Stop: Tool call detected, yielding execution.".to_string()));
+                        }
+                        break;
+                    }
                 }
 
                 // Finalize tool call arguments
@@ -880,6 +889,15 @@ impl Backend {
                             }
                             break; 
                         }
+                    }
+
+                    // 🛑 HARD STOP / YIELD: Truncate generation the millisecond the JSON tool is complete
+                    if crate::overwatch::is_complete_tool_json(&full_content) {
+                        let tx = event_tx.lock().clone();
+                        if let Some(tx) = tx {
+                            let _ = tx.try_send(AgentEvent::SystemUpdate("🛑 Hard Stop: Tool call detected, yielding execution.".to_string()));
+                        }
+                        break;
                     }
                 }
             }
@@ -1492,6 +1510,15 @@ impl Backend {
                                         }
                                     }
                                 }
+                            }
+                            
+                            // 🛑 HARD STOP / YIELD: Truncate generation the millisecond the JSON tool is complete
+                            if crate::overwatch::is_complete_tool_json(&full_content) {
+                                let tx = event_tx.lock().clone();
+                                if let Some(tx) = tx {
+                                    let _ = tx.try_send(AgentEvent::SystemUpdate("🛑 Hard Stop: Tool call detected, yielding execution.".to_string()));
+                                }
+                                break;
                             }
                         }
                         MistralResponse::ModelError(e, _) => return Err(miette!("MLX Model Error: {}", e)),

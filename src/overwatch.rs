@@ -192,6 +192,59 @@ fn is_faking_tool_results(ctx: &Context) -> bool {
 }
 
 // ============================================================
+// 🛑 HARD STOP / YIELD LOGIC
+// ============================================================
+
+/// Checks if the provided text contains a syntactically complete JSON tool call.
+/// This is used to aggressively truncate model generation the millisecond it 
+/// finishes asking for a tool, preventing post-tool hallucinations.
+pub fn is_complete_tool_json(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    
+    // Case 1: Markdown block ```json ... ```
+    if let Some(start) = lower.find("```json") {
+        let after = &text[start + 7..];
+        if after.contains("```") {
+            return true;
+        }
+    }
+    
+    // Case 2: Naked JSON object containing "tool"
+    if let Some(start) = lower.find("{\"tool\":") {
+        let json_part = &text[start..];
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        let mut started = false;
+        
+        for c in json_part.chars() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => {
+                    depth += 1;
+                    started = true;
+                }
+                '}' if !in_string => {
+                    depth -= 1;
+                    if started && depth == 0 {
+                        // Found the balanced end of the JSON object
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    false
+}
+
+// ============================================================
 // 🌪️ RULE FACTORY
 // ============================================================
 
