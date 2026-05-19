@@ -147,6 +147,7 @@ pub struct Agent {
     pub mlx_repeat_penalty_planning: Option<f32>,
     pub mlx_repeat_penalty_execution: Option<f32>,
     pub paged_attn: bool,
+    pub pa_memory_mb: Option<usize>,
     pub planning_enabled: bool,
     pub checkpoint_mgr: crate::checkpoint::SharedCheckpointManager,
     pub mcp_clients: Arc<DashMap<String, Arc<tokio::sync::Mutex<crate::mcp::McpClient>>>>,
@@ -601,6 +602,7 @@ impl Agent {
         planning_enabled: bool,
         event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
         lmstudio_url: Option<String>,
+        pa_memory_mb: Option<usize>,
     ) -> Result<Self> {
         // Resolve preset if model name matches a key in mlx_presets
         if mode == AgentMode::MLX {
@@ -627,7 +629,7 @@ impl Agent {
         };
 
         let b_url = if mode == AgentMode::LMStudio { lmstudio_url.clone() } else { None };
-        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize, b_url).await?;
+        let (backend, final_model) = Backend::new(mode, model, quant, event_tx.clone(), paged_attn, ctx_execution as usize, b_url, pa_memory_mb).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
 
         let tools_vec: Vec<Arc<dyn crate::tools::AgentTool>> = vec![
@@ -839,6 +841,7 @@ impl Agent {
             mlx_repeat_penalty_planning,
             mlx_repeat_penalty_execution,
             paged_attn,
+            pa_memory_mb,
             planning_enabled,
             checkpoint_mgr: crate::checkpoint::new_shared(50),
             mcp_clients: Arc::new(DashMap::new()),
@@ -1279,7 +1282,8 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             self.event_tx.clone(),
             self.paged_attn,
             self.ctx_execution as usize,
-            None
+            None,
+            self.pa_memory_mb
         ).await?;
         
         {

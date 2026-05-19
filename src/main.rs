@@ -1,14 +1,12 @@
 #![recursion_limit = "1024"]
+// Copyright (c) 2026 Robert Simens. All Rights Reserved.
+// Licensed under the Tempest AI Source-Available License.
+// See LICENSE in the project root for full license information.
 // Modules are now exported via src/lib.rs
-
 
 use tempest_ai::agent::Agent;
 use clap::Parser;
 use colored::*;
-// Copyright (c) 2026 Robert Simens. All Rights Reserved.
-// Licensed under the Tempest AI Source-Available License.
-// See LICENSE in the project root for full license information.
-
 use miette::{Result, IntoDiagnostic};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -91,6 +89,10 @@ struct Cli {
     /// Port for the Prometheus Metrics Exporter (Default: 7777)
     #[arg(long)]
     pub metrics_port: Option<u16>,
+
+    /// Hard cap for the PagedAttention memory budget (MB). E.g., 2048 for 2GB.
+    #[arg(long)]
+    pub pa_memory_mb: Option<usize>,
 
     /// Enable Safe Mode (block for approvals on file modifications)
     #[arg(short, long)]
@@ -442,6 +444,7 @@ async fn main() -> Result<()> {
         config.planning_enabled.unwrap_or(true),
         event_tx.clone(),
         config.lmstudio_url.clone(),
+        cli.pa_memory_mb.or(config.pa_memory_mb),
     ).await?;
     
     if cli.web || cli.mcp_server {

@@ -78,6 +78,7 @@ pub struct AppConfig {
     pub tui_theme: Option<String>,
     pub nexus_port: Option<u16>,
     pub metrics_port: Option<u16>,
+    pub pa_memory_mb: Option<usize>,
 }
 
 impl Default for AppConfig {
@@ -136,6 +137,7 @@ impl Default for AppConfig {
             mcp_servers: None,
             nexus_port: Some(8080),
             metrics_port: Some(7777),
+            pa_memory_mb: None,
         }
     }
 }

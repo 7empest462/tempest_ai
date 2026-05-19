@@ -21,7 +21,7 @@ use mistralrs::{
     GgufModelBuilder, TextModelBuilder, Model, TextMessageRole, 
     Response as MistralResponse, RequestBuilder, SamplingParams,
     Tool, ToolChoice, Function, ToolType,
-    PagedAttentionMetaBuilder, MemoryGpuConfig,
+    PagedAttentionMetaBuilder, MemoryGpuConfig, PagedCacheType,
     EmbeddingRequest
 };
 use crate::tui::AgentEvent;
@@ -100,7 +100,8 @@ impl Backend {
         event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>>, 
         paged_attn: bool, 
         ctx_limit: usize,
-        base_url: Option<String>
+        base_url: Option<String>,
+        pa_memory_mb: Option<usize>
     ) -> Result<(Self, String)> {
         #[cfg(not(target_os = "macos"))]
         {
@@ -172,15 +173,22 @@ impl Backend {
                         if paged_attn {
                             println!("{} MLX: Initializing Paged Attention (Window: {} tokens)", "⚡".yellow(), ctx_limit);
                             
-                            // Calculate 90% of physical RAM as a hard ceiling for the MLX pool
-                            let mut sys = System::new_all();
-                            sys.refresh_memory();
-                            let total_mb = sys.total_memory() / 1024 / 1024;
-                            let safety_limit_mb = (total_mb as f32 * 0.90) as usize;
+                            // Determine the memory limit
+                            let limit_mb = if let Some(custom_limit) = pa_memory_mb {
+                                custom_limit
+                            } else {
+                                let mut sys = System::new_all();
+                                sys.refresh_memory();
+                                let total_mb = sys.total_memory() / 1024 / 1024;
+                                (total_mb as f32 * 0.90) as usize
+                            };
+                            
+                            println!("{} PagedAttention Budget: {} MB (KV Cache Quantization: F8)", "⚡".yellow(), limit_mb);
 
                             let paged_attn_cfg = PagedAttentionMetaBuilder::default()
                                 .with_block_size(32)
-                                .with_gpu_memory(MemoryGpuConfig::MbAmount(safety_limit_mb))
+                                .with_gpu_memory(MemoryGpuConfig::MbAmount(limit_mb))
+                                .with_paged_cache_type(PagedCacheType::F8E4M3)
                                 .build()
                                 .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
                             builder = builder.with_paged_attn(paged_attn_cfg);
@@ -194,15 +202,20 @@ impl Backend {
                             .with_max_num_seqs(1);
                         
                         if paged_attn {
-                             // Calculate 90% of physical RAM for Native SafeTensors as well
-                             let mut sys = System::new_all();
-                             sys.refresh_memory();
-                             let total_mb = sys.total_memory() / 1024 / 1024;
-                             let safety_limit_mb = (total_mb as f32 * 0.90) as usize;
+                             // Determine the memory limit for Native SafeTensors
+                             let limit_mb = if let Some(custom_limit) = pa_memory_mb {
+                                 custom_limit
+                             } else {
+                                 let mut sys = System::new_all();
+                                 sys.refresh_memory();
+                                 let total_mb = sys.total_memory() / 1024 / 1024;
+                                 (total_mb as f32 * 0.90) as usize
+                             };
 
                              let paged_attn_cfg = PagedAttentionMetaBuilder::default()
                                 .with_block_size(32)
-                                .with_gpu_memory(MemoryGpuConfig::MbAmount(safety_limit_mb))
+                                .with_gpu_memory(MemoryGpuConfig::MbAmount(limit_mb))
+                                .with_paged_cache_type(PagedCacheType::F8E4M3)
                                 .build()
                                 .map_err(|e| miette!("Failed to configure Paged Attention: {}", e))?;
                             builder = builder.with_paged_attn(paged_attn_cfg);
