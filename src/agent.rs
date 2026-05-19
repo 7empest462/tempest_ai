@@ -201,18 +201,35 @@ impl<'a> AgentStream<'a> {
                         all_tool_calls.push(native_call);
                     }
                     if all_tool_calls.is_empty() {
-                        if let Ok(legacy_calls) = self.agent.extract_tool_calls(&output.content) {
-                            for call in legacy_calls {
-                                 let name = call.get("name").or(call.get("tool")).or(call.get("function")).and_then(|v| v.as_str());
-                                 let args = call.get("arguments").or(call.get("args")).cloned().unwrap_or(serde_json::json!({}));
-                                 if let Some(n) = name {
-                                     all_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                         function: ollama_rs::generation::tools::ToolCallFunction {
-                                             name: n.to_string(),
-                                             arguments: args,
+                        // Try content first, then fall through to reasoning
+                        // (models sometimes emit tool calls inside <think> blocks)
+                        let sources = [&output.content, &output.reasoning];
+                        for source in sources {
+                            if !all_tool_calls.is_empty() { break; }
+                            if source.is_empty() { continue; }
+                            if let Ok(legacy_calls) = self.agent.extract_tool_calls(source) {
+                                for call in legacy_calls {
+                                     let name = call.get("name").or(call.get("tool")).or(call.get("function")).and_then(|v| v.as_str());
+                                     let args = call.get("arguments").or(call.get("args")).cloned().unwrap_or(serde_json::json!({}));
+                                     if let Some(n) = name {
+                                         // 🛡️ REASONING RESCUE: Tool call found in thinking block
+                                         if std::ptr::eq(source, &output.reasoning) {
+                                             let tx_opt = self.agent.event_tx.lock().clone();
+                                             if let Some(tx) = tx_opt {
+                                                 let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate {
+                                                     active: vec!["Reasoning Rescue".to_string()],
+                                                     log: format!("Rescued tool call '{}' from <think> block", n),
+                                                 });
+                                             }
                                          }
-                                     });
-                                 }
+                                         all_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                             function: ollama_rs::generation::tools::ToolCallFunction {
+                                                 name: n.to_string(),
+                                                 arguments: args,
+                                             }
+                                         });
+                                     }
+                                }
                             }
                         }
                     }
@@ -253,20 +270,37 @@ impl<'a> AgentStream<'a> {
                     all_tool_calls.push(native_call);
                 }
                 if all_tool_calls.is_empty() {
-                    if let Ok(legacy_calls) = self.agent.extract_tool_calls(&planner_output.content) {
-                        for call in legacy_calls {
-                             // Normalize legacy calls to the native format
-                             let name = call.get("name").or(call.get("tool")).or(call.get("function")).and_then(|v| v.as_str());
-                             let args = call.get("arguments").or(call.get("args")).cloned().unwrap_or(serde_json::json!({}));
-                             
-                             if let Some(n) = name {
-                                 all_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                     function: ollama_rs::generation::tools::ToolCallFunction {
-                                         name: n.to_string(),
-                                         arguments: args,
+                    // Try content first, then fall through to reasoning
+                    // (models sometimes emit tool calls inside <think> blocks)
+                    let sources = [&planner_output.content, &planner_output.reasoning];
+                    for source in sources {
+                        if !all_tool_calls.is_empty() { break; }
+                        if source.is_empty() { continue; }
+                        if let Ok(legacy_calls) = self.agent.extract_tool_calls(source) {
+                            for call in legacy_calls {
+                                 // Normalize legacy calls to the native format
+                                 let name = call.get("name").or(call.get("tool")).or(call.get("function")).and_then(|v| v.as_str());
+                                 let args = call.get("arguments").or(call.get("args")).cloned().unwrap_or(serde_json::json!({}));
+                                 
+                                 if let Some(n) = name {
+                                     // 🛡️ REASONING RESCUE: Tool call found in thinking block
+                                     if std::ptr::eq(source, &planner_output.reasoning) {
+                                         let tx_opt = self.agent.event_tx.lock().clone();
+                                         if let Some(tx) = tx_opt {
+                                             let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate {
+                                                 active: vec!["Reasoning Rescue".to_string()],
+                                                 log: format!("Rescued tool call '{}' from <think> block", n),
+                                             });
+                                         }
                                      }
-                                 });
-                             }
+                                     all_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                         function: ollama_rs::generation::tools::ToolCallFunction {
+                                             name: n.to_string(),
+                                             arguments: args,
+                                         }
+                                     });
+                                 }
+                            }
                         }
                     }
                 }
