@@ -279,7 +279,7 @@ impl Backend {
                 }
 
                 // Check for potential out-of-memory or swap thrashing scenario
-                let mut sys = System::new();
+                let mut sys = sysinfo::System::new();
                 sys.refresh_memory();
                 let total_mb = sys.total_memory() / 1024 / 1024;
                 if total_mb < 24000 && (model.contains("Q8") || model.contains("q8") || model.contains("8_0")) {
