@@ -102,7 +102,8 @@ pub struct Agent {
     model: Arc<Mutex<String>>,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     tools: Arc<DashMap<String, Arc<dyn crate::tools::AgentTool>>>,
-    tool_registry: Vec<ollama_rs::generation::tools::ToolInfo>,
+    #[allow(dead_code)] tool_registry: Vec<ollama_rs::generation::tools::ToolInfo>,
+    tool_rag_index: Arc<tokio::sync::RwLock<crate::tool_rag::ToolVectorIndex>>,
     system_prompt: String,
     recent_tool_calls: Arc<DashMap<String, String>>,
     history_path: String,
@@ -126,6 +127,7 @@ pub struct Agent {
     pub sentinel: crate::sentinel::SentinelManager,
     pub editor_context: Arc<Mutex<Option<Value>>>,
     pub safe_mode: Arc<AtomicBool>,
+    pub hardcore_mode: Arc<AtomicBool>,
     pub tool_stats: Arc<DashMap<String, (usize, usize)>>,
     pub tool_repetition_stack: Arc<Mutex<Vec<(String, String, Option<String>)>>>,
     pub planner_model: Option<String>,
@@ -151,8 +153,10 @@ pub struct Agent {
     pub planning_enabled: bool,
     pub overwatch: crate::overwatch::OverwatchEngine,
     pub checkpoint_mgr: crate::checkpoint::SharedCheckpointManager,
+    pub memory_store: Arc<Mutex<MemoryStore>>,
     pub mcp_clients: Arc<DashMap<String, Arc<tokio::sync::Mutex<crate::mcp::McpClient>>>>,
     pub tool_registry_skg: Arc<skg_tool::ToolRegistry>,
+    pub vram_time_sharing: bool,
 }
 
 pub struct AgentStream<'a> {
@@ -160,6 +164,7 @@ pub struct AgentStream<'a> {
     pub state: AgentStreamState,
     pub stop: Arc<AtomicBool>,
     pub iteration: usize,
+    pub decomposer: crate::turn_kit::TempestTurnDecomposer,
 }
 
 impl<'a> AgentStream<'a> {
@@ -169,6 +174,7 @@ impl<'a> AgentStream<'a> {
             state: AgentStreamState::Thinking { accumulated: String::new() },
             stop,
             iteration: 0,
+            decomposer: crate::turn_kit::TempestTurnDecomposer::new(),
         }
     }
 
@@ -176,6 +182,12 @@ impl<'a> AgentStream<'a> {
         let current_state = self.state.clone();
         match current_state {
             AgentStreamState::Thinking { accumulated } => {
+                let phase_lbl = self.decomposer.transition_phase(crate::turn_kit::TurnPhase::Planning);
+                let tx_opt = self.agent.event_tx.lock().clone();
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🌪️ [SKELEGENT TURN-KIT]: Entering {}", phase_lbl)));
+                }
+
                 // If we have accumulated reasoning from a previous step, broadcast it
                 if !accumulated.is_empty() {
                     let tx_opt = self.agent.event_tx.lock().clone();
@@ -375,6 +387,129 @@ impl<'a> AgentStream<'a> {
                 }
             }
             AgentStreamState::PendingTools { tool_calls: calls } => {
+                let phase_lbl = self.decomposer.transition_phase(crate::turn_kit::TurnPhase::Executing);
+                let tx_opt = self.agent.event_tx.lock().clone();
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🌪️ [SKELEGENT TURN-KIT]: Entering {}", phase_lbl)));
+                }
+
+                let backend = self.agent.backend.read().await.clone();
+                let is_local = matches!(backend.mode(), crate::inference::AgentMode::Ollama | crate::inference::AgentMode::MLX | crate::inference::AgentMode::LMStudio);
+
+                if !is_local {
+                    // === Structured validation for cloud/bridge models ===
+                    let mut ctx = skg_context_engine::Context::new();
+                    crate::overwatch::register_overwatch_rules(&mut ctx);
+                    
+                    let model = self.agent.model.lock().clone();
+                    let provider = crate::skg_adapter::SkgBackendProvider {
+                        backend,
+                        model,
+                    };
+                    
+                    let prompt = format!("Please validate the following tool calls to ensure they are safe and properly formatted: {:?}", calls);
+                    ctx.messages.push(layer0::context::Message::new(
+                        layer0::context::Role::User,
+                        layer0::content::Content::text(prompt),
+                    ));
+                    let schema_val = serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "is_valid": { "type": "boolean", "description": "Whether the tool calls are valid and safe" },
+                            "reason": { "type": "string", "description": "Reason for validation decision" }
+                        },
+                        "required": ["is_valid", "reason"]
+                    });
+
+                    let schema = skg_context_engine::OutputSchema::text_json(schema_val, |v| Ok(v.clone()));
+
+                    let config = skg_context_engine::react::ReactLoopConfig {
+                        system_prompt: "You are a tool validator. You must approve the tool call if it is well-formed. Assume all tools are registered and valid. Return is_valid: true unless it's severely malicious.".into(),
+                        model: None,
+                        max_tokens: Some(1024),
+                        temperature: Some(0.0),
+                        tool_filter: None,
+                    };
+
+                    let tools = self.agent.tool_registry_skg.as_ref();
+                    let tool_ctx = skg_tool::ToolCallContext::new(layer0::id::OperatorId::from("val"));
+
+                    // Notify UI we are validating
+                    if let Some(tx) = self.agent.event_tx.lock().clone() {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some("🛡️ [SKG]: Running structured tool validation...".to_string())));
+                    }
+
+                    let validation_res = skg_context_engine::react::react_loop_structured(
+                        &mut ctx,
+                        &provider,
+                        &tools,
+                        &tool_ctx,
+                        &config,
+                        &schema,
+                    ).await;
+                    
+                    match validation_res {
+                        Ok((value, _)) => {
+                            let is_valid = value.get("is_valid").and_then(|v| v.as_bool()).unwrap_or(true);
+                            if !is_valid {
+                                let reason = value.get("reason").and_then(|v| v.as_str()).unwrap_or("Validation failed");
+                                self.state = AgentStreamState::StreamingContent { content: format!("\n🛡️ SKG Validation Intercept: {}\n", reason) };
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            self.state = AgentStreamState::StreamingContent { content: format!("\n⚠️ SKG Validation Error: {}\n", e) };
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // ============================================================
+                // 🛡️ FAST-PATH OVERWATCH — Tool Call Validation (ALL MODELS)
+                // ============================================================
+                // This runs for BOTH local and cloud models. It catches:
+                // - Batch destructive writes (≥3 write_file in one turn)
+                // - Tiny writes to critical files (Cargo.toml, main.rs) without user intent
+                // Added after the incident where a hallucinating model overwrote the project.
+                {
+                    // Convert tool calls to JSON values for the overwatch engine
+                    let tool_call_values: Vec<serde_json::Value> = calls.iter().map(|call| {
+                        serde_json::json!({
+                            "tool": call.function.name,
+                            "arguments": call.function.arguments
+                        })
+                    }).collect();
+
+                    // Get last user message for intent matching
+                    let last_user_msg = {
+                        let history = self.agent.history.lock();
+                        history.iter().rev()
+                            .find(|m| m.role == ollama_rs::generation::chat::MessageRole::User)
+                            .map(|m| m.content.clone())
+                    };
+
+                    let overwatch_verdict = self.agent.overwatch.validate_tool_calls(
+                        &tool_call_values,
+                        last_user_msg.as_deref(),
+                    );
+
+                    if let crate::overwatch::OverwatchVerdict::Intercept { correction, log, rule_name } = overwatch_verdict {
+                        let tx_opt = self.agent.event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate { 
+                                active: vec![rule_name.clone()],
+                                log: log.clone(),
+                            });
+                        }
+
+                        // Inject the correction into history and force re-think
+                        self.agent.history.lock().push(ChatMessage::new(MessageRole::System, correction));
+                        self.agent.save_history()?;
+                        self.state = AgentStreamState::Thinking { accumulated: String::new() };
+                        return Ok(());
+                    }
+                }
+
                 self.state = AgentStreamState::ExecutingTools { 
                     tool_calls: calls.clone(), 
                     results: Vec::new() 
@@ -396,6 +531,12 @@ impl<'a> AgentStream<'a> {
                     .map(|r| (r.tool_name, r.result, r.is_success))
                     .collect();
                 self.agent.process_tool_feedback_stage(feedback_batch).await?;
+
+                let phase_lbl = self.decomposer.transition_phase(crate::turn_kit::TurnPhase::Verifying);
+                let tx_opt = self.agent.event_tx.lock().clone();
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🌪️ [SKELEGENT TURN-KIT]: Entering {}", phase_lbl)));
+                }
 
                 // --- 🛡️ VERIFICATION SENTINEL ---
                 // If any modifications were made, we automatically trigger a verification check
@@ -661,6 +802,7 @@ impl Agent {
         event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
         lmstudio_url: Option<String>,
         pa_memory_mb: Option<usize>,
+        vram_time_sharing: bool,
     ) -> Result<Self> {
         // Resolve preset if model name matches a key in mlx_presets
         if mode == AgentMode::MLX {
@@ -715,6 +857,8 @@ impl Agent {
             Arc::new(crate::tools::memory::RecallMemoryTool::new(memory_store.clone())),
             Arc::new(crate::tools::agent_ops::AskUserTool),
             Arc::new(crate::tools::agent_ops::SpawnSubAgentTool),
+            Arc::new(crate::tools::wasm_sandbox::WasmSafeCalculatorTool),
+            Arc::new(crate::tools::threat_scanner::ThreatScannerTool),
 
             Arc::new(crate::tools::agent_ops::UpdateTaskContextTool),
             Arc::new(crate::tools::agent_ops::NoOpTool),
@@ -731,6 +875,10 @@ impl Agent {
             Arc::new(crate::tools::process::ReadProcessLogsTool),
             Arc::new(crate::tools::process::KillProcessTool),
             Arc::new(crate::tools::process::WatchDirectoryTool),
+            Arc::new(crate::tools::terminal::TerminalSpawnTool),
+            Arc::new(crate::tools::terminal::TerminalInputTool),
+            Arc::new(crate::tools::terminal::TerminalReadTool),
+            Arc::new(crate::tools::terminal::TerminalCloseTool),
             Arc::new(crate::tools::utilities::ClipboardTool),
             Arc::new(crate::tools::utilities::NotifyTool),
             Arc::new(crate::tools::utilities::EnvVarTool),
@@ -756,7 +904,9 @@ impl Agent {
             Arc::new(crate::tools::rust::CargoAddTool),
             Arc::new(crate::tools::rust::CrateSearchTool),
             Arc::new(crate::tools::ast::AstOutlineTool),
+            Arc::new(crate::tools::ast::AstQueryTool),
             Arc::new(crate::tools::ast::AstEditTool),
+            Arc::new(crate::tools::visualization::GenerateGraphTool),
         ];
 
         let tools_map = Arc::new(DashMap::new());
@@ -768,9 +918,10 @@ impl Agent {
         let mut tool_registry_skg = skg_tool::ToolRegistry::new();
         
         // 1. Register Native Skelegent Tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_test::EchoTool));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_file::ReadFileTool));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_file::WriteFileTool));
+        tool_registry_skg.register(Arc::new(crate::tools::skg_test::SkgEchoTool::new()));
+        tool_registry_skg.register(Arc::new(crate::tools::skg_file::SkgReadFileTool::new()));
+        tool_registry_skg.register(Arc::new(crate::tools::skg_file::SkgWriteFileTool::new()));
+        tool_registry_skg.register(Arc::new(crate::tools::skg_demo::SkgDemoTool::new()));
         
         // 2. Register Adapted Tools (Bridge)
         for t in &tools_vec {
@@ -783,65 +934,27 @@ impl Agent {
         let history_path_obj = Path::new(&history_path);
         let brain_path = history_path_obj.parent().unwrap_or(Path::new(".")).join("brain_vectors.json");
         
-        // --- 🛠️ TOOL PRUNING (Inference Optimization) ---
-        // We only provide a "Core" set of tools to keep the prompt small (~1500 tokens instead of 9000+).
-        // This prevents massive GPU prefill delays (KV Cache calculation) on the first turn.
-        // The model can use `query_schema` to see the full details of other tools if needed.
-        let core_tool_names = vec![
-            "read_file", "write_file", "list_dir", "search_files", "grep_search", "edit_file_with_diff",
-            "run_command", "run_tests", "build_project",
-            "git_status", "git_diff", "git_action",
-            "semantic_search", "tree", "project_atlas",
-            "search_web", "read_url",
-            "recall_brain", "recall_memory", "recall_skill", "list_skills",
-            "ask_user", "query_schema", "update_task_context",
-            "system_telemetry", "network_check",
-            "cargo_search", "cargo_add",
-            "skg_read_file", "skg_write_file", "skg_echo"
-        ];
-        
-        // --- 🌪️ TOOL SCHEMA UNIFICATION ---
-        // We build the final schema sent to the model by filtering BOTH 
-        // the legacy and Skelegent registries against the core whitelist.
-        let mut tool_registry = Vec::new();
-        
-        // Add Legacy Tools
-        for t in &tools_vec {
-            if core_tool_names.contains(&t.name()) {
-                tool_registry.push(t.tool_info());
-            }
-        }
-        
-        // Add Native Skelegent Tools
-        for name in &core_tool_names {
-            if let Some(skg_tool) = tool_registry_skg.get(*name) {
-                // If it's native (not in tools_vec), add its schema
-                if !tools_map.contains_key(*name) {
-                    let mut schema = skg_tool.input_schema();
-                    
-                    // MCP to OpenAI schema conversion:
-                    // If the schema has a top-level 'properties' containing ONLY 'args',
-                    // then the actual parameters are inside 'args'.
-                    if let Some(props) = schema.get("properties") {
-                        if props.as_object().map(|m| m.len() == 1 && m.contains_key("args")).unwrap_or(false) {
-                            if let Some(args_schema) = props.get("args") {
-                                schema = args_schema.clone();
-                            }
-                        }
-                    }
+        // --- 🎯 TOOL RAG INDEX (Dynamic Tool Selection) ---
+        // Instead of a static core_tool_names whitelist, we embed all tool descriptions
+        // into a vector index using nomic-embed-text. On each user turn, only the
+        // top-K most relevant tools are injected into the schema.
+        // The full toolbox remains discoverable via `query_schema`.
+        let tool_rag_index = crate::tool_rag::ToolVectorIndex::build(
+            &tools_vec,
+            &*backend.read().await,
+            event_tx.clone(),
+        ).await.unwrap_or_else(|e| {
+            eprintln!("⚠️ Tool RAG index build failed ({}), falling back to full toolset", e);
+            // Fallback: we'll handle this in resolve() by returning all tools
+            // For now, build with an empty state — resolve will still work via always-on
+            crate::tool_rag::ToolVectorIndex::build_fallback(&tools_vec)
+        });
+        let tool_rag_index = Arc::new(tokio::sync::RwLock::new(tool_rag_index));
 
-                    let info = ollama_rs::generation::tools::ToolInfo {
-                        tool_type: ollama_rs::generation::tools::ToolType::Function,
-                        function: ollama_rs::generation::tools::ToolFunctionInfo {
-                            name: skg_tool.name().to_string(),
-                            description: skg_tool.description().to_string(),
-                            parameters: serde_json::from_value(schema).unwrap_or_default(),
-                        }
-                    };
-                    tool_registry.push(info);
-                }
-            }
-        }
+        // Initialize tool_registry as empty — it will be populated dynamically per-turn
+        // by the Tool RAG system in planner_turn(). We keep the field for backward
+        // compatibility with stream_chat's tool schema parameter.
+        let tool_registry: Vec<ollama_rs::generation::tools::ToolInfo> = Vec::new();
 
         let vector_brain = Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(&brain_path)
             .unwrap_or_else(|_| crate::vector_brain::VectorBrain::new())));
@@ -854,6 +967,7 @@ impl Agent {
             history: Arc::new(Mutex::new(vec![])),
             tools: tools_map,
             tool_registry,
+            tool_rag_index,
             recent_tool_calls: Arc::new(DashMap::new()),
             history_path,
             brain_path,
@@ -873,6 +987,7 @@ impl Agent {
             sentinel: crate::sentinel::SentinelManager::new(),
             editor_context: Arc::new(Mutex::new(None)),
             safe_mode: Arc::new(AtomicBool::new(false)),
+            hardcore_mode: Arc::new(AtomicBool::new(false)),
 
             tool_stats: Arc::new(DashMap::new()),
             tool_repetition_stack: Arc::new(Mutex::new(Vec::new())),
@@ -903,8 +1018,10 @@ impl Agent {
             planning_enabled,
             overwatch: crate::overwatch::OverwatchEngine::new(),
             checkpoint_mgr: crate::checkpoint::new_shared(50),
+            memory_store,
             mcp_clients: Arc::new(DashMap::new()),
             tool_registry_skg,
+            vram_time_sharing,
             system_prompt: {
                 let mut final_system_prompt = system_prompt.clone();
                 if mode == AgentMode::MLX {
@@ -929,6 +1046,7 @@ impl Agent {
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => Err(miette!("Active backend is MLX, not Ollama")),
             Backend::Bridge(_) => Err(miette!("Active backend is AI Bridge, not Ollama")),
+            Backend::Kalosm { .. } => Err(miette!("Active backend is Kalosm, not Ollama")),
         }
     }
 
@@ -947,6 +1065,11 @@ impl Agent {
     /// Returns the configured context window size.
     /// Driven entirely by config (ctx_execution in config.toml, default 32768).
     async fn calculate_optimal_ctx(&self) -> u64 {
+        let backend = self.backend.read().await;
+        if backend.mode() == crate::inference::AgentMode::Gemini {
+            // Gemini 1.5 Pro has up to 2 million token context, so we bypass the local config limits.
+            return 2_000_000;
+        }
         self.ctx_execution
     }
 
@@ -986,12 +1109,32 @@ impl Agent {
                     }
                 }
             }
+            crate::inference::Backend::Kalosm { .. } => {}
             crate::inference::Backend::Bridge(bridge) => {
                 use ai::chat_completions::ChatCompletionMessage;
-                match bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(miette!("Bridge connection failed: {}. Ensure your local server (LM Studio/OpenAI) is running and the model '{}' is loaded.", e, self.model.lock())),
-                }?;
+                let mut fallback_needed = false;
+                if let Err(e) = bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
+                    let err_str = e.to_string();
+                    if err_str.contains("503") || err_str.contains("UNAVAILABLE") {
+                        println!("{} {} is currently busy (503 UNAVAILABLE). Automatically falling back to gemini-3.1-pro...", "⚠️".yellow(), bridge.model_name);
+                        fallback_needed = true;
+                    } else {
+                        return Err(miette!("Bridge connection failed: {}. Ensure your local server (LM Studio/OpenAI) is running and the model '{}' is loaded.", e, self.model.lock()));
+                    }
+                }
+                
+                if fallback_needed {
+                    drop(backend);
+                    *self.model.lock() = "gemini-3.1-pro".to_string();
+                    
+                    let mut b_write = self.backend.write().await;
+                    let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+                    *b_write = crate::inference::Backend::Bridge(crate::ai_bridge::TempestAiBridge::new(
+                        crate::ai_bridge::ModelProvider::Gemini { api_key },
+                        "gemini-3.1-pro".to_string(),
+                    )?);
+                    return Ok(());
+                }
             }
             #[cfg(target_os = "macos")]
             crate::inference::Backend::MLX { .. } => {
@@ -1076,7 +1219,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let is_not_mlx = true;
 
         if is_not_mlx {
-            *self.model.lock() = new_phase.default_model();
+            let is_ollama = matches!(self.backend.read().await.mode(), crate::inference::AgentMode::Ollama);
+            if !(self.vram_time_sharing && is_ollama) {
+                *self.model.lock() = new_phase.default_model();
+            }
         }
 
         // Notify TUI
@@ -1391,6 +1537,80 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 }
                 return Ok(());
             }
+
+            if prompt_trimmed == "/compact" {
+                let history_to_compact = self.history.lock().clone();
+                let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
+                
+                let backend_guard = self.backend.read().await;
+                let ctx_limit = self.ctx_execution;
+                let result = crate::context_manager::compact_history(
+                    &*backend_guard, 
+                    &self.sub_agent_model, 
+                    history_to_compact, 
+                    ctx_limit,
+                    &self.vector_brain,
+                    &self.brain_path,
+                ).await;
+
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    match result {
+                        Ok(new_history) => {
+                            let after_count = crate::context_manager::estimate_tokens(&new_history);
+                            *self.history.lock() = new_history;
+                            let _ = self.save_history();
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                "🌪️ [CONTEXT COMPACTION]: Successfully condensed history ({} -> {} tokens)",
+                                before_count, after_count
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                "⚠️ Context compaction failed: {}", e
+                            )));
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            if prompt_trimmed == "/recall" {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let memory_res = self.memory_store.lock().recall_latest();
+                    match memory_res {
+                        Ok(Some((topic, content))) => {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                "🧠 [RECALL MEMORY] Topic: {}\n\n{}", topic, content
+                            )));
+                        }
+                        Ok(None) => {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                "🧠 [RECALL MEMORY]: No memories found in database.".to_string()
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                "⚠️ Memory recall failed: {}", e
+                            )));
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            if prompt_trimmed == "/toggle_hardcore" {
+                let current = self.hardcore_mode.load(std::sync::atomic::Ordering::SeqCst);
+                self.hardcore_mode.store(!current, std::sync::atomic::Ordering::SeqCst);
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                        "⚠️ [SENTINEL]: Hardcore Mode is now {}", if !current { "ON (Fast-blocking warnings active)" } else { "OFF" }
+                    )));
+                }
+                return Ok(());
+            }
             
             let cmd = if prompt_trimmed.starts_with("/switch ") {
                 prompt_trimmed.strip_prefix("/switch ").unwrap().trim()
@@ -1482,6 +1702,76 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         Ok(())
     }
 
+    pub fn build_system_prompt(&self, phase: AgentPhase, model_name: &str) -> String {
+        let os_name = match std::env::consts::OS {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            "windows" => "Windows",
+            _ => std::env::consts::OS,
+        };
+
+        // 1. IDENTITY + INVIOLABLE RULES (Base)
+        let mut full_system_prompt = crate::prompts::SYSTEM_PROMPT_BASE.replace("{OS}", os_name);
+
+        // 2. PHASE-SPECIFIC INSTRUCTIONS
+        let phase_instruction = match phase {
+            AgentPhase::Planning => crate::prompts::SYSTEM_PROMPT_PLANNING,
+            AgentPhase::Execution => crate::prompts::SYSTEM_PROMPT_EXECUTION,
+            AgentPhase::Testing => crate::prompts::SYSTEM_PROMPT_TESTING,
+        };
+        full_system_prompt.push_str("\n\n");
+        full_system_prompt.push_str(phase_instruction);
+
+        // 3. TOOL SCHEMA PLACEHOLDER
+        full_system_prompt.push_str("\n\n[TOOL_SCHEMA_PLACEHOLDER]");
+
+        // 4. ACTIVE PROJECT RULES (Contextual)
+        let active_rules = self.rules.get_active_rules(&[]);
+        if !active_rules.is_empty() {
+            full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
+            for rule in active_rules {
+                full_system_prompt.push_str(&format!("### Rule: {}\n{}\n\n", rule.name, rule.content));
+            }
+        }
+
+        // 5. OUTPUT FORMAT + CRITICAL RESPONSE RULES + EXAMPLES (Tail)
+        let model_lower = model_name.to_lowercase();
+        let planner_model = self.planner_model.clone().unwrap_or_default().to_lowercase();
+
+        let mut is_reasoning = model_lower.contains("r1") || model_lower.contains("deepseek") || model_lower.contains("deep-seek") ||
+                           planner_model.contains("r1") || planner_model.contains("deepseek") || planner_model.contains("deep-seek");
+
+        if let Some(preset) = self.mlx_presets.get(&model_lower) {
+            let path_lower = preset.path.clone().unwrap_or_default().to_lowercase();
+            let repo_lower = preset.repo.clone().unwrap_or_default().to_lowercase();
+            if path_lower.contains("r1") || path_lower.contains("deepseek") || path_lower.contains("deep-seek") ||
+               path_lower.contains("battle") || path_lower.contains("centurion") ||
+               repo_lower.contains("r1") || repo_lower.contains("deepseek") || repo_lower.contains("deep-seek") ||
+               repo_lower.contains("battle") || repo_lower.contains("centurion") {
+                is_reasoning = true;
+            }
+        }
+        if let Some(preset) = self.mlx_presets.get(&planner_model) {
+            let path_lower = preset.path.clone().unwrap_or_default().to_lowercase();
+            let repo_lower = preset.repo.clone().unwrap_or_default().to_lowercase();
+            if path_lower.contains("r1") || path_lower.contains("deepseek") || path_lower.contains("deep-seek") ||
+               path_lower.contains("battle") || path_lower.contains("centurion") ||
+               repo_lower.contains("r1") || repo_lower.contains("deepseek") || repo_lower.contains("deep-seek") ||
+               repo_lower.contains("battle") || repo_lower.contains("centurion") {
+                is_reasoning = true;
+            }
+        }
+
+        if is_reasoning {
+            full_system_prompt.push_str("\n\n[ACTOR PROTOCOL]:\n- You are the ACTOR. Your response MUST start with a `<think>` block.\n- [THOUGHT BOUNDARY]: Your `<think>` block is for internal logic ONLY. Do NOT place tool calls inside thoughts.\n- [TOOL CALL FORMAT]: After `</think>`, explain your action briefly, then output the JSON tool call directly. NEVER use markdown code blocks (```json) for tool calls.\n- [FORMAT]:\n<think>\n[Reasoning]\n</think>\nExplanation text...\n{\"tool\": \"name\", \"arguments\": {}}\n\n- [COLLABORATION]: After performing actions and verifying results, provide a concise summary to the user and ask for the next step in the roadmap.");
+            full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_TAIL.replace("{OS}", os_name));
+        } else {
+            full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_NON_REASONING_TAIL.replace("{OS}", os_name));
+        }
+
+        full_system_prompt
+    }
+
     async fn initialize_session(&self, initial_user_prompt: &str) -> Result<()> {
         if self.event_tx.lock().is_none() {
             println!("{}", "=".repeat(60).blue());
@@ -1490,79 +1780,20 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             println!("{}", "=".repeat(60).blue());
         }
 
-        let os_name = match std::env::consts::OS {
-            "macos" => "macOS",
-            "linux" => "Linux",
-            "windows" => "Windows",
-            _ => std::env::consts::OS,
-        };
-
-        let active_rules = self.rules.get_active_rules(&[]);
+        let current_phase = self.phase.lock().clone();
+        let current_model = self.model.lock().clone();
         
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let planner_model = self.planner_model.clone().unwrap_or_default();
+            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🤖 Engine: {} | Planner: {}", current_model, planner_model))));
+        }
+
+        let full_system_prompt = self.build_system_prompt(current_phase, &current_model);
+
         {
             let mut h_lock = self.history.lock();
             
-            // 1. IDENTITY + INVIOLABLE RULES (Base)
-            let mut full_system_prompt = crate::prompts::SYSTEM_PROMPT_BASE.replace("{OS}", os_name);
-            
-            // 2. TOOL SCHEMA (Middle)
-            full_system_prompt.push_str("\n\n[TOOL SCHEMA]\n");
-            if let Ok(schema_json) = serde_json::to_string(&self.tool_registry) {
-                full_system_prompt.push_str(&schema_json);
-            }
-
-            // 3. ACTIVE PROJECT RULES (Contextual)
-            if !active_rules.is_empty() {
-                full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
-                for rule in active_rules {
-                    full_system_prompt.push_str(&format!("### Rule: {}\n{}\n\n", rule.name, rule.content));
-                }
-            }
-
-            // 4. OUTPUT FORMAT + CRITICAL RESPONSE RULES + EXAMPLES (Tail)
-            // This is the last thing the model sees, providing the strongest priming.
-            let current_model = self.model.lock().to_lowercase();
-            let planner_model = self.planner_model.clone().unwrap_or_default().to_lowercase();
-            
-            // Log model names to status for diagnostic purposes
-            let tx_opt = self.event_tx.lock().clone();
-            if let Some(tx) = tx_opt {
-                let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🤖 Engine: {} | Planner: {}", current_model, planner_model))));
-            }
-
-            // If EITHER the main model or the planner is a reasoning model, use the minimalist prompt
-            let mut is_reasoning = current_model.contains("r1") || current_model.contains("deepseek") || current_model.contains("deep-seek") ||
-                              planner_model.contains("r1") || planner_model.contains("deepseek") || planner_model.contains("deep-seek");
-                              
-            // Check MLX presets to see if the underlying path/repo is a reasoning model
-            if let Some(preset) = self.mlx_presets.get(&current_model) {
-                let path_lower = preset.path.clone().unwrap_or_default().to_lowercase();
-                let repo_lower = preset.repo.clone().unwrap_or_default().to_lowercase();
-                if path_lower.contains("r1") || path_lower.contains("deepseek") || path_lower.contains("deep-seek") ||
-                   path_lower.contains("battle") || path_lower.contains("centurion") ||
-                   repo_lower.contains("r1") || repo_lower.contains("deepseek") || repo_lower.contains("deep-seek") ||
-                   repo_lower.contains("battle") || repo_lower.contains("centurion") {
-                    is_reasoning = true;
-                }
-            }
-            if let Some(preset) = self.mlx_presets.get(&planner_model) {
-                let path_lower = preset.path.clone().unwrap_or_default().to_lowercase();
-                let repo_lower = preset.repo.clone().unwrap_or_default().to_lowercase();
-                if path_lower.contains("r1") || path_lower.contains("deepseek") || path_lower.contains("deep-seek") ||
-                   path_lower.contains("battle") || path_lower.contains("centurion") ||
-                   repo_lower.contains("r1") || repo_lower.contains("deepseek") || repo_lower.contains("deep-seek") ||
-                   repo_lower.contains("battle") || repo_lower.contains("centurion") {
-                    is_reasoning = true;
-                }
-            }
-
-            if is_reasoning {
-                full_system_prompt.push_str("\n\n[ACTOR PROTOCOL]:\n- You are the ACTOR. Your response MUST start with a `<think>` block.\n- [THOUGHT BOUNDARY]: Your `<think>` block is for internal logic ONLY. Do NOT place tool calls inside thoughts.\n- [TOOL CALL FORMAT]: After `</think>`, explain your action briefly, then output the JSON tool call directly. NEVER use markdown code blocks (```json) for tool calls.\n- [FORMAT]:\n<think>\n[Reasoning]\n</think>\nExplanation text...\n{\"tool\": \"name\", \"arguments\": {}}\n\n- [COLLABORATION]: After performing actions and verifying results, provide a concise summary to the user and ask for the next step in the roadmap.");
-                full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_TAIL.replace("{OS}", os_name));
-            } else {
-                full_system_prompt.push_str(&crate::prompts::SYSTEM_PROMPT_NON_REASONING_TAIL.replace("{OS}", os_name));
-            }
-
             if let Some(pos) = h_lock.iter().position(|m| m.role == MessageRole::System) {
                 h_lock[pos] = ChatMessage::new(MessageRole::System, full_system_prompt);
             } else {
@@ -1581,20 +1812,12 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     break;
                 }
             }
-            // We store ONLY the user's original prompt in the permanent history.
-            // The editor context is prepended dynamically in 'planner_turn' but is NOT saved to disk.
+            
             let user_msg = ChatMessage::new(MessageRole::User, initial_user_prompt.to_string());
-
-
             h_lock.push(user_msg);
-
             self.recent_failures.clear();
-
-            // Ensure we always have at least one User message
-            if h_lock.iter().filter(|m| m.role == MessageRole::User).count() == 0 {
-                h_lock.push(ChatMessage::new(MessageRole::User, initial_user_prompt.to_string()));
-            }
         }
+
         let _ = self.save_history();
         Ok(())
     }
@@ -1634,7 +1857,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     &*backend_guard, 
                     &self.sub_agent_model, 
                     history_to_compact, 
-                    ctx_limit
+                    ctx_limit,
+                    &self.vector_brain,
+                    &self.brain_path,
                 ).await?;
                 
                 let after_count = crate::context_manager::estimate_tokens(&new_history);
@@ -1718,6 +1943,30 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
     async fn planner_turn(&self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<PlannerOutput> {
         let mut history_snapshot = self.history.lock().clone();
+        
+        let mode = self.backend.read().await.mode();
+        let phase = self.phase.lock().clone();
+        let is_planning = matches!(phase, AgentPhase::Planning);
+        let is_mlx = mode == crate::inference::AgentMode::MLX;
+
+        // Resolve model name. If VRAM sharing is active with Ollama, pin to the primary model
+        let model_name = if self.vram_time_sharing && mode == crate::inference::AgentMode::Ollama {
+            self.model.lock().clone()
+        } else {
+            match phase {
+                AgentPhase::Planning => self.planner_model.clone().unwrap_or_else(|| self.model.lock().clone()),
+                AgentPhase::Execution => self.executor_model.clone().unwrap_or_else(|| self.model.lock().clone()),
+                AgentPhase::Testing => self.verifier_model.clone().unwrap_or_else(|| self.model.lock().clone()),
+            }
+        };
+
+        // --- CONTEXT SWAPPING: Hot-swap system prompt dynamically for the active phase ---
+        let phase_system_prompt = self.build_system_prompt(phase.clone(), &model_name);
+        if let Some(pos) = history_snapshot.iter().position(|m| m.role == MessageRole::System) {
+            history_snapshot[pos].content = phase_system_prompt;
+        } else {
+            history_snapshot.insert(0, ChatMessage::new(MessageRole::System, phase_system_prompt));
+        }
 
         // --- PHASE 3: TOKEN BUDGET AWARENESS ---
         let ctx_limit = self.calculate_optimal_ctx().await;
@@ -1728,14 +1977,11 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             let _ = tx.try_send(crate::tui::AgentEvent::ContextStatus { used, total: ctx_limit });
         }
 
-
         let runway_report = crate::context_manager::generate_runway_report(used, ctx_limit);
         
         // Merge runway report into the first system message of the snapshot
         if let Some(pos) = history_snapshot.iter().position(|m| m.role == MessageRole::System) {
             history_snapshot[pos].content = format!("{}\n\n{}", runway_report, history_snapshot[pos].content);
-        } else {
-            history_snapshot.insert(0, ChatMessage::new(MessageRole::System, runway_report));
         }
 
         // Remove the mid-history System insertion that was violating alternating role rules.
@@ -1761,18 +2007,6 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         });
 
-        let mode = self.backend.read().await.mode();
-
-        let is_mlx = mode == crate::inference::AgentMode::MLX;
-
-        let phase = self.phase.lock().clone();
-        let is_planning = matches!(phase, AgentPhase::Planning);
-        let model_name = match phase {
-            AgentPhase::Planning => self.planner_model.clone().unwrap_or_else(|| self.model.lock().clone()),
-            AgentPhase::Execution => self.executor_model.clone().unwrap_or_else(|| self.model.lock().clone()),
-            AgentPhase::Testing => self.verifier_model.clone().unwrap_or_else(|| self.model.lock().clone()),
-        };
-
         if let Some(tx) = self.event_tx.lock().clone() {
             let phase_desc = phase.description();
             let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🔄 {} [Using {}]...", phase_desc, model_name))));
@@ -1795,7 +2029,55 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         };
         
         let mut final_history = history_snapshot;
-        
+
+        // --- 🎯 TOOL RAG: DYNAMIC TOOL SCHEMA RESOLUTION ---
+        // Resolve the most relevant tools for this prompt using vector similarity.
+        // This replaces the old static core_tool_names whitelist.
+        let user_prompt_for_rag = final_history.iter().rev()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        let (dynamic_tool_registry, tool_rag_log) = match self.tool_rag_index.read().await
+            .resolve(&user_prompt_for_rag, &*self.backend.read().await, None).await 
+        {
+            Ok((tools, log)) => (tools, log),
+            Err(e) => {
+                // Fallback: use always-on core tools
+                if let Some(tx) = self.event_tx.lock().clone() {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                        format!("⚠️ [TOOL RAG]: Resolution failed ({}), using core tools fallback", e)
+                    ));
+                }
+                (self.tool_rag_index.read().await.always_on_tools(), Vec::new())
+            }
+        };
+
+        // Emit telemetry about which tools were selected
+        if let Some(tx) = self.event_tx.lock().clone() {
+            let rag_tools_str: Vec<String> = tool_rag_log.iter()
+                .map(|(name, sim)| format!("{} ({:.2})", name, sim))
+                .collect();
+            let always_on_str = crate::tool_rag::ALWAYS_ON_TOOLS.join(", ");
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                format!("🎯 [TOOL RAG]: {} tools selected | RAG: [{}] | Always-on: [{}]",
+                    dynamic_tool_registry.len(),
+                    rag_tools_str.join(", "),
+                    always_on_str,
+                )
+            ));
+        }
+
+        // Inject the dynamic tool schema into the system prompt placeholder
+        if let Ok(schema_json) = serde_json::to_string(&dynamic_tool_registry) {
+            if let Some(sys_msg) = final_history.iter_mut().find(|m| m.role == MessageRole::System) {
+                sys_msg.content = sys_msg.content.replace(
+                    "[TOOL_SCHEMA_PLACEHOLDER]",
+                    &format!("\n\n[TOOL SCHEMA]\n{}", schema_json)
+                );
+            }
+        }
+
         // --- 🧠 DYNAMIC CONTEXT INJECTION ---
         // We prepend the editor context to the LAST user message in this turn's memory ONLY.
         // This keeps the long-term history (and history.json) clean of redundant code blocks.
@@ -1834,6 +2116,39 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
+        // --- 🧠 DYNAMIC SEMANTIC MEMORY INJECTION ---
+        // Retrieve relevant context from past compacted turns using VectorBrain.
+        let last_user_content = final_history.iter().rev()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| m.content.clone());
+
+        if let Some(query_text) = last_user_content {
+            if let Ok(query_vec) = self.backend.read().await.generate_embeddings(&query_text).await {
+                let hits = self.vector_brain.lock().search(&query_vec, 3);
+                let mut retrieved_memories = Vec::new();
+                for (entry, sim) in hits {
+                    if entry.source == "context_compaction" && sim >= 0.70 {
+                        retrieved_memories.push(entry.text);
+                    }
+                }
+                if !retrieved_memories.is_empty() {
+                    let injection = format!(
+                        "### [RETRIEVED HISTORICAL CONTEXT] (Similarity >= 70%) ###\n\
+                         To help you maintain continuity, here are relevant details retrieved from your long-term conversation history:\n\
+                         {}\n\
+                         ### [END HISTORICAL CONTEXT] ###\n\n",
+                        retrieved_memories.join("\n---\n")
+                    );
+                    if let Some(pos) = final_history.iter().rposition(|m| m.role == MessageRole::User) {
+                        final_history.insert(pos, ChatMessage::new(
+                            MessageRole::System,
+                            injection,
+                        ));
+                    }
+                }
+            }
+        }
+
         let tx_opt = self.event_tx.lock().clone();
         if let Some(tx) = tx_opt {
             let mode = self.backend.read().await.mode();
@@ -1842,6 +2157,8 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 crate::inference::AgentMode::Ollama => "Ollama",
                 crate::inference::AgentMode::Bridge => "AI Bridge",
                 crate::inference::AgentMode::LMStudio => "LM Studio",
+                crate::inference::AgentMode::Kalosm => "Kalosm Native",
+                crate::inference::AgentMode::Gemini => "Google Gemini",
             };
             let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("📡 Dispatching request to {} ({}) [Waiting for GPU]...", backend_name, model_name))));
         }
@@ -1854,7 +2171,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             stop,
             self.system_prompt.clone(),
             Some(tool_tx),
-            Some(self.tool_registry.clone()),
+            Some(dynamic_tool_registry),
         ).await?;
 
         // Signal end of tool calls and wait for all mid-stream tools to finish
@@ -1892,12 +2209,74 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             self.history.lock().push(msg);
         }
 
+        // 🧠 KALOSM MEMORY MANAGEMENT: Auto-prune history to prevent unbounded growth
+        let mode = self.backend.read().await.mode();
+        if mode == crate::inference::AgentMode::Kalosm {
+            self.auto_prune_history_for_kalosm().await;
+        }
+
         Ok(PlannerOutput {
             content: full_content,
             reasoning: reasoning_content,
             native_tool_calls,
             executed_mid_stream: Arc::try_unwrap(executed_mid_stream).map(|m| m.into_inner()).unwrap_or_default(),
         })
+    }
+
+    /// 🧠 AUTO-PRUNE HISTORY FOR KALOSM
+    /// Keeps history bounded to prevent swap creep.
+    /// - Always keeps system messages
+    /// - Keeps only the last N message pairs (configurable)
+    /// - Runs automatically after each turn for Kalosm users
+    async fn auto_prune_history_for_kalosm(&self) {
+        let max_history_depth = 15; // More aggressive: keep only last 15 messages
+        
+        let mut h_lock = self.history.lock();
+        
+        // Separate system messages from conversation messages
+        let (system_msgs, conversation_msgs): (Vec<_>, Vec<_>) = 
+            h_lock.iter().enumerate().partition(|(_, m)| m.role == MessageRole::System);
+        
+        // If conversation exceeds max, keep only the most recent
+        if conversation_msgs.len() > max_history_depth {
+            let kept_indices: Vec<usize> = system_msgs.iter().map(|(i, _)| *i).collect::<Vec<_>>();
+            let recent_indices: Vec<usize> = conversation_msgs
+                .iter()
+                .skip(conversation_msgs.len() - max_history_depth)
+                .map(|(i, _)| *i)
+                .collect();
+            
+            let all_kept: Vec<usize> = {
+                let mut v = kept_indices;
+                v.extend(recent_indices);
+                v.sort();
+                v
+            };
+            
+            // Rebuild history with only kept indices
+            let new_history: Vec<ChatMessage> = h_lock
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| all_kept.contains(i))
+                .map(|(_, m)| m.clone())
+                .collect();
+            
+            let before = h_lock.len();
+            *h_lock = new_history;
+            let after = h_lock.len();
+            
+            if before != after {
+                drop(h_lock); // Release lock before sending event
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                        "🧠 [KALOSM AUTO-PRUNE]: History reduced from {} to {} messages to manage swap usage",
+                        before, after
+                    )));
+                }
+                let _ = self.save_history();
+            }
+        }
     }
 
     fn repair_tool_name(&self, name: &str) -> String {
@@ -2161,10 +2540,76 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         }
     }
 
+    fn map_tool_to_effect(&self, name: &str, args: &serde_json::Value) -> Option<crate::effects::TempestEffect> {
+        match name {
+            "skg_read_file" | "read_file" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if !path.is_empty() {
+                    Some(crate::effects::TempestEffect::ReadFile { path })
+                } else {
+                    None
+                }
+            }
+            "skg_write_file" | "write_file" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let force = args.get("force_overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+                if !path.is_empty() {
+                    Some(crate::effects::TempestEffect::WriteFile { path, content, force_overwrite: force })
+                } else {
+                    None
+                }
+            }
+            "run_command" => {
+                let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let cwd = args.get("cwd").and_then(|v| v.as_str()).unwrap_or(".").to_string();
+                if !command.is_empty() {
+                    Some(crate::effects::TempestEffect::RunCommand { command, cwd })
+                } else {
+                    None
+                }
+            }
+            _ => None
+        }
+    }
+
     async fn process_single_tool_call(&self, tool_call: ollama_rs::generation::tools::ToolCall, skip_approval: bool) -> (String, String, bool) {
         let tool_name = self.repair_tool_name(&tool_call.function.name);
-            
         let mut args = tool_call.function.arguments.clone();
+
+        // 🛡️ ALGEBRAIC EFFECT SANDBOX DISPATCH
+        if let Some(effect) = self.map_tool_to_effect(&tool_name, &args) {
+            let last_user_msg = {
+                let history = self.history.lock();
+                history.iter().rev()
+                    .find(|m| m.role == ollama_rs::generation::chat::MessageRole::User)
+                    .map(|m| m.content.clone())
+            };
+
+            let overwatch_verdict = self.overwatch.validate_effects(&[effect.clone()], last_user_msg.as_deref());
+            if let crate::overwatch::OverwatchVerdict::Intercept { correction, .. } = overwatch_verdict {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🛑 [OVERWATCH EFFECT INTERCEPT]: Blocked execution of {}", tool_name)));
+                }
+                return (tool_name.clone(), correction, false);
+            }
+
+            let tx_opt = self.event_tx.lock().clone();
+            if let Some(tx) = tx_opt {
+                let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🌪️ [ALGEBRAIC EFFECT RUNNER]: Executing {}", tool_name)));
+            }
+
+            let executor = crate::effects::TempestEffectExecutor::new();
+            match executor.execute_effect(effect).await {
+                Ok(res) => {
+                    return (tool_name.clone(), res, true);
+                }
+                Err(e) => {
+                    return (tool_name.clone(), format!("Algebraic Effect Error: {}", e), false);
+                }
+            }
+        }
 
         // Fuzzy Repair Logic continues below...
 
@@ -2301,7 +2746,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                         if classification == crate::error_classifier::ErrorClass::Retryable && attempt < max_attempts {
                             // Exponential backoff with jitter
                             let wait_duration = {
-                                use rand::Rng;
+                                use rand::RngExt;
                                 let base_wait = 2u64.pow(attempt as u32 - 1);
                                 let jitter_ms = rand::rng().random_range(0..1000);
                                 tokio::time::Duration::from_millis(base_wait * 1000 + jitter_ms)
@@ -2418,63 +2863,60 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
-        // 🧠 RAW JSON CATCHER: If no markdown blocks, try parsing the entire content or isolating a JSON block
+        // 🧠 ROBUST JSON CATCHER: Brace-counting extractor for raw or nested JSON objects.
+        // This perfectly isolates consecutive or poorly formatted JSON objects even if they
+        // are surrounded by raw text, without failing on nested braces like regex would.
         if calls.is_empty() {
-            let trimmed = content.trim();
-            let mut val_opt = None;
-            
-            // Try parsing the whole thing first
-            if (trimmed.starts_with('{') && trimmed.ends_with('}')) || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
-                val_opt = serde_json::from_str::<Value>(trimmed).ok();
-            }
-            
-            // If that fails, look for the first `{` and last `}`
-            if val_opt.is_none() {
-                if let Some(start_idx) = content.find('{') {
-                    if let Some(end_idx) = content.rfind('}') {
-                        if start_idx < end_idx {
-                            let json_str = &content[start_idx..=end_idx];
-                            val_opt = serde_json::from_str::<Value>(json_str).ok();
+            let chars: Vec<char> = content.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '{' {
+                    let mut brace_count = 0;
+                    let mut in_string = false;
+                    let mut escape = false;
+                    let start_idx = i;
+                    let mut end_idx = i;
+                    
+                    let mut j = i;
+                    while j < chars.len() {
+                        let c = chars[j];
+                        if !escape && c == '"' {
+                            in_string = !in_string;
                         }
+                        if !in_string && !escape {
+                            if c == '{' { brace_count += 1; }
+                            else if c == '}' { brace_count -= 1; }
+                        }
+                        
+                        if c == '\\' {
+                            escape = !escape;
+                        } else {
+                            escape = false;
+                        }
+                        
+                        if brace_count == 0 {
+                            end_idx = j;
+                            break;
+                        }
+                        j += 1;
                     }
-                }
-            }
-
-            if let Some(val) = val_opt {
-                if let Some(obj) = val.as_object() {
-                    if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
-                        calls.push(val);
-                    }
-                } else if let Some(arr) = val.as_array() {
-                    // Handle batch tool calls in a single JSON array
-                    for item in arr {
-                        if let Some(obj) = item.as_object() {
-                            if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
-                                calls.push(item.clone());
+                    
+                    if brace_count == 0 {
+                        let json_str: String = chars[start_idx..=end_idx].iter().collect();
+                        if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                            if let Some(obj) = val.as_object() {
+                                if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
+                                    if !calls.iter().any(|existing: &Value| existing == &val) {
+                                        calls.push(val);
+                                    }
+                                }
                             }
                         }
+                        // Advance i to end_idx so we don't re-parse inner objects unnecessarily
+                        i = end_idx;
                     }
                 }
-            }
-        }
-
-        // 🧠 FUZZY JSON CATCHER: Search for anything that looks like a tool call JSON object anywhere in the text.
-        // This handles cases where models put tool calls inside <think> blocks or raw text without markdown.
-        if calls.is_empty() {
-            let fuzzy_regex = regex::Regex::new(r#"(\{\s*\\?\"(tool|name|function|action)\\?\"\s*:[\s\S]*?\})"#).unwrap();
-            for m in fuzzy_regex.find_iter(content) {
-                let json_candidate = m.as_str();
-                let cleaned = json_candidate.replace("\\\"", "\"").replace("\\n", "\n");
-                
-                if let Ok(val) = serde_json::from_str::<Value>(&cleaned) {
-                    if let Some(obj) = val.as_object() {
-                        if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function") || obj.contains_key("action") {
-                            if !calls.iter().any(|existing: &Value| existing == &val) {
-                                calls.push(val);
-                            }
-                        }
-                    }
-                }
+                i += 1;
             }
         }
 
@@ -2508,6 +2950,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         }
 
         Ok(calls)
+    }
+
+    pub fn get_tool_by_name(&self, name: &str) -> Option<std::sync::Arc<dyn crate::tools::AgentTool>> {
+        self.tools.get(name).map(|r| r.clone())
     }
 
     pub async fn run_tui_mode(&self, mut user_rx: tokio::sync::mpsc::Receiver<String>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
@@ -2554,6 +3000,49 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                  if let Some(tx) = tx_opt {
                      let _ = tx.send(crate::tui::AgentEvent::StreamToken(summary)).await;
                      let _ = tx.send(crate::tui::AgentEvent::StreamToken(String::new())).await;
+                 }
+                 continue;
+             }
+
+             if user_msg.starts_with("/tool ") {
+                 let parts: Vec<&str> = user_msg.splitn(3, ' ').collect();
+                 if parts.len() >= 2 {
+                     let tool_name = parts[1];
+                     let args_str = if parts.len() == 3 { parts[2] } else { "{}" };
+                     
+                     match serde_json::from_str::<serde_json::Value>(args_str) {
+                         Ok(json_args) => {
+                             if let Some(tool) = self.get_tool_by_name(tool_name) {
+                                 let ctx = self.get_tool_context().await;
+                                 let result = tool.execute(&json_args, ctx).await;
+                                 
+                                 let tx_opt = self.event_tx.lock().clone();
+                                 if let Some(tx) = tx_opt {
+                                     let output = match result {
+                                         Ok(msg) => format!("🛠️ Tool '{}' Success:\n{}", tool_name, msg),
+                                         Err(e) => format!("⚠️ Tool '{}' Error:\n{}", tool_name, e),
+                                     };
+                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(output)).await;
+                                 }
+                             } else {
+                                 let tx_opt = self.event_tx.lock().clone();
+                                 if let Some(tx) = tx_opt {
+                                     let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("⚠️ Tool '{}' not found in registry.", tool_name))).await;
+                                 }
+                             }
+                         }
+                         Err(e) => {
+                             let tx_opt = self.event_tx.lock().clone();
+                             if let Some(tx) = tx_opt {
+                                 let _ = tx.send(crate::tui::AgentEvent::SystemUpdate(format!("⚠️ Invalid JSON arguments: {}", e))).await;
+                             }
+                         }
+                     }
+                 } else {
+                     let tx_opt = self.event_tx.lock().clone();
+                     if let Some(tx) = tx_opt {
+                         let _ = tx.send(crate::tui::AgentEvent::SystemUpdate("⚠️ Usage: /tool <tool_name> <json_args>".to_string())).await;
+                     }
                  }
                  continue;
              }
@@ -2722,11 +3211,62 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None, // lmstudio_url
             None, // pa_memory_mb
+            false, // vram_time_sharing
         ).await;
         assert!(agent.is_ok());
         let agent = agent.unwrap();
         assert_eq!(agent.sub_agent_model, "test-sub-model");
-        assert!(!agent.tool_registry.is_empty());
+        assert!(agent.tool_registry.is_empty());
         assert!(!agent.tools.is_empty());
+        assert!(!agent.tool_rag_index.read().await.all_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_vram_time_sharing_and_prompts() {
+        let memory_store = Arc::new(Mutex::new(crate::memory::MemoryStore::new("test-passphrase".to_string()).unwrap()));
+        let agent = Agent::new(
+            crate::inference::AgentMode::Ollama,
+            "qwen2.5-coder:7b".to_string(),
+            "Q4_K_M".to_string(),
+            "test-prompt".to_string(),
+            "/tmp/tempest_test_history_sharing.json".to_string(),
+            memory_store,
+            "test-sub-model".to_string(),
+            Some("deepseek-r1:8b".to_string()),
+            Some("qwen2.5-coder:7b".to_string()),
+            Some("deepseek-r1:8b".to_string()),
+            std::collections::HashMap::new(),
+            0.05,
+            0.25,
+            0.95,
+            0.92,
+            1.18,
+            1.12,
+            16384,
+            32768,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            Arc::new(Mutex::new(None)),
+            None, // lmstudio_url
+            None, // pa_memory_mb
+            true, // vram_time_sharing
+        ).await.unwrap();
+
+        assert!(agent.vram_time_sharing);
+
+        let planning_prompt = agent.build_system_prompt(AgentPhase::Planning, "qwen2.5-coder:7b");
+        assert!(planning_prompt.contains("CURRENT OPERATIONAL PHASE: PLANNING"));
+        
+        let execution_prompt = agent.build_system_prompt(AgentPhase::Execution, "qwen2.5-coder:7b");
+        assert!(execution_prompt.contains("CURRENT OPERATIONAL PHASE: EXECUTION"));
+
+        let testing_prompt = agent.build_system_prompt(AgentPhase::Testing, "qwen2.5-coder:7b");
+        assert!(testing_prompt.contains("CURRENT OPERATIONAL PHASE: TESTING"));
     }
 }

@@ -99,4 +99,19 @@ impl MemoryStore {
         Ok(results)
     }
 
+    pub fn recall_latest(&self) -> Result<Option<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT topic, data FROM memories ORDER BY updated_at DESC LIMIT 1").into_diagnostic()?;
+        let mut rows = stmt.query([]).into_diagnostic()?;
+        if let Some(row) = rows.next().into_diagnostic()? {
+            let topic: String = row.get(0).into_diagnostic()?;
+            let encrypted_data: Vec<u8> = row.get(1).into_diagnostic()?;
+            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase) {
+                if let Ok(content_str) = String::from_utf8(decrypted) {
+                    return Ok(Some((topic, content_str)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
 }

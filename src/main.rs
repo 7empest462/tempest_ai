@@ -18,12 +18,13 @@ use std::sync::Arc;
 ///   /undo      - Revert the last file modifications
 ///   /safemode  - Toggle blocking approvals (ON/OFF)
 ///   /switch    - Hot-swap the inference model
+///   /tool      - Test a tool directly (Diagnostic Mode)
 #[derive(Parser, Debug)]
 #[command(
     name = "tempest_ai", 
     version, 
     about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.", 
-    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --web    Launch Standalone Web Command Center\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.3 Operational Manual, launch the TUI and type '/help'."
+    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --web    Launch Standalone Web Command Center\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.5 Operational Manual, launch the TUI and type '/help'."
 )]
 struct Cli {
     /// Ollama model to use (overrides config and OLLAMA_MODEL env var)
@@ -58,6 +59,10 @@ struct Cli {
     #[arg(long)]
     mlx: bool,
 
+    /// Use Google Gemini API as the Backend (requires GEMINI_API_KEY env var)
+    #[arg(long)]
+    gemini: bool,
+
     /// MLX Quantization variant (e.g. Q4_K_M, Q8_0)
     #[arg(long)]
     quant: Option<String>,
@@ -77,6 +82,10 @@ struct Cli {
     /// Use LM Studio (Local OpenAI-compatible API) as the inference backend
     #[arg(long)]
     lmstudio: bool,
+
+    /// Use Kalosm (Native GPU) as the inference backend
+    #[arg(long)]
+    kalosm: bool,
 
     /// Start the Tempest Nexus Web Server (WebSocket API)
     #[arg(long)]
@@ -174,6 +183,22 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    // Initialize tracing/console subscriber first for performance monitoring and tokio-console
+    #[cfg(feature = "console")]
+    {
+        println!("📡 [CONSOLE]: Initializing console-subscriber on 0.0.0.0:6669...");
+        console_subscriber::ConsoleLayer::builder()
+            .server_addr(([0, 0, 0, 0], 6669))
+            .init();
+    }
+
+    #[cfg(not(feature = "console"))]
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .init();
+    }
+
     let cli = Cli::parse();
 
     // Determine base ports from CLI -> Config -> Defaults
@@ -216,11 +241,6 @@ async fn main() -> Result<()> {
         .install()
         .expect("failed to install Prometheus recorder");
 
-    // Initialize tracing for performance monitoring
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     if cli.install_daemon {
         tempest_ai::daemon::install_daemon();
         return Ok(());
@@ -251,7 +271,7 @@ async fn main() -> Result<()> {
         tempest_ai::prompts::SYSTEM_PROMPT_TAIL
     );
 
-    // Model priority: CLI flag > MLX Default (if flag set) > env var > config file > default
+    // Model priority: CLI flag > Backend Default (if flag set) > env var > config file > default
     let model = if cli.mlx {
         cli.model.clone()
             .or(config.mlx_model.clone())
@@ -260,6 +280,14 @@ async fn main() -> Result<()> {
         cli.model.clone()
             .or(config.lmstudio_model.clone())
             .unwrap_or_else(|| "LM Studio (External Inference)".to_string())
+    } else if cli.kalosm {
+        cli.model.clone()
+            .or(config.kalosm_model.clone())
+            .unwrap_or_else(|| "kalosm_default".to_string())
+    } else if cli.gemini {
+        cli.model.clone()
+            .or(config.gemini_model.clone())
+            .unwrap_or_else(|| "gemini-3.5-flash".to_string())
     } else {
         cli.model.clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
@@ -335,7 +363,7 @@ async fn main() -> Result<()> {
             ),
             (
                 "tempest_identity",
-                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.3` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.5` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
                 vec!["identity", "branding", "instructions", "architecture"]
             )
         ];
@@ -356,14 +384,16 @@ async fn main() -> Result<()> {
         tempest_ai::inference::AgentMode::Bridge
     } else if cli.lmstudio {
         tempest_ai::inference::AgentMode::LMStudio
+    } else if cli.kalosm {
+        tempest_ai::inference::AgentMode::Kalosm
     } else {
         #[cfg(target_os = "macos")]
         {
-            if cli.mlx { tempest_ai::inference::AgentMode::MLX } else { tempest_ai::inference::AgentMode::Ollama }
+            if cli.mlx { tempest_ai::inference::AgentMode::MLX } else if cli.gemini { tempest_ai::inference::AgentMode::Gemini } else { tempest_ai::inference::AgentMode::Ollama }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            tempest_ai::inference::AgentMode::Ollama
+            if cli.gemini { tempest_ai::inference::AgentMode::Gemini } else { tempest_ai::inference::AgentMode::Ollama }
         }
     };
 
@@ -380,6 +410,10 @@ async fn main() -> Result<()> {
             "AI Bridge (Unified)".to_string() 
         } else if cli.lmstudio {
             format!("LM Studio (Local) • {}", config.lmstudio_url.as_deref().unwrap_or("localhost:1234"))
+        } else if cli.kalosm {
+            "Kalosm (Native GPU)".to_string()
+        } else if cli.gemini {
+            "Google Gemini (API)".to_string()
         } else if cli.mlx { 
             format!("MLX (Native Apple Silicon) • {}", quant) 
         } else { 
@@ -389,14 +423,22 @@ async fn main() -> Result<()> {
         
         if cli.mlx {
             println!("{} {}", "🤖 Unified:".blue(), model);
+        } else if cli.kalosm {
+            println!("{} {}", "🤖 Unified:".blue(), config.kalosm_model.as_deref().unwrap_or(&model));
+        } else if cli.gemini {
+            println!("{} {}", "🤖 Unified:".blue(), model);
         } else if cli.lmstudio {
             println!("{} {}", "🧠 Planner:".blue(), model);
             println!("{} {}", "💻 Executor:".blue(), model);
             println!("{} {}", "🔬 Verifier:".blue(), model);
         } else {
-            println!("{} {}", "🧠 Planner:".blue(), config.planner_model.as_deref().unwrap_or(&model));
-            println!("{} {}", "💻 Executor:".blue(), config.executor_model.as_deref().unwrap_or(&model));
-            println!("{} {}", "🔬 Verifier:".blue(), config.verifier_model.as_deref().unwrap_or(&model));
+            if config.vram_time_sharing.unwrap_or(false) {
+                println!("{} {}", "🤖 Unified (VRAM Sharing):".blue(), model);
+            } else {
+                println!("{} {}", "🧠 Planner:".blue(), config.planner_model.as_deref().unwrap_or(&model));
+                println!("{} {}", "💻 Executor:".blue(), config.executor_model.as_deref().unwrap_or(&model));
+                println!("{} {}", "🔬 Verifier:".blue(), config.verifier_model.as_deref().unwrap_or(&model));
+            }
         }
         println!("{}", "=".repeat(60).blue());
     }
@@ -445,6 +487,7 @@ async fn main() -> Result<()> {
         event_tx.clone(),
         config.lmstudio_url.clone(),
         cli.pa_memory_mb.or(config.pa_memory_mb),
+        config.vram_time_sharing.unwrap_or(false),
     ).await?;
     
     if cli.web || cli.mcp_server {
@@ -471,7 +514,7 @@ async fn main() -> Result<()> {
     }
     if !cli.cli && !cli.web && !cli.mcp_server {
         let agent_init = agent.clone();
-        let backend_id = if cli.bridge { "bridge".to_string() } else if cli.lmstudio { "lmstudio".to_string() } else if cli.mlx { "mlx".to_string() } else { "ollama".to_string() };
+        let backend_id = if cli.bridge { "bridge".to_string() } else if cli.lmstudio { "lmstudio".to_string() } else if cli.kalosm { "kalosm".to_string() } else if cli.mlx { "mlx".to_string() } else { "ollama".to_string() };
         let final_nexus_port = nexus_port;
         let agent_nexus = agent_init.clone();
         tokio::spawn(async move {
@@ -494,7 +537,7 @@ async fn main() -> Result<()> {
 
     if cli.web {
         println!("{} Launching Tempest Nexus...", "🌐".green());
-        let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.mlx { "mlx" } else { "ollama" };
+        let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.kalosm { "kalosm" } else if cli.mlx { "mlx" } else { "ollama" };
         tempest_ai::nexus::run_nexus(agent, nexus_port, backend_id.to_string(), event_rx, tool_tx_opt).await;
         return Ok(());
     }
@@ -594,6 +637,12 @@ async fn main() -> Result<()> {
                 tempest_ai::inference::AgentMode::LMStudio => {
                     (lmstudio_mem_bytes + tempest_mem_bytes) / 1024 / 1024
                 }
+                tempest_ai::inference::AgentMode::Gemini => {
+                    tempest_mem_bytes / 1024 / 1024
+                }
+                tempest_ai::inference::AgentMode::Kalosm => {
+                    tempest_mem_bytes / 1024 / 1024
+                }
             };
 
             let engine_label = match mode {
@@ -601,6 +650,8 @@ async fn main() -> Result<()> {
                 tempest_ai::inference::AgentMode::Ollama => "(Ollama)",
                 tempest_ai::inference::AgentMode::Bridge => "(Bridge)",
                 tempest_ai::inference::AgentMode::LMStudio => "(LM Studio)",
+                tempest_ai::inference::AgentMode::Gemini => "(Google Gemini)",
+                tempest_ai::inference::AgentMode::Kalosm => "(Kalosm Native)",
             };
 
             let gpu_load = {
@@ -787,7 +838,33 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                     println!("  /clear       — Wipe conversation history");
                     println!("  /undo        — Revert the last file modification");
                     println!("  /checkpoints — List available undo checkpoints");
+                    println!("  /tool        — Test a tool directly (usage: /tool <name> <json>)");
                     println!("  /quit        — Exit Tempest");
+                    continue;
+                }
+                
+                if p.starts_with("/tool ") {
+                    let parts: Vec<&str> = p.splitn(3, ' ').collect();
+                    if parts.len() >= 2 {
+                        let tool_name = parts[1];
+                        let args_str = if parts.len() == 3 { parts[2] } else { "{}" };
+                        match serde_json::from_str::<serde_json::Value>(args_str) {
+                            Ok(json_args) => {
+                                if let Some(tool) = agent.get_tool_by_name(tool_name) {
+                                    let ctx = agent.get_tool_context().await;
+                                    match tool.execute(&json_args, ctx).await {
+                                        Ok(msg) => println!("{} {}", "🛠️ Tool Success:".green(), msg),
+                                        Err(e) => println!("{} {}", "⚠️ Tool Error:".red(), e),
+                                    }
+                                } else {
+                                    println!("{} Tool '{}' not found in registry.", "⚠️".yellow(), tool_name);
+                                }
+                            }
+                            Err(e) => println!("{} Invalid JSON arguments: {}", "⚠️".red(), e),
+                        }
+                    } else {
+                        println!("{} Usage: /tool <tool_name> <json_args>", "⚠️".yellow());
+                    }
                     continue;
                 }
                 

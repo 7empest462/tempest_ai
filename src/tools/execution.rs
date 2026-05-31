@@ -46,7 +46,10 @@ impl AgentTool for RunCommandTool {
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: RunCommandArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let cmd_str = typed_args.command;
-        let cwd = typed_args.cwd.unwrap_or_else(|| ".".to_string());
+        let mut cwd = typed_args.cwd.unwrap_or_else(|| ".".to_string());
+        if cwd.is_empty() {
+            cwd = ".".to_string();
+        }
         let timeout_secs = typed_args.timeout_seconds.unwrap_or(30);
 
         use std::sync::atomic::Ordering;

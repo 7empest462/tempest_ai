@@ -9,6 +9,13 @@ planner_model = "deepseek-r1:8b"
 executor_model = "qwen2.5-coder:7b"
 verifier_model = "deepseek-r1:8b"
 
+# Enable Asynchronous Agent Multiplexing via VRAM Time-Sharing.
+# If true and running under Ollama, pins all three phases to the primary model 
+# (configured in the 'model' field below) and swaps system prompts dynamically 
+# to achieve multi-agent context multiplexing with 0ms physical model weight swapping overhead.
+vram_time_sharing = true
+
+
 # ==========================================
 # ⚡ MLX MODEL OPTIONS (Manual Switching)
 # ==========================================
@@ -41,11 +48,46 @@ mlx_top_p_execution = 0.85
 mlx_repeat_penalty_planning = 1.02
 mlx_repeat_penalty_execution = 1.02
 
-# ==========================================
 # 🧹 BASE SETTINGS
 # ==========================================
-model = "qwen2.5-coder:7b"
-sub_agent_model = "llama3.2:1b"
+model = "deepseek-r1:8b"
+gemini_model = "gemini-3.5-flash"
+kalosm_model = "/Users/7empest_mac/.cache/huggingface/hub/models--bartowski--Qwen2.5-Coder-7B-Instruct-GGUF/snapshots/1f629da0c8bed16b9e50cee91c70693650e66c35/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
+
+# ==========================================
+# 🚨 KALOSM BACKEND MEMORY MANAGEMENT
+# ==========================================
+# Kalosm (v0.4.0) has aggressive memory retention. Use these settings to prevent
+# swap space bloat (especially on systems <32GB RAM).
+# WARNING: Using Kalosm without these limits can cause 93GB+ swap usage.
+#
+# Recommended for Kalosm: Use MLX backend instead (--mlx flag) for better memory mgmt.
+[kalosm]
+# Maximum historical messages to retain in inference (older discarded)
+# Reduces from full history to last N messages - CRITICAL for memory control
+max_history_depth = 20
+
+# Maximum tokens to generate per inference (hard stop)
+max_generation_tokens = 8192
+
+# Maximum output buffer size (bytes) before discarding tokens
+max_output_bytes = 524288
+
+# Auto-reset session after N messages to clear KV cache
+# Set to 0 to disable. Recommended: 50-100 for long sessions
+session_reset_after_messages = 0
+
+# Sub-Agent & Semantic Compaction Configuration:
+# In Phase 5, generative sub-agent summarizing (such as llama3.2:1b) is bypassed 
+# in favor of Option A (Semantic Memory Compaction) which uses extremely fast, 
+# 50MB-100MB VRAM local embedding models to segment and index history dynamically.
+#
+# Highly recommended embedding models (run 'ollama pull <name>'):
+# - "all-minilm" (Default - ultra lightweight & fast)
+# - "nomic-embed-text" (High dimension, excellent for technical retrieval)
+# - "mxbai-embed-large" (Dense search performance)
+sub_agent_model = "mxbai-embed-large" 
+
 history_path = "history.json"
 db_path = "~/fleet.db"
 encrypt_history = false

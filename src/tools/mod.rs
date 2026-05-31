@@ -71,3 +71,8 @@ pub mod ast;
 pub mod skg_adapter;
 pub mod skg_test;
 pub mod skg_file;
+pub mod skg_demo;
+pub mod wasm_sandbox;
+pub mod threat_scanner;
+pub mod terminal;
+pub mod visualization;

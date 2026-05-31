@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.4` — "Command Center"
+# 🌪️ Tempest AI `v0.3.5` — "Command Center"
 
 [![Download Latest Release](https://img.shields.io/badge/Download-Latest%20Release-blue?style=for-the-badge&logo=github)](https://github.com/7empest462/tempest_ai/releases/latest)
 
@@ -12,7 +12,7 @@
 
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
-Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.4 release, Tempest introduces **MLX Memory Stabilization** (hard RAM capping and prefix cache eviction) and a **Smart Port Negotiation** system to eliminate startup collisions.
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.5 release, Tempest introduces **Google Gemini API Support** via the AI Bridge, **Smart 503 Fallback Routing**, **Semantic Compaction** for infinite context limits, and the **Agent Client Protocol (ACP)** for spawning parallel asynchronous sub-agents.
 
 ---
 
@@ -34,6 +34,7 @@ Tempest AI is a high-performance, Rust-based autonomous agent designed to be you
 ./target/release/tempest_ai --web --mlx        # Apple Silicon (Metal + Neural Engine)
 ./target/release/tempest_ai --web              # Default: Ollama backend
 ./target/release/tempest_ai --web --lmstudio   # LM Studio (local OpenAI-compatible API)
+./target/release/tempest_ai --gemini           # Google Gemini API
 ```
 
 ### 📟 "Cyber-Orchestrator" TUI

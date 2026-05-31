@@ -42,7 +42,10 @@ impl AgentTool for InitializeRustProjectTool {
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: InitializeRustProjectArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let name = typed_args.name;
-        let path = typed_args.path.unwrap_or_else(|| ".".to_string());
+        let mut path = typed_args.path.unwrap_or_else(|| ".".to_string());
+        if path.is_empty() {
+            path = ".".to_string();
+        }
         let deps = typed_args.dependencies.unwrap_or_default();
 
         // 1. Run cargo new

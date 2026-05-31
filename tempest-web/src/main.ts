@@ -206,6 +206,14 @@ async function startApp() {
     }
   };
 
+  const resetTurnState = () => {
+    lastAiMessage = null;
+    inLeakedThink = false;
+    streamAccum = '';
+    if (reasoningText) reasoningText.innerText = '';
+    if (reasoningMonitor) reasoningMonitor.classList.add('hidden');
+  };
+
   const handleNexusMessage = (msg: any) => {
     switch (msg.type) {
       case 'Token':
@@ -246,7 +254,7 @@ async function startApp() {
         renderSearchResults(msg.payload.matches);
         break;
       case 'BackendInfo': {
-        const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio' };
+        const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio', kalosm: 'Kalosm (Native GPU)' };
         if (engineStatus) {
           engineStatus.innerText = `Engine: ${names[msg.payload.backend] || msg.payload.backend}`;
         }
@@ -261,6 +269,10 @@ async function startApp() {
         const state = msg.payload.state;
         updateStepper(state);
         
+        if (state === 'Thinking' || state === 'Planning') {
+          resetTurnState();
+        }
+        
         if (state === 'Done') {
            // Turn off all
            if (activeToolsList) activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
@@ -274,11 +286,13 @@ async function startApp() {
             activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
           } else {
             activeToolsList.innerHTML = tools.map(t => `<li>${t}</li>`).join('');
-            // Track tool call count
-            sessionToolCalls += tools.length;
-            if (ddToolCalls) ddToolCalls.innerText = sessionToolCalls.toString();
           }
         }
+        break;
+      }
+      case 'ToolResult': {
+        sessionToolCalls++;
+        if (ddToolCalls) ddToolCalls.innerText = sessionToolCalls.toString();
         break;
       }
       case 'SafeModeRequest': {
@@ -312,9 +326,11 @@ async function startApp() {
       case 'StreamToken': {
         let token: string = msg.payload.token;
 
-        // Strip DeepSeek prompt template artifacts
+        // Strip DeepSeek prompt template artifacts (individual token)
         token = token.replace(/<｜begin of sentence｜>/g, '');
         token = token.replace(/<｜end of sentence｜>/g, '');
+        token = token.replace(/<\|begin of sentence\|>/g, '');
+        token = token.replace(/<\|end of sentence\|>/g, '');
 
         // Handle leaked <think> blocks
         if (token.includes('<think>')) {
@@ -363,6 +379,13 @@ async function startApp() {
 
         // Flush accumulator
         token = streamAccum;
+        
+        // Strip again after buffering to catch split/partial template tokens!
+        token = token.replace(/<｜begin of sentence｜>/g, '');
+        token = token.replace(/<｜end of sentence｜>/g, '');
+        token = token.replace(/<\|begin of sentence\|>/g, '');
+        token = token.replace(/<\|end of sentence\|>/g, '');
+        
         streamAccum = '';
 
         if (token.trim().length === 0) break;
@@ -414,6 +437,47 @@ async function startApp() {
   // 7. Chat Logic
   let lastAiMessage: HTMLElement | null = null;
 
+  const truncateAtCompleteJson = (text: string): string => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let started = false;
+    const startIdx = text.indexOf('{');
+    if (startIdx === -1) return text;
+    
+    for (let i = startIdx; i < text.length; i++) {
+      const c = text[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === '\\') {
+        escape = true;
+        continue;
+      }
+      if (c === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (c === '{') {
+          depth++;
+          started = true;
+        } else if (c === '}') {
+          depth--;
+          if (started && depth === 0) {
+            const jsonPart = text.substring(startIdx, i + 1);
+            const lower = jsonPart.toLowerCase();
+            if (lower.includes('"tool"') || lower.includes('"name"') || lower.includes('"is_valid"')) {
+              return text.substring(0, i + 1);
+            }
+          }
+        }
+      }
+    }
+    return text;
+  };
+
   const appendMessage = (role: 'user' | 'ai' | 'system', content: string) => {
     if (!chatMessages) return;
     const msgDiv = document.createElement('div');
@@ -428,6 +492,10 @@ async function startApp() {
   const updateLastMessage = (text: string) => {
     if (lastAiMessage) {
       lastAiMessage.innerText += text;
+      const cleaned = truncateAtCompleteJson(lastAiMessage.innerText);
+      if (cleaned !== lastAiMessage.innerText) {
+        lastAiMessage.innerText = cleaned;
+      }
       if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
     } else {
       appendMessage('ai', text);

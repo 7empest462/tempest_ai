@@ -16,6 +16,8 @@ pub enum ModelProvider {
     #[allow(dead_code)]
     OpenAI { api_key: String, base_url: Option<String> },
     #[allow(dead_code)]
+    Gemini { api_key: String },
+    #[allow(dead_code)]
     MLX,
 }
 
@@ -24,6 +26,7 @@ pub struct TempestAiBridge {
     pub reqwest_client: reqwest::Client,
     pub model_name: String,
     pub base_url: String,
+    pub auth_token: Option<String>,
 }
 
 impl Clone for TempestAiBridge {
@@ -33,22 +36,30 @@ impl Clone for TempestAiBridge {
             reqwest_client: self.reqwest_client.clone(),
             model_name: self.model_name.clone(),
             base_url: self.base_url.clone(),
+            auth_token: self.auth_token.clone(),
         }
     }
 }
 
 impl TempestAiBridge {
     pub fn new(provider: ModelProvider, model_name: String) -> Result<Self> {
+        let mut auth_token = None;
         let client: Box<dyn UnifiedAiClient> = match provider {
             ModelProvider::Ollama { ref base_url } => {
                 Box::new(OllamaClient::from_url(base_url).into_diagnostic()?)
             }
             ModelProvider::OpenAI { ref api_key, ref base_url } => {
+                auth_token = Some(api_key.clone());
                 let client = if let Some(url) = base_url {
                     OpenAIClient::from_url(api_key, url).into_diagnostic()?
                 } else {
                     OpenAIClient::new(api_key).into_diagnostic()?
                 };
+                Box::new(client)
+            }
+            ModelProvider::Gemini { ref api_key } => {
+                auth_token = Some(api_key.clone());
+                let client = OpenAIClient::from_url(api_key, "https://generativelanguage.googleapis.com/v1beta/openai/").into_diagnostic()?;
                 Box::new(client)
             }
             ModelProvider::MLX => {
@@ -60,6 +71,7 @@ impl TempestAiBridge {
         let base_url_str = match &provider {
             ModelProvider::Ollama { base_url } => base_url.clone(),
             ModelProvider::OpenAI { base_url, .. } => base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+            ModelProvider::Gemini { .. } => "https://generativelanguage.googleapis.com/v1beta/openai/".to_string(),
             ModelProvider::MLX => "".to_string(),
         };
 
@@ -68,6 +80,7 @@ impl TempestAiBridge {
             reqwest_client: req_client, 
             model_name,
             base_url: base_url_str,
+            auth_token,
         })
     }
 
@@ -133,10 +146,13 @@ impl TempestAiBridge {
 
         // We implement a manual SSE parser because the 'ai' crate's parser is too rigid 
         // and fails when LM Studio sends tool_call deltas without a 'name' field.
-        let url = format!("{}/chat/completions", self.base_url);
-        let response = self.reqwest_client.post(url)
-            .json(&request)
-            .send()
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let mut req = self.reqwest_client.post(url).json(&request);
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        
+        let response = req.send()
             .await
             .map_err(|e| miette!("AI Bridge Stream Error: {}", e))?;
 
@@ -152,6 +168,7 @@ impl TempestAiBridge {
         Ok(Box::pin(async_stream::try_stream! {
             use futures::StreamExt;
             let mut stream = stream;
+            let mut in_thought = false;
             while let Some(chunk_res) = stream.next().await {
                 let chunk_bytes = chunk_res.map_err(|e| miette!("SSE Chunk Error: {}", e))?;
                 let text = String::from_utf8_lossy(&chunk_bytes);
@@ -183,12 +200,38 @@ impl TempestAiBridge {
                                                 }
                                             }
                                         }
+
+                                        // Handle reasoning_content by wrapping it in <think> tags and mapping it to content
+                                        if let Some(reasoning) = delta.remove("reasoning_content") {
+                                            if let Some(reasoning_str) = reasoning.as_str() {
+                                                if !reasoning_str.is_empty() {
+                                                    let mut content_token = String::new();
+                                                    if !in_thought {
+                                                        content_token.push_str("<think>");
+                                                        in_thought = true;
+                                                    }
+                                                    content_token.push_str(reasoning_str);
+                                                    delta.insert("content".to_string(), serde_json::Value::String(content_token));
+                                                }
+                                            }
+                                        } else if in_thought {
+                                            let mut content_token = String::new();
+                                            content_token.push_str("</think>");
+                                            if let Some(std_content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                content_token.push_str(std_content);
+                                            }
+                                            delta.insert("content".to_string(), serde_json::Value::String(content_token));
+                                            in_thought = false;
+                                        }
                                     }
                                 }
                             }
 
-                            if let Ok(chunk) = serde_json::from_value::<ChatCompletionChunk>(repaired) {
-                                yield chunk;
+                            match serde_json::from_value::<ChatCompletionChunk>(repaired) {
+                                Ok(chunk) => yield chunk,
+                                Err(e) => {
+                                    eprintln!("⚠️ AI Bridge: Failed to deserialize ChatCompletionChunk: {}. Value: {:?}", e, chunk_val);
+                                }
                             }
                         }
                     }

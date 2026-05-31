@@ -37,6 +37,8 @@ pub enum AgentMode {
     MLX,
     Bridge,
     LMStudio,
+    Kalosm,
+    Gemini,
 }
 
 #[derive(Clone)]
@@ -50,6 +52,10 @@ pub enum Backend {
         ollama_fallback: Option<Ollama>,
     },
     Bridge(crate::ai_bridge::TempestAiBridge),
+    Kalosm {
+        model: String,
+        engine: std::sync::Arc<tokio::sync::Mutex<Option<kalosm::language::Llama>>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +74,9 @@ pub struct InferenceOutput {
 
 #[derive(serde::Deserialize, Extract, Debug)]
 pub struct ToolCallPayload {
+    #[serde(alias = "tool", alias = "function", alias = "action", alias = "function_name")]
     pub name: String,
+    #[serde(alias = "params", alias = "args", alias = "parameters")]
     pub arguments: serde_json::Value,
 }
 
@@ -79,6 +87,8 @@ impl Backend {
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => AgentMode::MLX,
             Backend::Bridge(_) => AgentMode::Bridge, // Note: LMStudio also maps to Bridge internally for now
+            Backend::Kalosm { .. } => AgentMode::Kalosm,
+            // Gemini uses the Bridge
         }
     }
 
@@ -90,6 +100,7 @@ impl Backend {
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => true,
             Backend::Bridge(_) => true, // We handle raw text tool parsing for Bridge
+            Backend::Kalosm { .. } => false, // No native tool calling for basic kalosm right now
         }
     }
 
@@ -259,6 +270,84 @@ impl Backend {
                 let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
                 Ok((Backend::Bridge(bridge), model))
             }
+            AgentMode::Kalosm => {
+                let tx_opt = event_tx.lock().clone();
+                if let Some(tx) = tx_opt.clone() {
+                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🚀 Initializing Kalosm Native Backend...".to_string()))).await;
+                } else {
+                    println!("🚀 Initializing Kalosm Native Backend...");
+                }
+
+                // Check for potential out-of-memory or swap thrashing scenario
+                let mut sys = System::new();
+                sys.refresh_memory();
+                let total_mb = sys.total_memory() / 1024 / 1024;
+                if total_mb < 24000 && (model.contains("Q8") || model.contains("q8") || model.contains("8_0")) {
+                    let warning = "⚠️  [SYSTEM WARNING]: Loading Q8_0 (~8.6GB) model on a low-RAM system (<24GB Unified Memory) may trigger swap space thrashing and freeze the computer. Q4_K_M is recommended, or use the optimized MLX backend.";
+                    if let Some(ref tx) = tx_opt {
+                        let _ = tx.send(AgentEvent::SubagentStatus(Some(warning.to_string()))).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                    } else {
+                        println!("{}", warning);
+                    }
+                }
+                
+                // Kalosm Model Initialization
+                // If the user specifies "kalosm_default", we pull Llama-3.
+                // If the string contains "::", we treat it as a HuggingFace download: "repo/id::filename.gguf".
+                // Otherwise, we check if it's a valid local file path.
+                let engine = if model == "kalosm_default" || model.trim().is_empty() {
+                    kalosm::language::Llama::builder()
+                        .build()
+                        .await
+                        .map_err(|e| miette::miette!("Failed to load default Kalosm model: {}", e))?
+                } else if model.contains("::") {
+                    let parts: Vec<&str> = model.split("::").collect();
+                    let source = kalosm::language::FileSource::HuggingFace {
+                        model_id: parts[0].to_string(),
+                        revision: "main".to_string(),
+                        file: parts[1].to_string(),
+                    };
+                    kalosm::language::Llama::builder()
+                        .with_source(kalosm::language::LlamaSource::new(source))
+                        .build()
+                        .await
+                        .map_err(|e| miette::miette!("Failed to load HuggingFace Kalosm model: {}", e))?
+                } else if std::path::Path::new(&model).exists() {
+                    let source = kalosm::language::FileSource::Local(std::path::PathBuf::from(&model));
+                    kalosm::language::Llama::builder()
+                        .with_source(kalosm::language::LlamaSource::new(source))
+                        .build()
+                        .await
+                        .map_err(|e| miette::miette!("Failed to load local Kalosm model: {}", e))?
+                } else {
+                    return Err(miette::miette!(
+                        "Invalid Kalosm model format: '{}'. Use 'kalosm_default', a local file path, or 'RepoID/Name::filename.gguf' for HF downloads.", model
+                    ));
+                };
+                
+                Ok((Backend::Kalosm { 
+                    model: model.clone(),
+                    engine: std::sync::Arc::new(tokio::sync::Mutex::new(Some(engine))),
+                }, model))
+            }
+            AgentMode::Gemini => {
+                let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+                if api_key.is_empty() {
+                    return Err(miette::miette!("GEMINI_API_KEY environment variable is missing or empty."));
+                }
+                
+                let tx_opt = event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(AgentEvent::SubagentStatus(Some("🚀 Connecting to Google Gemini API (OpenAI Compat)...".to_string()))).await;
+                } else {
+                    println!("{} Connecting to Google Gemini API...", "🚀");
+                }
+
+                let provider = crate::ai_bridge::ModelProvider::Gemini { api_key };
+                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
+                Ok((Backend::Bridge(bridge), model))
+            }
         }
     }
 
@@ -273,6 +362,8 @@ impl Backend {
         on_tool_call: Option<tokio::sync::mpsc::UnboundedSender<ollama_rs::generation::tools::ToolCall>>,
         tool_registry: Option<Vec<ollama_rs::generation::tools::ToolInfo>>,
     ) -> Result<InferenceOutput> {
+        let history = normalize_history(&history);
+
         // Pre-allocate with capacity to reduce reallocations during streaming
         // ~8192 tokens at ~4-5 chars per token ≈ 32-40KB; allocate 64KB to be safe
         let mut full_content = String::with_capacity(65536);
@@ -292,6 +383,75 @@ impl Backend {
             .top_p(sampling.top_p);
 
         match self {
+            Backend::Kalosm { engine, model: _ } => {
+                use kalosm::language::*;
+                use futures::stream::StreamExt;
+                
+                let mut engine_lock = engine.lock().await;
+                if let Some(llama) = engine_lock.as_mut() {
+                    // Build prompt from full history (don't window here - let model see context)
+                    let mut prompt = String::new();
+                    for msg in &history {
+                        match msg.role {
+                            MessageRole::System => {
+                                prompt.push_str("<|im_start|>system\n");
+                                prompt.push_str(&msg.content);
+                                prompt.push_str("<|im_end|>\n");
+                            }
+                            MessageRole::User => {
+                                prompt.push_str("<|im_start|>user\n");
+                                prompt.push_str(&msg.content);
+                                prompt.push_str("<|im_end|>\n");
+                            }
+                            MessageRole::Assistant => {
+                                prompt.push_str("<|im_start|>assistant\n");
+                                prompt.push_str(&msg.content);
+                                prompt.push_str("<|im_end|>\n");
+                            }
+                            _ => {
+                                prompt.push_str("<|im_start|>system\nTool Result:\n");
+                                prompt.push_str(&msg.content);
+                                prompt.push_str("<|im_end|>\n");
+                            }
+                        }
+                    }
+                    prompt.push_str("<|im_start|>assistant\n");
+                    
+                    // Use configured sampling parameters
+                    let mut chat = llama.chat().with_system_prompt("You are Tempest AI.");
+                    let mut stream = chat(&prompt);
+                    let mut token_count = 0;
+                    let kalosm_max_tokens: usize = sampling.context_size as usize / 4; // Allow up to 1/4 of context size
+                    
+                    while let Some(chunk) = stream.next().await {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        
+                        token_count += 1;
+                        if token_count > kalosm_max_tokens {
+                            break;
+                        }
+                        
+                        let chunk_str: String = chunk.to_string();
+                        full_content.push_str(&chunk_str);
+                        
+                        let tx_opt = event_tx.lock().clone();
+                        if let Some(tx) = tx_opt {
+                            let _ = tx.try_send(crate::tui::AgentEvent::StreamToken(chunk_str));
+                        }
+                    }
+                    
+                    // Explicitly drop stream to release streaming resources
+                    drop(stream);
+                }
+                
+                return Ok(InferenceOutput {
+                    content: full_content,
+                    reasoning: reasoning_content,
+                    native_tool_calls: vec![],
+                });
+            }
             Backend::Bridge(bridge) => {
                 use ai::chat_completions::ChatCompletionMessage;
                 let ai_messages: Vec<ChatCompletionMessage> = history.iter().map(|m| {
@@ -487,6 +647,122 @@ impl Backend {
                         native_tool_calls[idx].function.arguments = args_val;
                     }
                 }
+
+                // Incorporate native tool calls into full_content for consistent tracking
+                for call in &native_tool_calls {
+                    let json_val = serde_json::json!({
+                        "tool": call.function.name,
+                        "arguments": call.function.arguments
+                    });
+                    if let Ok(json_str) = serde_json::to_string(&json_val) {
+                        if !full_content.ends_with('\n') && !full_content.is_empty() {
+                            full_content.push('\n');
+                        }
+                        full_content.push_str(&json_str);
+                    }
+                }
+
+                // --- 🛡️ HARDENED TOOL EXTRACTION (llm-extract) ---
+                // If native_tool_calls is empty but full_content has JSON blocks, parse them using
+                // self-repairing extraction logic. Handles markdown, malformed JSON, and field typos.
+                if native_tool_calls.is_empty() {
+                    let combined_content = format!("{}\n{}", reasoning_content, full_content);
+
+                    // Extract multiple tool calls using self-repairing JSON logic
+                    if let Ok(payloads) = llm_extract::extract_all::<ToolCallPayload>(&combined_content) {
+                        for payload in payloads {
+                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                    name: payload.name,
+                                    arguments: payload.arguments,
+                                }
+                            });
+                        }
+                    } else {
+                        // --- 🛡️ FALLBACK: tool-parser (v1.2.0) with DeepSeekParser ---
+                        let parser = tool_parser::DeepSeekParser::new();
+                        let mut parsed_success = false;
+                        if let Ok((_text, calls)) = parser.parse_complete(&combined_content).await {
+                            if !calls.is_empty() {
+                                parsed_success = true;
+                                for call in calls {
+                                    native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                        function: ollama_rs::generation::tools::ToolCallFunction {
+                                            name: call.function.name,
+                                            arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
+                                        }
+                                    });
+                                }
+                            }
+                        }
+
+                        if !parsed_success {
+                            // --- 🛡️ EXTRA FALLBACK: Robust brace counting extraction ---
+                            let chars: Vec<char> = combined_content.chars().collect();
+                            let mut i = 0;
+                            while i < chars.len() {
+                                if chars[i] == '{' {
+                                    let mut brace_count = 0;
+                                    let mut in_str = false;
+                                    let mut esc = false;
+                                    let start_idx = i;
+                                    let mut end_idx = None;
+
+                                    for j in i..chars.len() {
+                                        let c = chars[j];
+                                        if esc {
+                                            esc = false;
+                                            continue;
+                                        }
+                                        match c {
+                                            '\\' => esc = true,
+                                            '"' => in_str = !in_str,
+                                            '{' if !in_str => {
+                                                brace_count += 1;
+                                            }
+                                            '}' if !in_str => {
+                                                brace_count -= 1;
+                                                if brace_count == 0 {
+                                                    end_idx = Some(j);
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
+                                    if let Some(end_idx) = end_idx {
+                                        let json_str: String = chars[start_idx..=end_idx].iter().collect();
+                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                            if let Some(obj) = val.as_object() {
+                                                let name_opt = obj.get("tool").or(obj.get("name")).or(obj.get("function")).or(obj.get("function_name")).and_then(|v| v.as_str());
+                                                let args_opt = obj.get("arguments").or(obj.get("args")).or(obj.get("parameters")).cloned();
+
+                                                if let Some(name) = name_opt {
+                                                    native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                                        function: ollama_rs::generation::tools::ToolCallFunction {
+                                                            name: name.to_string(),
+                                                            arguments: args_opt.unwrap_or(serde_json::json!({})),
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        i = end_idx;
+                                    }
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Enforce [ACTOR PROTOCOL]: Truncate content after first tool call if found
+                if !native_tool_calls.is_empty() {
+                    if let Some(pos) = full_content.find('{') {
+                        full_content.truncate(pos);
+                    }
+                }
             }
             Backend::Ollama(ollama) => {
                 let model_lower = model.to_lowercase();
@@ -573,9 +849,10 @@ impl Backend {
                     Box::pin(s.map(|res| res.map_err(|_| miette!("Ollama Stream Disconnected")))) as std::pin::Pin<Box<dyn futures::Stream<Item = Result<ollama_rs::generation::chat::ChatMessageResponse, miette::Report>> + Send>>
                 };
 
-                let mut is_thinking = false;
+                let mut is_thinking = is_reasoning;
                 let mut first_token = true;
                 let mut last_segments: Vec<String> = Vec::new();
+                let mut last_thinking_segments: Vec<String> = Vec::new(); // 🛡️ Thinking-block repetition sentinel
                 let mut tag_residue = String::new();
                 let mut in_thought_block = false;
 
@@ -609,6 +886,34 @@ impl Backend {
                             }
                             if let Some(tx) = event_tx.lock().clone() {
                                 let _ = tx.try_send(AgentEvent::ReasoningToken(thinking.to_string()));
+                            }
+                            
+                            // 🛡️ THINKING REPETITION SENTINEL
+                            // Detect loops in the thinking block (e.g., the model repeating 
+                            // "OVERRIDE" blocks 7+ times, which caused the catastrophe).
+                            // Uses 50-char normalized segments for comparison.
+                            let thinking_normalized = thinking.trim().to_lowercase();
+                            if thinking_normalized.len() >= 50 {
+                                let segment = thinking_normalized[..50].to_string();
+                                last_thinking_segments.push(segment.clone());
+                                if last_thinking_segments.len() > 12 {
+                                    last_thinking_segments.remove(0);
+                                }
+                                // If any segment appears 6+ times in the window, the model is stuck
+                                let max_repeats = last_thinking_segments.iter()
+                                    .filter(|s| *s == &segment)
+                                    .count();
+                                if max_repeats >= 6 {
+                                    // Inject a sentinel break into content and stop
+                                    full_content = "⚠️ [SENTINEL - THINKING LOOP]: Repetition detected in reasoning block. \
+                                        The model's internal reasoning is stuck in a loop. Breaking stream to prevent runaway.".to_string();
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::SubagentStatus(
+                                            Some("🛑 Thinking Repetition Sentinel triggered".to_string())
+                                        ));
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
@@ -872,10 +1177,28 @@ impl Backend {
                             if let Some(ref tx) = on_tool_call {
                                 let _ = tx.send(call.clone());
                             }
+
+                            // Incorporate native tool call into full_content for consistent tracking
+                            let json_val = serde_json::json!({
+                                "tool": call.function.name,
+                                "arguments": call.function.arguments
+                            });
+                            if let Ok(json_str) = serde_json::to_string(&json_val) {
+                                if !full_content.ends_with('\n') && !full_content.is_empty() {
+                                    full_content.push('\n');
+                                }
+                                full_content.push_str(&json_str);
+
+                                // Stream the token to the UI
+                                if let Some(tx) = event_tx.lock().clone() {
+                                    let _ = tx.try_send(AgentEvent::StreamToken(format!("\n{}", json_str)));
+                                }
+                            }
+
                             native_tool_calls.push(call);
                         }
                     }
-                    // --- 🛡️ REPETITION SENTINEL ---
+                    // --- 🛡️ REPETITION SENTINEL (Single-Token & Block-Level) ---
                     let trimmed = chunk.message.content.trim();
                     if !trimmed.is_empty() && trimmed.len() > 3 {
                         last_segments.push(trimmed.to_string());
@@ -888,6 +1211,32 @@ impl Backend {
                                 let _ = tx.send(AgentEvent::StreamToken(warning.to_string())).await;
                             }
                             break; 
+                        }
+                    }
+
+                    // 🛡️ BLOCK-LEVEL REPETITION GUARD (Checks accumulated full_content for line-repetition)
+                    {
+                        let mut line_counts = std::collections::HashMap::new();
+                        let mut loop_detected = false;
+                        for line in full_content.lines() {
+                            let line_trimmed = line.trim();
+                            if line_trimmed.len() >= 15 {
+                                let count = line_counts.entry(line_trimmed).or_insert(0);
+                                *count += 1;
+                                if *count >= 6 {
+                                    loop_detected = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if loop_detected {
+                            let warning = "\n\n⚠️ [REPETITION SENTINEL - BLOCK LOOP]: Breaking loop. Destructive block repetition detected in stream.";
+                            full_content.push_str(warning);
+                            let tx = event_tx.lock().clone();
+                            if let Some(tx) = tx {
+                                let _ = tx.send(AgentEvent::StreamToken(warning.to_string())).await;
+                            }
+                            break;
                         }
                     }
 
@@ -1087,6 +1436,7 @@ impl Backend {
                     }
                 }
                 let mut last_segments: Vec<String> = Vec::new();
+                let mut last_thinking_segments: Vec<String> = Vec::new(); // 🛡️ Thinking-block repetition sentinel
                 let mut token_count = 0;
                 let start_time = std::time::Instant::now();
                 
@@ -1124,12 +1474,53 @@ impl Backend {
                                     if let Some(ref tx) = on_tool_call {
                                         let _ = tx.send(mapped_call.clone());
                                     }
+
+                                    // Incorporate native tool call into full_content for consistent tracking
+                                    let json_val = serde_json::json!({
+                                        "tool": mapped_call.function.name,
+                                        "arguments": mapped_call.function.arguments
+                                    });
+                                    if let Ok(json_str) = serde_json::to_string(&json_val) {
+                                        if !full_content.ends_with('\n') && !full_content.is_empty() {
+                                            full_content.push('\n');
+                                        }
+                                        full_content.push_str(&json_str);
+
+                                        // Stream the token to the UI
+                                        if let Some(tx) = event_tx.lock().clone() {
+                                            let _ = tx.try_send(AgentEvent::StreamToken(format!("\n{}", json_str)));
+                                        }
+                                    }
+
                                     native_tool_calls.push(mapped_call);
                                 }
                             }
 
                             if let Some(reasoning) = &chunk.choices[0].delta.reasoning_content {
                                 if !reasoning.is_empty() {
+                                    // 🛡️ THINKING REPETITION SENTINEL (MLX)
+                                    let thinking_normalized = reasoning.trim().to_lowercase();
+                                    if thinking_normalized.len() >= 50 {
+                                        let segment = thinking_normalized[..50].to_string();
+                                        last_thinking_segments.push(segment.clone());
+                                        if last_thinking_segments.len() > 12 {
+                                            last_thinking_segments.remove(0);
+                                        }
+                                        let max_repeats = last_thinking_segments.iter()
+                                            .filter(|s| *s == &segment)
+                                            .count();
+                                        if max_repeats >= 6 {
+                                            full_content = "⚠️ [SENTINEL - THINKING LOOP]: Repetition detected in reasoning block. \
+                                                Breaking stream to prevent runaway.".to_string();
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::SubagentStatus(
+                                                    Some("🛑 Thinking Repetition Sentinel triggered".to_string())
+                                                ));
+                                            }
+                                            break;
+                                        }
+                                    }
+
                                     // CAP REASONING: Prevent unbounded accumulation (20KB max ≈ 5000 tokens)
                                     let reasoning_cap = 20480;
                                     if reasoning_content.len() + reasoning.len() <= reasoning_cap {
@@ -1487,6 +1878,31 @@ impl Backend {
                                         }
                                     }
 
+                                    // 🛡️ BLOCK-LEVEL REPETITION GUARD (Checks accumulated full_content for line-repetition)
+                                    {
+                                        let mut line_counts = std::collections::HashMap::new();
+                                        let mut loop_detected = false;
+                                        for line in full_content.lines() {
+                                            let line_trimmed = line.trim();
+                                            if line_trimmed.len() >= 15 {
+                                                let count = line_counts.entry(line_trimmed).or_insert(0);
+                                                *count += 1;
+                                                if *count >= 6 {
+                                                    loop_detected = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if loop_detected {
+                                            let warning = "\n\n⚠️ [REPETITION SENTINEL - BLOCK LOOP]: Breaking loop. Destructive block repetition detected in stream.";
+                                            full_content.push_str(warning);
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::StreamToken(warning.to_string()));
+                                            }
+                                            break;
+                                        }
+                                    }
+
                                     // 2. PASSIVITY SENTINEL
                                     let lower_trimmed = trimmed.to_lowercase();
                                     if lower_trimmed.contains("would you like me to") || 
@@ -1548,14 +1964,88 @@ impl Backend {
                 // --- 🛡️ FALLBACK: tool-parser (v1.2.0) with DeepSeekParser ---
                 // If llm-extract fails, try specialized DeepSeekParser for multi-block recovery
                 let parser = tool_parser::DeepSeekParser::new();
+                let mut parsed_success = false;
                 if let Ok((_text, calls)) = parser.parse_complete(&combined_content).await {
-                    for call in calls {
-                        native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                            function: ollama_rs::generation::tools::ToolCallFunction {
-                                name: call.function.name,
-                                arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
+                    if !calls.is_empty() {
+                        parsed_success = true;
+                        for call in calls {
+                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                    name: call.function.name,
+                                    arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
+                                }
+                            });
+                        }
+                    }
+                }
+
+                if !parsed_success {
+                    // --- 🛡️ EXTRA FALLBACK: Robust brace counting extraction from test_json_stop.rs ---
+                    let chars: Vec<char> = combined_content.chars().collect();
+                    let mut i = 0;
+                    while i < chars.len() {
+                        if chars[i] == '{' {
+                            let mut brace_count = 0;
+                            let mut in_string = false;
+                            let mut escape = false;
+                            let start_idx = i;
+                            let mut end_idx = i;
+
+                            let mut j = i;
+                            while j < chars.len() {
+                                let c = chars[j];
+                                if !escape && c == '"' {
+                                    in_string = !in_string;
+                                }
+                                if !in_string && !escape {
+                                    if c == '{' { brace_count += 1; }
+                                    else if c == '}' { brace_count -= 1; }
+                                }
+
+                                if c == '\\' {
+                                    escape = !escape;
+                                } else {
+                                    escape = false;
+                                }
+
+                                if brace_count == 0 {
+                                    end_idx = j;
+                                    break;
+                                }
+                                j += 1;
                             }
-                        });
+
+                            if brace_count == 0 {
+                                let json_str: String = chars[start_idx..=end_idx].iter().collect();
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                    if let Some(obj) = val.as_object() {
+                                        let name_opt = obj.get("tool")
+                                            .or_else(|| obj.get("name"))
+                                            .or_else(|| obj.get("function"))
+                                            .or_else(|| obj.get("function_name"))
+                                            .or_else(|| obj.get("action"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+
+                                        let args_opt = obj.get("arguments")
+                                            .or_else(|| obj.get("params"))
+                                            .or_else(|| obj.get("args"))
+                                            .cloned();
+
+                                        if let Some(name) = name_opt {
+                                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                                    name,
+                                                    arguments: args_opt.unwrap_or(serde_json::json!({})),
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                i = end_idx;
+                            }
+                        }
+                        i += 1;
                     }
                 }
             }
@@ -1600,6 +2090,7 @@ impl Backend {
             Backend::Bridge(_) => {
                 // Bridge clients handle their own cleanup
             }
+            Backend::Kalosm { .. } => {}
         }
     }
 
@@ -1635,6 +2126,9 @@ impl Backend {
             }
             Backend::Bridge(bridge) => {
                 bridge.generate_embeddings(text.to_string()).await
+            }
+            Backend::Kalosm { .. } => {
+                Err(miette!("Embeddings not yet supported via Kalosm"))
             }
         }
     }
@@ -1800,4 +2294,87 @@ fn build_deepseek_r1_prompt(history: &[ChatMessage]) -> String {
         }
     }
     prompt
+}
+
+fn normalize_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
+    if history.is_empty() {
+        return Vec::new();
+    }
+
+    let mut normalized = Vec::with_capacity(history.len());
+    
+    // 1. Process roles and convert mid-history System/Tool messages to User
+    for (idx, msg) in history.iter().enumerate() {
+        let role = match &msg.role {
+            MessageRole::System => {
+                if idx == 0 {
+                    MessageRole::System // Keep the initial system instructions
+                } else {
+                    MessageRole::User // Convert mid-history system observations to User
+                }
+            }
+            MessageRole::Tool => MessageRole::User, // Convert tool results to User for universal compatibility
+            other => other.clone(),
+        };
+
+        // Format tool calls back into the assistant message if present!
+        let mut content = msg.content.clone();
+        if role == MessageRole::Assistant && !msg.tool_calls.is_empty() {
+            for call in &msg.tool_calls {
+                let json_val = serde_json::json!({
+                    "tool": call.function.name,
+                    "arguments": call.function.arguments
+                });
+                if let Ok(json_str) = serde_json::to_string(&json_val) {
+                    if !content.ends_with('\n') && !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(&json_str);
+                }
+            }
+        }
+
+        normalized.push(ChatMessage {
+            role,
+            content,
+            images: msg.images.clone(),
+            tool_calls: msg.tool_calls.clone(),
+            thinking: msg.thinking.clone(),
+        });
+    }
+
+    // 2. Merge consecutive messages of the same role to enforce strict alternation
+    let mut merged: Vec<ChatMessage> = Vec::with_capacity(normalized.len());
+    for msg in normalized {
+        if let Some(last) = merged.last_mut() {
+            if last.role == msg.role {
+                // Merge content
+                if !last.content.is_empty() && !msg.content.is_empty() {
+                    last.content.push_str("\n\n");
+                }
+                last.content.push_str(&msg.content);
+
+                // Merge tool calls
+                for tc in msg.tool_calls {
+                    if !last.tool_calls.iter().any(|existing| existing.function.name == tc.function.name && existing.function.arguments == tc.function.arguments) {
+                        last.tool_calls.push(tc);
+                    }
+                }
+
+                // Merge thinking
+                if let Some(think) = msg.thinking {
+                    if let Some(ref mut last_think) = last.thinking {
+                        last_think.push_str("\n");
+                        last_think.push_str(&think);
+                    } else {
+                        last.thinking = Some(think);
+                    }
+                }
+                continue;
+            }
+        }
+        merged.push(msg);
+    }
+
+    merged
 }

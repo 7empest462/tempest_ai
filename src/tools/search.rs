@@ -96,7 +96,10 @@ impl AgentTool for GrepSearchTool {
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: GrepSearchArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let query = typed_args.query;
-        let path = typed_args.path.unwrap_or_else(|| ".".to_string());
+        let mut path = typed_args.path.unwrap_or_else(|| ".".to_string());
+        if path.is_empty() {
+            path = ".".to_string();
+        }
         
         let cmd = format!("rg -n --no-heading --max-columns=200 \"{}\" {}", query, path);
         let exec_args = json!({ "command": cmd });
@@ -106,19 +109,22 @@ impl AgentTool for GrepSearchTool {
         use fuzzy_matcher::FuzzyMatcher;
         use fuzzy_matcher::skim::SkimMatcherV2;
         
-        let matcher = SkimMatcherV2::default();
-        let mut ranked = Vec::new();
+        use rayon::prelude::*;
         
-        for line in raw_results.lines() {
-            if let Some(score) = matcher.fuzzy_match(line, &query) {
-                ranked.push((score, line));
-            } else {
-                // If no fuzzy match, keep it with a base score of 0
-                ranked.push((0, line));
-            }
-        }
+        let lines: Vec<&str> = raw_results.lines().collect();
+        let mut ranked: Vec<(i64, &str)> = lines.into_par_iter()
+            .map(|line| {
+                // SkimMatcherV2 is lightweight to clone or recreate if needed
+                let matcher = SkimMatcherV2::default();
+                if let Some(score) = matcher.fuzzy_match(line, &query) {
+                    (score, line)
+                } else {
+                    (0, line)
+                }
+            })
+            .collect();
         
-        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.par_sort_by(|a, b| b.0.cmp(&a.0));
         
         let report = ranked.into_iter()
             .take(100)

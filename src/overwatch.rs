@@ -15,13 +15,14 @@
 //! - **Predicate caching**: Avoids redundant checks per turn
 //! - **Error classification**: Integrates with error_classifier for recovery hints
 
-use skg_context_engine::{Context, ContextOp, EngineError, Rule};
+use skg_context_engine::{Context, ContextOp, EngineError, Rule, OutputSchema};
 use layer0::content::Content;
 use layer0::context::{Message, Role};
 use async_trait::async_trait;
 use std::collections::{VecDeque, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use serde_json::{json, Value};
 
 // Note: error_classifier integration available for future recovery hint features
 
@@ -539,15 +540,17 @@ pub fn is_complete_tool_json(text: &str) -> bool {
         }
     }
     
-    // Case 2: Naked JSON object containing "tool"
-    if let Some(start) = lower.find("{\"tool\":") {
+    // Case 2: Brace counting for any root object that looks like a tool call or validation
+    // Find the first '{' and see if it balances out and contains "tool", "name", or "is_valid".
+    if let Some(start) = text.find('{') {
         let json_part = &text[start..];
         let mut depth = 0;
         let mut in_string = false;
         let mut escape = false;
         let mut started = false;
+        let mut end_idx = 0;
         
-        for c in json_part.chars() {
+        for (i, c) in json_part.chars().enumerate() {
             if escape {
                 escape = false;
                 continue;
@@ -562,11 +565,19 @@ pub fn is_complete_tool_json(text: &str) -> bool {
                 '}' if !in_string => {
                     depth -= 1;
                     if started && depth == 0 {
-                        // Found the balanced end of the JSON object
-                        return true;
+                        end_idx = i;
+                        break;
                     }
                 }
                 _ => {}
+            }
+        }
+        
+        if started && depth == 0 {
+            let extracted = &json_part[..=end_idx];
+            let lower_ext = extracted.to_lowercase();
+            if lower_ext.contains("\"tool\"") || lower_ext.contains("\"name\"") || lower_ext.contains("\"is_valid\"") {
+                return true;
             }
         }
     }
@@ -667,7 +678,378 @@ impl ContextOp for OverConfidenceOp {
 }
 
 // ============================================================
-// 🌪️ RULE FACTORY (SKG CONTEXT ENGINE)
+// � TRIGGER SYSTEM & RULE BUILDER
+// ============================================================
+
+/// Event triggers that determine when rules fire during agent execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// Rule fires after model inference completes (checking output)
+    OnInferenceComplete,
+    /// Rule fires when model attempts to call a tool
+    OnToolCall,
+    /// Rule fires at any point during context evaluation
+    Always,
+}
+
+/// Builder pattern for constructing overwatch rules with triggers and events.
+///
+/// Example:
+/// ```ignore
+/// let rule = RuleBuilder::new("Hallucination Guard")
+///     .trigger(Trigger::OnInferenceComplete)
+///     .when(is_hallucinating_action)
+///     .priority(100)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct RuleBuilder {
+    name: String,
+    trigger: Trigger,
+    priority: i32,  // Changed from u32 to i32 to match Rule::when signature
+}
+
+impl RuleBuilder {
+    /// Create a new rule builder with the given name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            trigger: Trigger::Always,
+            priority: 50,
+        }
+    }
+
+    /// Set the trigger for when this rule fires.
+    pub fn trigger(mut self, trigger: Trigger) -> Self {
+        self.trigger = trigger;
+        self
+    }
+
+    /// Set the priority of this rule (higher priority = fires first).
+    pub fn priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Get the configured trigger.
+    pub fn get_trigger(&self) -> Trigger {
+        self.trigger
+    }
+
+    /// Get the configured priority.
+    pub fn get_priority(&self) -> i32 {
+        self.priority
+    }
+
+    /// Get the rule name.
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Predicate-based rule builder for creating Rule instances.
+/// This wraps the skg_context_engine Rule::when pattern with trigger awareness.
+pub struct PredicateRuleBuilder {
+    builder: RuleBuilder,
+}
+
+impl PredicateRuleBuilder {
+    /// Start building a rule with trigger support.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            builder: RuleBuilder::new(name),
+        }
+    }
+
+    /// Set the trigger for this rule.
+    pub fn trigger(mut self, trigger: Trigger) -> Self {
+        self.builder = self.builder.trigger(trigger);
+        self
+    }
+
+    /// Set the priority for this rule.
+    pub fn priority(mut self, priority: i32) -> Self {
+        self.builder = self.builder.priority(priority);
+        self
+    }
+
+    /// Build a Rule::when rule with the configured trigger and priority.
+    /// The trigger is stored as metadata in the rule name via convention.
+    pub fn when<P, O>(self, predicate: P, op: O) -> Rule
+    where
+        P: Fn(&Context) -> bool + Send + Sync + 'static,
+        O: ContextOp<Output = ()> + 'static,
+    {
+        // Format rule name to include trigger info for observability
+        let trigger_str = match self.builder.trigger {
+            Trigger::OnInferenceComplete => "[INFERENCE]",
+            Trigger::OnToolCall => "[TOOL_CALL]",
+            Trigger::Always => "[ALWAYS]",
+        };
+
+        let descriptive_name = format!("{} {}", self.builder.get_name(), trigger_str);
+
+        Rule::when(
+            &descriptive_name,
+            self.builder.get_priority(),
+            predicate,
+            op,
+        )
+    }
+}
+
+// ============================================================
+// 🎯 STRUCTURED OUTPUT VALIDATION (SCHEMA BUILDER)
+// ============================================================
+
+/// Builder for creating structured output schemas with validation.
+/// Integrates with OverwatchEngine for tool call validation.
+///
+/// Example:
+/// ```ignore
+/// let schema = OutputSchemaBuilder::new()
+///     .with_tool_calls()
+///     .with_reasoning()
+///     .with_safety_check()
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct OutputSchemaBuilder {
+    require_tool_calls: bool,
+    require_reasoning: bool,
+    require_safety_check: bool,
+    max_retries: u32,
+}
+
+impl OutputSchemaBuilder {
+    /// Create a new output schema builder with defaults.
+    pub fn new() -> Self {
+        Self {
+            require_tool_calls: false,
+            require_reasoning: false,
+            require_safety_check: false,
+            max_retries: 3,
+        }
+    }
+
+    /// Require the output to contain tool calls (for action validation).
+    pub fn with_tool_calls(mut self) -> Self {
+        self.require_tool_calls = true;
+        self
+    }
+
+    /// Require the output to include reasoning steps (for transparency).
+    pub fn with_reasoning(mut self) -> Self {
+        self.require_reasoning = true;
+        self
+    }
+
+    /// Require the output to include safety checks (for harm prevention).
+    pub fn with_safety_check(mut self) -> Self {
+        self.require_safety_check = true;
+        self
+    }
+
+    /// Set maximum validation retries (default: 3).
+    pub fn max_retries(mut self, count: u32) -> Self {
+        self.max_retries = count;
+        self
+    }
+
+    /// Build the OutputSchema with tool-call validation.
+    pub fn build(self) -> OutputSchema {
+        let mut properties = json!({
+            "result": {
+                "type": "string",
+                "description": "The final result of the operation"
+            }
+        });
+
+        // Add reasoning field if required
+        if self.require_reasoning {
+            if let Value::Object(ref mut props) = properties {
+                props.insert(
+                    "reasoning".to_string(),
+                    json!({
+                        "type": "string",
+                        "description": "Step-by-step reasoning for the decision"
+                    }),
+                );
+            }
+        }
+
+        // Add safety check field if required
+        if self.require_safety_check {
+            if let Value::Object(ref mut props) = properties {
+                props.insert(
+                    "safety_check".to_string(),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "is_safe": { "type": "boolean" },
+                            "concerns": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        },
+                        "required": ["is_safe"]
+                    }),
+                );
+            }
+        }
+
+        // Build required fields list
+        let mut required = vec!["result"];
+        if self.require_reasoning {
+            required.push("reasoning");
+        }
+        if self.require_safety_check {
+            required.push("safety_check");
+        }
+
+        let schema = json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        });
+
+        // Validator closure: checks required fields are present and non-empty
+        let require_tool_calls = self.require_tool_calls;
+        let require_reasoning = self.require_reasoning;
+        let require_safety_check = self.require_safety_check;
+
+        OutputSchema::tool_call(schema, move |value| {
+            // Check basic structure
+            let obj = value.as_object().ok_or_else(|| 
+                "Output must be a JSON object".to_string()
+            )?;
+
+            // Validate result field
+            let result = obj.get("result")
+                .ok_or_else(|| "Missing 'result' field".to_string())?
+                .as_str()
+                .ok_or_else(|| "'result' must be a string".to_string())?;
+
+            if result.is_empty() {
+                return Err("'result' cannot be empty".to_string());
+            }
+
+            // Validate reasoning if required
+            if require_reasoning {
+                let reasoning = obj.get("reasoning")
+                    .ok_or_else(|| "Missing required 'reasoning' field".to_string())?
+                    .as_str()
+                    .ok_or_else(|| "'reasoning' must be a string".to_string())?;
+
+                if reasoning.is_empty() {
+                    return Err("'reasoning' cannot be empty".to_string());
+                }
+            }
+
+            // Validate safety check if required
+            if require_safety_check {
+                let safety = obj.get("safety_check")
+                    .ok_or_else(|| "Missing required 'safety_check' field".to_string())?
+                    .as_object()
+                    .ok_or_else(|| "'safety_check' must be an object".to_string())?;
+
+                let is_safe = safety.get("is_safe")
+                    .ok_or_else(|| "Missing 'is_safe' in safety_check".to_string())?
+                    .as_bool()
+                    .ok_or_else(|| "'is_safe' must be a boolean".to_string())?;
+
+                if !is_safe {
+                    if let Some(concerns) = safety.get("concerns") {
+                        if let Some(arr) = concerns.as_array() {
+                            if arr.is_empty() {
+                                return Err("Safety check failed: concerns array is empty".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Validate tool calls if required
+            if require_tool_calls {
+                if !result.contains("tool_call") && !result.contains("calling_tool") {
+                    return Err(
+                        "Output requires tool calls but none detected.".to_string()
+                    );
+                }
+            }
+
+            Ok(value.clone())
+        })
+    }
+}
+
+impl Default for OutputSchemaBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tool call validation helper for OverwatchEngine.
+#[derive(Debug, Clone)]
+pub struct ToolCallValidator {
+    pub max_name_length: usize,
+    pub max_args_length: usize,
+    pub blocked_patterns: Vec<String>,
+}
+
+impl ToolCallValidator {
+    /// Create a new tool call validator with defaults.
+    pub fn new() -> Self {
+        Self {
+            max_name_length: 256,
+            max_args_length: 65536,
+            blocked_patterns: vec![
+                "rm -rf".to_string(),
+                "format.*disk".to_string(),
+                "chmod.*000".to_string(),
+            ],
+        }
+    }
+
+    /// Validate a tool call name and arguments.
+    pub fn validate_tool_call(&self, tool_name: &str, args_json: &str) -> Result<(), String> {
+        if tool_name.len() > self.max_name_length {
+            return Err(format!(
+                "Tool name exceeds max length of {} chars",
+                self.max_name_length
+            ));
+        }
+
+        if args_json.len() > self.max_args_length {
+            return Err(format!(
+                "Tool arguments exceed max size of {} bytes",
+                self.max_args_length
+            ));
+        }
+
+        for pattern in &self.blocked_patterns {
+            if args_json.contains(pattern) {
+                return Err(format!("Tool call contains blocked pattern: {}", pattern));
+            }
+        }
+
+        serde_json::from_str::<Value>(args_json)
+            .map_err(|e| format!("Tool arguments are not valid JSON: {}", e))?;
+
+        Ok(())
+    }
+}
+
+impl Default for ToolCallValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
+// ============================================================
+// �🌪️ RULE FACTORY (SKG CONTEXT ENGINE)
 // ============================================================
 
 /// Build the set of Overwatch rules for registration into a Context.
@@ -687,43 +1069,104 @@ impl ContextOp for OverConfidenceOp {
 pub fn overwatch_rules() -> Vec<Rule> {
     vec![
         Rule::when(
-            "Hallucination Guard",
+            "Hallucination Guard [INFERENCE]",
             100,
             is_hallucinating_action,
             HallucinationGuardOp,
         ),
         Rule::when(
-            "File I/O Overwatch",
+            "File I/O Overwatch [INFERENCE]",
             100,
             is_hallucinating_file_io,
             FileIOOverwatchOp,
         ),
         Rule::when(
-            "Fake Result Guard",
+            "Fake Result Guard [INFERENCE]",
             100,
             is_faking_tool_results,
             FakeToolResultOp,
         ),
         Rule::when(
-            "JSON Schema Violation",
+            "JSON Schema Violation [INFERENCE]",
             99,
             is_hallucinating_file_io, // Reuse existing predicate adapter until full context available
             JsonSchemaViolationOp,
         ),
         Rule::when(
-            "Self-Contradiction Check",
+            "Self-Contradiction Check [INFERENCE]",
             98,
             has_self_contradiction,
             SelfContradictionOp,
         ),
         Rule::when(
-            "Scope Creep Detection",
+            "Scope Creep Detection [INFERENCE]",
             97,
             has_scope_creep,
             ScopeCreepOp,
         ),
     ]
 }
+
+/// Build overwatch rules using the advanced RuleBuilder pattern with Trigger support.
+///
+/// This is an alternative to `overwatch_rules()` that uses the builder pattern
+/// for more declarative rule definitions with explicit trigger specification.
+///
+/// Example of how this pattern enables future integration:
+/// ```ignore
+/// let hallucination_rule = PredicateRuleBuilder::new("Hallucination Guard")
+///     .trigger(Trigger::OnInferenceComplete)
+///     .priority(100)
+///     .when(is_hallucinating_action, HallucinationGuardOp);
+/// ```
+///
+/// The rules fire in this order:
+/// 1. OnInferenceComplete triggers (highest priority first)
+/// 2. OnToolCall triggers
+/// 3. Always triggers
+pub fn setup_overwatch_rules_with_triggers() -> Vec<Rule> {
+    vec![
+        PredicateRuleBuilder::new("Hallucination Guard")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(100)
+            .when(is_hallucinating_action, HallucinationGuardOp),
+        PredicateRuleBuilder::new("File I/O Overwatch")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(100)
+            .when(is_hallucinating_file_io, FileIOOverwatchOp),
+        PredicateRuleBuilder::new("Fake Result Guard")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(100)
+            .when(is_faking_tool_results, FakeToolResultOp),
+        PredicateRuleBuilder::new("JSON Schema Violation")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(99)
+            .when(is_hallucinating_file_io, JsonSchemaViolationOp),
+        PredicateRuleBuilder::new("Self-Contradiction Check")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(98)
+            .when(has_self_contradiction, SelfContradictionOp),
+        PredicateRuleBuilder::new("Scope Creep Detection")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(97)
+            .when(has_scope_creep, ScopeCreepOp),
+    ]
+}
+
+pub fn initialize_overwatch_extensions(ctx: &mut Context) {
+    ctx.extensions.insert(ProjectMemory::default());
+    ctx.extensions.insert(SentinelState::default());
+    ctx.extensions.insert(ContextScore::default());
+}
+
+pub fn register_overwatch_rules(ctx: &mut Context) {
+    initialize_overwatch_extensions(ctx);
+
+    for rule in setup_overwatch_rules_with_triggers() {
+        ctx.add_rule(rule);
+    }
+}
+
 
 // ============================================================
 // 🔌 NATIVE OVERWATCH ENGINE (Agent-side fast-path)
@@ -952,6 +1395,189 @@ impl OverwatchEngine {
         OverwatchVerdict::Pass
     }
 
+    /// Validate tool calls BEFORE execution. This closes the critical architectural gap
+    /// where native tool calls (via Ollama/MLX structured tool calling) bypassed the 
+    /// Overwatch engine entirely by going PendingTools → ExecutingTools without passing
+    /// through StreamingContent.
+    ///
+    /// Returns Pass if all tool calls look safe, or Intercept with details if any are suspicious.
+    pub fn validate_tool_calls(&self, tool_calls: &[serde_json::Value], last_user_message: Option<&str>) -> OverwatchVerdict {
+        let mut write_count = 0;
+        let mut critical_file_writes: Vec<String> = Vec::new();
+
+        // Critical project files that should never be casually overwritten
+        let critical_files = [
+            "Cargo.toml", "Cargo.lock", "Package.json", "package-lock.json",
+            "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml",
+            ".gitignore", "Dockerfile",
+        ];
+        // Critical source entry points
+        let critical_sources = ["main.rs", "lib.rs", "mod.rs", "index.ts", "index.js", "app.py"];
+
+        for call in tool_calls {
+            let tool_name = call.get("tool")
+                .or_else(|| call.get("name"))
+                .or_else(|| call.get("function"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let args = call.get("arguments")
+                .or_else(|| call.get("params"))
+                .or_else(|| call.get("args"));
+
+            if tool_name == "write_file" {
+                write_count += 1;
+
+                if let Some(args) = args {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let content_len = args.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+
+                    // Check if writing to a critical file
+                    let filename = std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("");
+
+                    let is_critical = critical_files.iter().any(|&f| filename == f)
+                        || critical_sources.iter().any(|&f| filename == f);
+
+                    if is_critical && content_len < 200 {
+                        critical_file_writes.push(format!("{} ({} bytes)", path, content_len));
+                    }
+                }
+            }
+        }
+
+        // 🛡️ BATCH WRITE GUARD: Multiple write_file calls in one turn is suspicious
+        if write_count >= 3 {
+            return OverwatchVerdict::Intercept {
+                correction: format!(
+                    "🛑 [OVERWATCH - BATCH WRITE GUARD]: You emitted {} write_file calls in a single turn. \
+                    This is dangerously aggressive. Break this into individual, verified steps.",
+                    write_count
+                ),
+                log: format!("Blocked batch of {} write_file calls in single turn", write_count),
+                rule_name: "Batch Write Guard".to_string(),
+            };
+        }
+
+        // 🛡️ CRITICAL FILE GUARD: Tiny writes to critical project files
+        if !critical_file_writes.is_empty() {
+            // Check if user actually asked for something that would justify this
+            let user_asked_for_init = last_user_message.map_or(false, |msg| {
+                let lower = msg.to_lowercase();
+                lower.contains("create") || lower.contains("init") || lower.contains("new project")
+                    || lower.contains("hello world") || lower.contains("scaffold")
+                    || lower.contains("replace") || lower.contains("overwrite")
+            });
+
+            if !user_asked_for_init {
+                return OverwatchVerdict::Intercept {
+                    correction: format!(
+                        "🛑 [OVERWATCH - CRITICAL FILE GUARD]: You are writing tiny content to critical project files: [{}]. \
+                        This looks like a hallucinated project initialization. The user did NOT ask to create a new project. \
+                        Review the user's actual request and respond appropriately.",
+                        critical_file_writes.join(", ")
+                    ),
+                    log: format!("Blocked suspicious tiny write to critical files: {:?}", critical_file_writes),
+                    rule_name: "Critical File Guard".to_string(),
+                };
+            }
+        }
+
+        OverwatchVerdict::Pass
+    }
+
+    /// Validate algebraic effects BEFORE physical execution. This is the core sandboxing guard 
+    /// for Phase 3, allowing Overwatch to intercept destructive filesystem or shell operations.
+    pub fn validate_effects(&self, effects: &[crate::effects::TempestEffect], last_user_message: Option<&str>) -> OverwatchVerdict {
+        let mut write_count = 0;
+        let mut critical_file_writes: Vec<String> = Vec::new();
+        let mut dangerous_commands: Vec<String> = Vec::new();
+
+        let critical_files = [
+            "Cargo.toml", "Cargo.lock", "Package.json", "package-lock.json",
+            "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml",
+            ".gitignore", "Dockerfile",
+        ];
+        let critical_sources = ["main.rs", "lib.rs", "mod.rs", "index.ts", "index.js", "app.py"];
+
+        for effect in effects {
+            match effect {
+                crate::effects::TempestEffect::WriteFile { path, content, .. } => {
+                    write_count += 1;
+                    let filename = std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("");
+                    let is_critical = critical_files.iter().any(|&f| filename == f)
+                        || critical_sources.iter().any(|&f| filename == f);
+
+                    if is_critical && content.len() < 200 {
+                        critical_file_writes.push(format!("{} ({} bytes)", path, content.len()));
+                    }
+                }
+                crate::effects::TempestEffect::RunCommand { command, .. } => {
+                    let cmd_lower = command.to_lowercase();
+                    // Block absolute delete commands on critical paths
+                    if cmd_lower.contains("rm ") && (cmd_lower.contains("src") || cmd_lower.contains("/") || cmd_lower.contains("*") || cmd_lower.contains("cargo")) {
+                        dangerous_commands.push(command.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !dangerous_commands.is_empty() {
+            return OverwatchVerdict::Intercept {
+                correction: format!(
+                    "🛑 [OVERWATCH - ALGEBRAIC EFFECT GUARD]: Destructive command execution blocked: [{}]. \
+                    You are not allowed to execute destructive delete/cleanup commands on core source files. \
+                    Formulate a safe alternative command.",
+                    dangerous_commands.join(", ")
+                ),
+                log: format!("Blocked dangerous command execution effect: {:?}", dangerous_commands),
+                rule_name: "Algebraic Effect Guard - Dangerous Command".to_string(),
+            };
+        }
+
+        if write_count >= 3 {
+            return OverwatchVerdict::Intercept {
+                correction: format!(
+                    "🛑 [OVERWATCH - ALGEBRAIC EFFECT GUARD]: Suspicious batch of {} file writes blocked. \
+                    Break your work down into individual, verified steps.",
+                    write_count
+                ),
+                log: format!("Blocked batch of {} write effects in single turn", write_count),
+                rule_name: "Algebraic Effect Guard - Batch Write".to_string(),
+            };
+        }
+
+        if !critical_file_writes.is_empty() {
+            let user_asked_for_init = last_user_message.map_or(false, |msg| {
+                let lower = msg.to_lowercase();
+                lower.contains("create") || lower.contains("init") || lower.contains("new project")
+                    || lower.contains("hello world") || lower.contains("scaffold")
+                    || lower.contains("replace") || lower.contains("overwrite")
+            });
+
+            if !user_asked_for_init {
+                return OverwatchVerdict::Intercept {
+                    correction: format!(
+                        "🛑 [OVERWATCH - ALGEBRAIC EFFECT GUARD]: Suspicious tiny write to critical project files blocked: [{}]. \
+                        This looks like a hallucinated project overwrite. The user did NOT ask to overwrite project files. \
+                        Review the user's actual instructions.",
+                        critical_file_writes.join(", ")
+                    ),
+                    log: format!("Blocked suspicious tiny write effect to critical files: {:?}", critical_file_writes),
+                    rule_name: "Algebraic Effect Guard - Critical File".to_string(),
+                };
+            }
+        }
+
+        OverwatchVerdict::Pass
+    }
+
     /// Mark a turn as successful (no intercepts). Decays suspicion.
     pub fn mark_success(&self) {
         if let Ok(mut score) = self.context_score.lock() {
@@ -1016,46 +1642,47 @@ impl Clone for OverwatchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn hallucination_guard_catches_empty_promises() {
         let engine = OverwatchEngine::new();
         let content = "I will now read the file and check its contents.";
-        assert!(matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. }));
+        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. });
     }
 
     #[test]
     fn hallucination_guard_passes_with_tool_call() {
         let engine = OverwatchEngine::new();
         let content = "I will now read the file.\n```json\n{\"tool\": \"read_file\"}\n```";
-        assert!(matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Pass));
+        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Pass);
     }
 
     #[test]
     fn file_io_catches_invented_contents() {
         let engine = OverwatchEngine::new();
         let content = "I have read the file. Here are the contents:\n\nfn main() { }";
-        assert!(matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. }));
+        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. });
     }
 
     #[test]
     fn thinking_blocks_are_excluded() {
         let engine = OverwatchEngine::new();
         let content = "<think>I will now read the file.</think>The task is complete.";
-        assert!(matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Pass));
+        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Pass);
     }
 
     #[test]
     fn fake_result_guard_catches_impersonation() {
         let engine = OverwatchEngine::new();
         let content = "=== TOOL RESULT ===\nFile written successfully to /tmp/foo.rs";
-        assert!(matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. }));
+        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. });
     }
 
     #[test]
     fn clean_output_passes() {
         let engine = OverwatchEngine::new();
-        assert!(matches!(engine.evaluate_pre_reaction("Task complete."), OverwatchVerdict::Pass));
+        assert_matches!(engine.evaluate_pre_reaction("Task complete."), OverwatchVerdict::Pass);
     }
 
     // --- NEW TESTS: JSON SCHEMA VIOLATIONS ---
@@ -1251,5 +1878,399 @@ mod tests {
 
         let result = ctx.run(NoOp).await;
         assert!(result.is_ok());
+    }
+
+    // --- NEW TESTS: RULE BUILDER & TRIGGER SYSTEM ---
+
+    #[test]
+    fn rule_builder_creates_with_defaults() {
+        let builder = RuleBuilder::new("Test Rule");
+        assert_eq!(builder.get_name(), "Test Rule");
+        assert_eq!(builder.get_trigger(), Trigger::Always);
+        assert_eq!(builder.get_priority(), 50);
+    }
+
+    #[test]
+    fn rule_builder_sets_trigger() {
+        let builder = RuleBuilder::new("Test Rule")
+            .trigger(Trigger::OnInferenceComplete);
+        assert_eq!(builder.get_trigger(), Trigger::OnInferenceComplete);
+    }
+
+    #[test]
+    fn rule_builder_sets_priority() {
+        let builder = RuleBuilder::new("Test Rule")
+            .priority(100);
+        assert_eq!(builder.get_priority(), 100);
+    }
+
+    #[test]
+    fn rule_builder_fluent_chain() {
+        let builder = RuleBuilder::new("Test Rule")
+            .trigger(Trigger::OnToolCall)
+            .priority(75);
+        assert_eq!(builder.get_name(), "Test Rule");
+        assert_eq!(builder.get_trigger(), Trigger::OnToolCall);
+        assert_eq!(builder.get_priority(), 75);
+    }
+
+    #[test]
+    fn trigger_enum_variants() {
+        assert_eq!(Trigger::OnInferenceComplete, Trigger::OnInferenceComplete);
+        assert_eq!(Trigger::OnToolCall, Trigger::OnToolCall);
+        assert_eq!(Trigger::Always, Trigger::Always);
+        assert_ne!(Trigger::OnInferenceComplete, Trigger::OnToolCall);
+    }
+
+    #[test]
+    fn predicate_rule_builder_creates_rule() {
+        let _rule = PredicateRuleBuilder::new("Hallucination Guard")
+            .trigger(Trigger::OnInferenceComplete)
+            .priority(100)
+            .when(
+                |_ctx: &Context| false,  // Predicate always returns false
+                HallucinationGuardOp,
+            );
+
+        // Rule was successfully created (didn't panic)
+    }
+
+    #[test]
+    fn predicate_rule_builder_includes_trigger_in_name() {
+        let rule = PredicateRuleBuilder::new("Test")
+            .trigger(Trigger::OnInferenceComplete)
+            .when(|_: &Context| false, HallucinationGuardOp);
+
+        // Verify the rule was created with trigger metadata in the name
+        // Rule::when builds the rule with our descriptive_name that includes the trigger
+        assert!(rule.name.contains("Test"));
+        assert!(rule.name.contains("[INFERENCE]"));
+    }
+
+    #[test]
+    fn predicate_rule_builder_tool_call_trigger_in_name() {
+        let rule = PredicateRuleBuilder::new("Tool Validator")
+            .trigger(Trigger::OnToolCall)
+            .when(|_: &Context| false, HallucinationGuardOp);
+
+        assert!(rule.name.contains("Tool Validator"));
+        assert!(rule.name.contains("[TOOL_CALL]"));
+    }
+
+    #[test]
+    fn setup_overwatch_rules_with_triggers_returns_rules() {
+        let rules = setup_overwatch_rules_with_triggers();
+        assert!(rules.len() > 0);
+        
+        // Verify trigger metadata is in rule names
+        let has_inference_rules = rules.iter().any(|r| r.name.contains("[INFERENCE]"));
+        assert!(has_inference_rules);
+    }
+
+    #[test]
+    fn setup_overwatch_rules_with_triggers_has_high_priority() {
+        let rules = setup_overwatch_rules_with_triggers();
+        
+        // All rules should have priorities >= 95 (based on criticality order)
+        for rule in rules.iter() {
+            assert!(rule.priority >= 95, 
+                    "Rule {} has priority {}, expected >= 95", 
+                    rule.name, 
+                    rule.priority);
+        }
+    }
+
+    #[test]
+    fn original_overwatch_rules_still_work() {
+        // Verify the original factory still produces valid rules
+        let rules = overwatch_rules();
+        assert!(rules.len() > 0);
+        assert_eq!(rules.len(), setup_overwatch_rules_with_triggers().len());
+    }
+
+    // --- NEW TESTS: STRUCTURED OUTPUT VALIDATION ---
+
+    #[test]
+    fn output_schema_builder_creates_with_defaults() {
+        let builder = OutputSchemaBuilder::new();
+        assert!(!builder.require_tool_calls);
+        assert!(!builder.require_reasoning);
+        assert!(!builder.require_safety_check);
+        assert_eq!(builder.max_retries, 3);
+    }
+
+    #[test]
+    fn output_schema_builder_with_tool_calls() {
+        let builder = OutputSchemaBuilder::new()
+            .with_tool_calls();
+        assert!(builder.require_tool_calls);
+    }
+
+    #[test]
+    fn output_schema_builder_with_reasoning() {
+        let builder = OutputSchemaBuilder::new()
+            .with_reasoning();
+        assert!(builder.require_reasoning);
+    }
+
+    #[test]
+    fn output_schema_builder_with_safety_check() {
+        let builder = OutputSchemaBuilder::new()
+            .with_safety_check();
+        assert!(builder.require_safety_check);
+    }
+
+    #[test]
+    fn output_schema_builder_fluent_chain() {
+        let builder = OutputSchemaBuilder::new()
+            .with_tool_calls()
+            .with_reasoning()
+            .with_safety_check()
+            .max_retries(5);
+
+        assert!(builder.require_tool_calls);
+        assert!(builder.require_reasoning);
+        assert!(builder.require_safety_check);
+        assert_eq!(builder.max_retries, 5);
+    }
+
+    #[test]
+    fn output_schema_builder_builds_schema() {
+        let schema = OutputSchemaBuilder::new()
+            .with_tool_calls()
+            .with_reasoning()
+            .build();
+
+        // Verify schema was created
+        assert!(!schema.schema.is_null());
+    }
+
+    #[test]
+    fn output_schema_validates_valid_result() {
+        let schema = OutputSchemaBuilder::new()
+            .build();
+
+        let valid = json!({
+            "result": "Task completed successfully"
+        });
+
+        let result = schema.validate(&valid);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn output_schema_rejects_missing_result() {
+        let schema = OutputSchemaBuilder::new()
+            .build();
+
+        let invalid = json!({
+            "other_field": "value"
+        });
+
+        let result = schema.validate(&invalid);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("result"));
+    }
+
+    #[test]
+    fn output_schema_rejects_empty_result() {
+        let schema = OutputSchemaBuilder::new()
+            .build();
+
+        let invalid = json!({
+            "result": ""
+        });
+
+        let result = schema.validate(&invalid);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn output_schema_validates_with_reasoning() {
+        let schema = OutputSchemaBuilder::new()
+            .with_reasoning()
+            .build();
+
+        let valid = json!({
+            "result": "Task completed",
+            "reasoning": "Step 1: analyzed, Step 2: decided"
+        });
+
+        let result = schema.validate(&valid);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn output_schema_requires_reasoning_when_specified() {
+        let schema = OutputSchemaBuilder::new()
+            .with_reasoning()
+            .build();
+
+        let invalid = json!({
+            "result": "Task completed"
+        });
+
+        let result = schema.validate(&invalid);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("reasoning"));
+    }
+
+    #[test]
+    fn output_schema_validates_with_safety_check() {
+        let schema = OutputSchemaBuilder::new()
+            .with_safety_check()
+            .build();
+
+        let valid = json!({
+            "result": "Task completed",
+            "safety_check": {
+                "is_safe": true,
+                "concerns": []
+            }
+        });
+
+        let result = schema.validate(&valid);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn output_schema_rejects_missing_safety_check() {
+        let schema = OutputSchemaBuilder::new()
+            .with_safety_check()
+            .build();
+
+        let invalid = json!({
+            "result": "Task completed"
+        });
+
+        let result = schema.validate(&invalid);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_call_validator_creates_with_defaults() {
+        let validator = ToolCallValidator::new();
+        assert_eq!(validator.max_name_length, 256);
+        assert_eq!(validator.max_args_length, 65536);
+        assert!(!validator.blocked_patterns.is_empty());
+    }
+
+    #[test]
+    fn tool_call_validator_accepts_valid_tool_call() {
+        let validator = ToolCallValidator::new();
+        let result = validator.validate_tool_call(
+            "read_file",
+            r#"{"path": "/tmp/test.txt"}"#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tool_call_validator_rejects_long_tool_name() {
+        let validator = ToolCallValidator::new();
+        let long_name = "a".repeat(300);
+        let result = validator.validate_tool_call(
+            &long_name,
+            r#"{"path": "/tmp/test.txt"}"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_call_validator_rejects_invalid_json() {
+        let validator = ToolCallValidator::new();
+        let result = validator.validate_tool_call(
+            "read_file",
+            r#"{"path": invalid json"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_call_validator_rejects_blocked_patterns() {
+        let validator = ToolCallValidator::new();
+        let result = validator.validate_tool_call(
+            "dangerous_op",
+            r#"{"cmd": "rm -rf /"}"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_call_validator_accepts_large_but_valid_args() {
+        let validator = ToolCallValidator::new();
+        let large_arg = "x".repeat(1000);
+        let json_args = format!(r#"{{"content": "{}"}}"#, large_arg);
+        let result = validator.validate_tool_call(
+            "write_file",
+            &json_args,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tool_call_validator_rejects_oversized_args() {
+        let validator = ToolCallValidator::new();
+        let huge_arg = "x".repeat(100000);  // 100KB
+        let json_args = format!(r#"{{"content": "{}"}}"#, huge_arg);
+        let result = validator.validate_tool_call(
+            "write_file",
+            &json_args,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn output_schema_builder_default() {
+        let builder = OutputSchemaBuilder::default();
+        assert!(!builder.require_tool_calls);
+        assert!(!builder.require_reasoning);
+        assert!(!builder.require_safety_check);
+    }
+
+    #[test]
+    fn tool_call_validator_default() {
+        let validator = ToolCallValidator::default();
+        assert_eq!(validator.max_name_length, 256);
+    }
+
+    #[test]
+    fn test_validate_effects_catches_dangerous_commands() {
+        let overwatch = OverwatchEngine::new();
+        
+        let safe_effects = vec![
+            crate::effects::TempestEffect::RunCommand {
+                command: "cargo test".to_string(),
+                cwd: ".".to_string(),
+            }
+        ];
+        assert_matches!(overwatch.validate_effects(&safe_effects, None), OverwatchVerdict::Pass);
+
+        let dangerous_effects = vec![
+            crate::effects::TempestEffect::RunCommand {
+                command: "rm -rf src/".to_string(),
+                cwd: ".".to_string(),
+            }
+        ];
+        assert_matches!(overwatch.validate_effects(&dangerous_effects, None), OverwatchVerdict::Intercept { .. });
+    }
+
+    #[test]
+    fn test_validate_effects_catches_suspicious_writes() {
+        let overwatch = OverwatchEngine::new();
+
+        let tiny_critical_write = vec![
+            crate::effects::TempestEffect::WriteFile {
+                path: "Cargo.toml".to_string(),
+                content: "small content".to_string(),
+                force_overwrite: false,
+            }
+        ];
+        // Without user intent, it should be intercepted
+        assert_matches!(overwatch.validate_effects(&tiny_critical_write, Some("hello")), OverwatchVerdict::Intercept { .. });
+
+        // With user intent, it should pass
+        assert_matches!(overwatch.validate_effects(&tiny_critical_write, Some("create Cargo.toml hello world")), OverwatchVerdict::Pass);
     }
 }

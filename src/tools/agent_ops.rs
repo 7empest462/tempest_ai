@@ -3,7 +3,7 @@ use colored::Colorize;
 use miette::{Result, IntoDiagnostic, miette};
 use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
-use ollama_rs::generation::chat::{request::ChatMessageRequest, ChatMessage, MessageRole};
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
@@ -116,22 +116,41 @@ impl AgentTool for SpawnSubAgentTool {
         let sub_history = vec![
             ChatMessage::new(MessageRole::System, "You are a specialized Disciplined Sub-Agent. \
                  Perform the focused mission described below. \
+                 You must communicate using the Agent Client Protocol (ACP). \
                  1. NO HALLUCINATION: Be honest if you find no data. \
                  2. NO PREAMBLE: Output your report directly without 'Sure' or 'Here is'. \
                  3. CONCISE: Provide critical details first.".to_string()),
-            ChatMessage::new(MessageRole::User, task.to_string()),
+            ChatMessage::new(MessageRole::User, format!("{{\"jsonrpc\": \"2.0\", \"method\": \"prompt\", \"params\": {{\"task\": \"{}\"}}}}", task)),
         ];
-        
-        let req = ChatMessageRequest::new(model, sub_history);
-        let response = context.ollama.send_chat_messages(req).await;
-        
+
+        let backend = context.backend.read().await;
+        let sampling = crate::inference::SamplingConfig {
+            temperature: 0.1,
+            top_p: 0.9,
+            repeat_penalty: 1.1,
+            context_size: 16384,
+        };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let event_tx = std::sync::Arc::new(parking_lot::Mutex::new(None));
+
+        let response = backend.stream_chat(
+            model,
+            sub_history,
+            sampling,
+            event_tx,
+            stop,
+            "".to_string(),
+            None,
+            None, // No tools for sub-agent yet to avoid recursive loop
+        ).await;
+
         // Clear HUD
         if let Some(ref tx) = context.tx {
             let _ = tx.send(crate::tui::AgentEvent::SubagentStatus(None)).await;
         }
 
         match response {
-            Ok(res) => Ok(format!("[SUB-AGENT REPORT]: {}", res.message.content)),
+            Ok(res) => Ok(format!("[SUB-AGENT ACP REPORT]: {}", res.content)),
             Err(e) => Err(miette!("Sub-agent error: {}", e)),
         }
     }
@@ -233,6 +252,9 @@ impl AgentTool for QuerySchemaTool {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct NoOpArgs {}
+
 pub struct NoOpTool;
 
 #[async_trait]
@@ -243,7 +265,7 @@ impl AgentTool for NoOpTool {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
         let generator = settings.into_generator();
-        let payload = generator.into_root_schema_for::<()>(); // Use unit type for no arguments
+        let payload = generator.into_root_schema_for::<NoOpArgs>(); // Use explicit empty struct for no arguments
 
         ollama_rs::generation::tools::ToolInfo {
             tool_type: ollama_rs::generation::tools::ToolType::Function,
@@ -257,5 +279,20 @@ impl AgentTool for NoOpTool {
 
     async fn execute(&self, _args: &Value, _context: ToolContext) -> Result<String> {
         Ok("No operation performed. Continuing in planning mode.".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_noop_tool_schema() {
+        let tool = NoOpTool;
+        let info = tool.tool_info();
+        let schema_val = serde_json::to_value(&info.function.parameters).unwrap();
+        
+        // Assert that the parameters schema is an object and contains type = "object"
+        assert_eq!(schema_val.get("type").and_then(|v| v.as_str()), Some("object"));
     }
 }

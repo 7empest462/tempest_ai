@@ -5,7 +5,8 @@ use super::{AgentTool, ToolContext};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
-use arborium::tree_sitter::{Parser, Node, Language};
+use arborium::tree_sitter::{Parser, Node, Language, Query, QueryCursor};
+use streaming_iterator::StreamingIterator;
 
 /// Detect the tree-sitter language from a file extension.
 fn language_for_extension(ext: &str) -> Option<Language> {
@@ -245,3 +246,130 @@ impl AgentTool for AstEditTool {
         ))
     }
 }
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AstQueryArgs {
+    /// File extension representing the language to query (e.g. "rs", "py", "ts", "js").
+    pub language: String,
+    /// The root directory to search in (e.g., "." or "src").
+    pub path: String,
+    /// The Tree-Sitter S-expression query.
+    pub query: String,
+}
+
+pub struct AstQueryTool;
+
+#[async_trait]
+impl AgentTool for AstQueryTool {
+    fn name(&self) -> &'static str { "ast_query" }
+    fn description(&self) -> &'static str { 
+        "Advanced Semantic Code Search using Tree-Sitter S-expressions. Allows structural searching across a directory.
+EXAMPLES (for Rust `rs`):
+1. Find all functions taking a specific type (e.g. String):
+   (function_item parameters: (parameters (parameter type: (_) @type (#match? @type \"String\")))) @func
+2. Find all structs:
+   (struct_item name: (type_identifier) @name) @struct
+3. Find all impl blocks for a specific trait:
+   (impl_item trait: (type_identifier) @trait (#eq? @trait \"AgentTool\")) @impl
+NOTE: You MUST use a valid tree-sitter S-expression query. Only matches the specific language extension."
+    }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let payload = settings.into_generator().into_root_schema_for::<AstQueryArgs>();
+        
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload.into(),
+            }
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: AstQueryArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let path_owned = shellexpand::tilde(&typed_args.path).to_string();
+        let lang_ext = typed_args.language.trim_start_matches('.');
+        
+        let language = language_for_extension(lang_ext)
+            .ok_or_else(|| miette!("Unsupported file extension: '{}'. Supported: any language enabled in arborium config.", lang_ext))?;
+
+        let query = Query::new(&language, &typed_args.query)
+            .map_err(|e| miette!("Invalid Tree-Sitter query: {:?}", e))?;
+
+        let walker = ignore::WalkBuilder::new(&path_owned).build();
+        let mut results = Vec::new();
+        let mut files_scanned = 0;
+        let mut match_count = 0;
+
+        for result in walker {
+            let entry = match result {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if !path.is_file() { continue; }
+            
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext != lang_ext { continue; }
+            } else {
+                continue;
+            }
+
+            files_scanned += 1;
+            
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let mut parser = Parser::new();
+            if parser.set_language(&language).is_err() { continue; }
+            
+            let tree = match parser.parse(&source, None) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let mut cursor = QueryCursor::new();
+            let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+            
+            let mut file_matches = Vec::new();
+            while let Some(m) = matches.next() {
+                for capture in m.captures {
+                    let start = capture.node.start_position();
+                    let end = capture.node.end_position();
+                    let text = &source[capture.node.start_byte()..capture.node.end_byte()];
+                    let snippet = text.lines().take(5).collect::<Vec<_>>().join("\n");
+                    let suffix = if text.lines().count() > 5 { "\n..." } else { "" };
+                    
+                    file_matches.push(format!("  [L{}-L{}] matched node:\n    {}{}", start.row + 1, end.row + 1, snippet.replace("\n", "\n    "), suffix));
+                    match_count += 1;
+                }
+            }
+            
+            if !file_matches.is_empty() {
+                results.push(format!("📄 {}\n{}", path.display(), file_matches.join("\n")));
+            }
+        }
+
+        if results.is_empty() {
+            Ok(format!("No matches found for query in {} files scanned.", files_scanned))
+        } else {
+            let limit = 50;
+            let total_files_matched = results.len();
+            let display_results = if results.len() > limit {
+                results.truncate(limit);
+                format!("{}\n\n... and {} more files.", results.join("\n\n"), total_files_matched - limit)
+            } else {
+                results.join("\n\n")
+            };
+            
+            Ok(format!("🔍 AST Search Results ({} matches in {} files, {} total files scanned):\n\n{}", match_count, total_files_matched, files_scanned, display_results))
+        }
+    }
+}
+

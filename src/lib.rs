@@ -7,6 +7,7 @@ pub mod hardware;
 pub mod daemon;
 pub mod tui;
 pub mod vector_brain;
+pub mod tool_rag;
 pub mod skills;
 pub mod context_manager;
 pub mod error_classifier;
@@ -23,6 +24,12 @@ pub mod mcp_protocol;
 pub mod ai_bridge;
 pub mod test_types;
 pub mod overwatch;
+pub mod skg_adapter;
+pub mod effects;
+pub mod turn_kit;
+pub mod wasm_engine;
+#[cfg(test)]
+pub mod test_json_stop;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,6 +60,8 @@ pub struct AppConfig {
     pub sub_agent_model: Option<String>,
     pub mlx_model: Option<String>,
     pub mlx_quant: Option<String>,
+    pub kalosm_model: Option<String>,
+    pub gemini_model: Option<String>,
     pub paged_attn: Option<bool>,
     pub planner_model: Option<String>,
     pub executor_model: Option<String>,
@@ -80,6 +89,7 @@ pub struct AppConfig {
     pub nexus_port: Option<u16>,
     pub metrics_port: Option<u16>,
     pub pa_memory_mb: Option<usize>,
+    pub vram_time_sharing: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -112,6 +122,8 @@ impl Default for AppConfig {
             sub_agent_model: Some("llama3.2:1b".to_string()),
             mlx_model: Some("/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string()),
             mlx_quant: Some("None".to_string()),
+            kalosm_model: Some("kalosm_default".to_string()),
+            gemini_model: Some("gemini-3.5-flash".to_string()),
             paged_attn: Some(true),
             planner_model: Some("deepseek-r1:8b".to_string()),
             executor_model: Some("qwen2.5-coder:7b".to_string()),
@@ -139,6 +151,7 @@ impl Default for AppConfig {
             nexus_port: Some(8080),
             metrics_port: Some(7777),
             pa_memory_mb: None,
+            vram_time_sharing: Some(false),
         }
     }
 }

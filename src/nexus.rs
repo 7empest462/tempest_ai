@@ -187,6 +187,18 @@ pub async fn run_nexus(
                             }
                         }
                     }
+                    crate::tui::AgentEvent::ToolSuccess { name } => {
+                        let res = NexusResponse::ToolResult { name, success: true };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::ToolError { name, error: _ } => {
+                        let res = NexusResponse::ToolResult { name, success: false };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -251,7 +263,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
     tokio::spawn(async move {
         let mut sys = System::new_all();
         loop {
-            sys.refresh_all();
+            sys.refresh_cpu_all();
+            sys.refresh_memory();
             let cpu = sys.global_cpu_usage();
             let used_ram = sys.used_memory() / 1024 / 1024;
             let total_ram = sys.total_memory() / 1024 / 1024;
@@ -259,11 +272,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
             let gpu = {
                 #[cfg(target_os = "macos")]
                 {
-                    tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32
+                    tokio::task::spawn_blocking(|| {
+                        tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32
+                    }).await.unwrap_or(0.0)
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    tempest_monitor::linux_helper::collect_gpu_telemetry().usage_pct as f32
+                    tokio::task::spawn_blocking(|| {
+                        tempest_monitor::linux_helper::collect_gpu_telemetry().usage_pct as f32
+                    }).await.unwrap_or(0.0)
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 {
@@ -301,7 +318,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                 let pty_pair_clone = pty_pair.clone();
                 match req {
                     NexusRequest::Chat { message, editor_context } => {
-                        // Reset stop flag before starting a new run
+                        // Abort any previous active runs gracefully by setting the stop flag
+                        state.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Wait a brief moment to allow active stream and execution loops to exit cleanly
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        // Reset stop flag for the new run
                         state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         let stop_flag = state.stop_flag.clone();
                         

@@ -22,6 +22,9 @@ pub struct WriteFileArgs {
     pub path: String,
     /// Full content to write.
     pub content: String,
+    /// Set to true to force overwrite even if the new content is significantly shorter than the existing file. Required when intentionally replacing a large file with a small one.
+    #[serde(default)]
+    pub force_overwrite: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -140,8 +143,9 @@ impl AgentTool for WriteFileTool {
             return Err(miette!("Guardrail: Placeholder detected. You must provide the full file content. Do NOT use ellipsis or comments as placeholders."));
         }
 
-        let mut warning = String::new();
-        // Accidental Truncation Guard: If the new file is significantly shorter than the old one, warn.
+        // 🛡️ DESTRUCTIVE WRITE GUARD: If the new file is significantly shorter than the old one, BLOCK the write.
+        // This guard was upgraded from a warning to a hard block after an incident where a hallucinating 
+        // model overwrote Cargo.toml (4125→75 bytes) and src/main.rs (32764→44 bytes), destroying the project.
         if let Ok(meta) = fs::metadata(&path) {
             let old_len = meta.len();
             let new_len = content.len() as u64;
@@ -150,8 +154,15 @@ impl AgentTool for WriteFileTool {
             let old_line_count = old_content_res.as_ref().map(|s| s.lines().count()).unwrap_or(0);
             let new_line_count = content.lines().count();
 
-            if (old_len > 100 && new_len < old_len / 2) || (old_line_count > 5 && new_line_count == 1) {
-                warning = format!("\n\n⚠️  [WARNING]: This write significantly TRUNCATED or SIMPLIFIED the file ({} -> {} bytes, {} -> {} lines). Ensure this was intentional and you didn't accidentally overwrite code with documentation.", old_len, new_len, old_line_count, new_line_count);
+            let is_destructive = (old_len > 100 && new_len < old_len / 2) || (old_line_count > 5 && new_line_count == 1);
+
+            if is_destructive && !typed_args.force_overwrite {
+                return Err(miette!(
+                    "🛑 [DESTRUCTIVE WRITE BLOCKED]: This write would TRUNCATE '{}' from {} to {} bytes ({} to {} lines). \
+                    This looks like an accidental overwrite. If this is intentional, re-call write_file with force_overwrite: true. \
+                    For targeted edits, use edit_file_with_diff instead.",
+                    path.display(), old_len, new_len, old_line_count, new_line_count
+                ));
             }
         }
 
@@ -177,7 +188,7 @@ impl AgentTool for WriteFileTool {
             });
         }
         
-        Ok(format!("Successfully wrote {} bytes to {}. Please verify the file content is correct.{}", content.len(), path.display(), warning))
+        Ok(format!("Successfully wrote {} bytes to {}. Please verify the file content is correct.", content.len(), path.display()))
     }
 }
 
@@ -204,7 +215,10 @@ impl AgentTool for ListDirTool {
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: ListDirArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
-        let path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
+        let mut path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
+        if path_val.is_empty() {
+            path_val = ".".to_string();
+        }
         let path_owned = shellexpand::tilde(&path_val).to_string();
         
         // Move blocking directory operations to a dedicated thread pool
@@ -245,7 +259,10 @@ impl AgentTool for SearchFilesTool {
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: SearchFilesArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let pattern = typed_args.pattern;
-        let path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
+        let mut path_val = typed_args.path.unwrap_or_else(|| ".".to_string());
+        if path_val.is_empty() {
+            path_val = ".".to_string();
+        }
         let path_owned = shellexpand::tilde(&path_val).to_string();
         
         use walkdir::WalkDir;

@@ -16,6 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
     Frame, Terminal,
 };
+use rat_focus::HasFocus;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::{ThemeSet, Style as SyntectStyle};
 use syntect::easy::HighlightLines;
@@ -60,14 +61,11 @@ pub enum ToolResponse {
     Error(String),
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum FocusedPane {
-    Chat,
-    Reasoning,
-    Explorer,
-    CommandPalette,
-    Viewer,
+enum TuiEvent {
+    AudioChunk(String),
+    AudioStatus(String),
 }
+
 
 #[derive(Debug, Clone)]
 pub struct ExplorerEntry {
@@ -78,7 +76,7 @@ pub struct ExplorerEntry {
 }
 
 pub struct App {
-    pub input_buffer: String,
+    pub input_buffer: rat_text::text_area::TextAreaState,
     pub messages: Vec<String>,
     pub current_stream: String,
     pub active_tool: Option<String>,
@@ -100,7 +98,10 @@ pub struct App {
     pub active_sentinels: Vec<String>,
     pub sentinel_log: Vec<String>,
     pub engine_status: Option<String>,
-    pub focused_pane: FocusedPane,
+    pub focus: rat_focus::Focus,
+    pub explorer_focus: rat_focus::FocusFlag,
+    pub viewer_focus: rat_focus::FocusFlag,
+    pub reasoning_focus: rat_focus::FocusFlag,
     pub show_reasoning: bool,
     pub show_explorer: bool,
     pub explorer_files: Vec<ExplorerEntry>,
@@ -116,9 +117,14 @@ pub struct App {
     pub tps_history: Vec<u64>, // Tokens Per Second
     // --- ⌨️ COMMAND PALETTE STATE ---
     pub show_command_palette: bool,
-    pub command_palette_query: String,
+    
     pub command_palette_options: Vec<String>,
-    pub command_palette_state: ratatui::widgets::ListState,
+    pub command_palette_state: rat_menu::popup_menu::PopupMenuState,
+
+    // --- 📂 EXPLORER CONTEXT MENU ---
+    pub show_context_menu: bool,
+    pub context_menu_options: Vec<String>,
+    pub context_menu_state: rat_menu::popup_menu::PopupMenuState,
     pub current_theme: String,
     pub explorer_root: PathBuf,
     pub explorer_query: String,
@@ -128,12 +134,16 @@ pub struct App {
     pub viewer_scroll: u16,
     pub viewer_editor: Option<TextArea<'static>>,
     pub is_editing: bool,
+    pub is_recording: bool,
+    pub recording_status: Option<String>,
+    pub audio_cmd_tx: Option<tokio::sync::mpsc::Sender<AudioCommand>>,
 }
 
 impl App {
     pub fn new(initial_theme: String) -> Self {
+        let input_state = rat_text::text_area::TextAreaState::default();
         Self {
-            input_buffer: String::new(),
+            input_buffer: input_state,
             messages: Vec::new(),
             current_stream: String::new(),
             active_tool: None,
@@ -155,7 +165,10 @@ impl App {
             active_sentinels: Vec::new(),
             sentinel_log: Vec::new(),
             engine_status: None,
-            focused_pane: FocusedPane::Chat,
+            focus: rat_focus::Focus::default(),
+            explorer_focus: rat_focus::FocusFlag::new().with_name("Explorer"),
+            viewer_focus: rat_focus::FocusFlag::new().with_name("Viewer"),
+            reasoning_focus: rat_focus::FocusFlag::new().with_name("Reasoning"),
             show_reasoning: false,
             show_explorer: false,
             explorer_files: Vec::new(),
@@ -169,7 +182,7 @@ impl App {
             ram_history: Vec::new(),
             tps_history: Vec::new(),
             show_command_palette: false,
-            command_palette_query: String::new(),
+            
             command_palette_options: vec![
                 "Hot-Swap: DeepSeek R1 (Distill)".to_string(),
                 "Hot-Swap: Qwen 2.5 Coder".to_string(),
@@ -183,7 +196,10 @@ impl App {
                 "Theme: Solarized (Dark)".to_string(),
                 "Theme: Solarized (Light)".to_string(),
             ],
-            command_palette_state: ratatui::widgets::ListState::default(),
+            command_palette_state: rat_menu::popup_menu::PopupMenuState::default(),
+            show_context_menu: false,
+            context_menu_options: Vec::new(),
+            context_menu_state: rat_menu::popup_menu::PopupMenuState::default(),
             current_theme: initial_theme,
             explorer_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             explorer_query: String::new(),
@@ -192,6 +208,9 @@ impl App {
             viewer_scroll: 0,
             viewer_editor: None,
             is_editing: false,
+            is_recording: false,
+            recording_status: None,
+            audio_cmd_tx: None,
         }
     }
 
@@ -237,8 +256,9 @@ impl App {
             }
         }
 
+        use rayon::prelude::*;
         // Sort: Dirs first, then alpha
-        files.sort_by(|a, b| {
+        files.par_sort_by(|a, b| {
             if a.is_dir != b.is_dir {
                 b.is_dir.cmp(&a.is_dir)
             } else {
@@ -248,13 +268,53 @@ impl App {
         self.explorer_files = files;
     }
 
+    pub fn rebuild_focus(&mut self) {
+        use rat_focus::FocusBuilder;
+        let mut b = FocusBuilder::new(Some(self.focus.clone()));
+        
+        b.widget(&self.input_buffer);
+        
+        if self.show_explorer {
+            b.widget(&self.explorer_focus);
+        }
+        
+        if self.viewer_content.is_some() {
+            b.widget(&self.viewer_focus);
+        }
+        
+        if self.show_reasoning {
+            b.widget(&self.reasoning_focus);
+        }
+        
+        if self.show_command_palette {
+            b.widget(&self.command_palette_state);
+        }
+
+        if self.show_context_menu {
+            b.widget(&self.context_menu_state);
+        }
+        
+        self.focus = b.build();
+        
+        // Ensure there is always a focused pane
+        if !self.input_buffer.is_focused() 
+            && !self.explorer_focus.get() 
+            && !self.viewer_focus.get() 
+            && !self.reasoning_focus.get() 
+            && !self.command_palette_state.is_focused()
+            && !self.context_menu_state.is_focused() {
+            
+            self.focus.focus(&self.input_buffer);
+        }
+    }
+
     pub fn push_message(&mut self, msg: String) {
         self.messages.push(msg);
         if self.messages.len() > 1000 {
             self.messages.remove(0);
         }
         // Ensure scroll follows new messages if focused
-        if self.focused_pane == FocusedPane::Chat {
+        if self.input_buffer.is_focused() {
             self.list_state.select(Some(self.messages.len().saturating_sub(1)));
         }
     }
@@ -302,6 +362,12 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum AudioCommand {
+    Start,
+    Stop,
+}
+
 pub async fn run_tui(
     mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, 
     user_tx: tokio::sync::mpsc::Sender<String>, 
@@ -315,6 +381,114 @@ pub async fn run_tui(
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).into_diagnostic()?;
 
     let mut app = App::new(initial_theme);
+    app.rebuild_focus();
+    let (tui_event_tx, mut tui_event_rx) = tokio::sync::mpsc::channel::<TuiEvent>(100);
+    
+    let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel::<AudioCommand>(10);
+    app.audio_cmd_tx = Some(audio_cmd_tx);
+
+    let tui_event_tx_clone = tui_event_tx.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async move {
+            use kalosm_sound::AsyncSourceTranscribeExt;
+            static WHISPER_MODEL: tokio::sync::OnceCell<kalosm_sound::Whisper> = tokio::sync::OnceCell::const_new();
+
+            let mut active_recording_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+
+            // Loop to process Start/Stop commands asynchronously
+            while let Some(cmd) = audio_cmd_rx.recv().await {
+                match cmd {
+                    AudioCommand::Start => {
+                        if let Some(cancel) = active_recording_cancel_tx.take() {
+                            let _ = cancel.send(());
+                        }
+
+                        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                        active_recording_cancel_tx = Some(cancel_tx);
+
+                        let tui_event_tx = tui_event_tx_clone.clone();
+
+                        tokio::spawn(async move {
+                            // Initialize Whisper model lazily on this persistent thread
+                            let model_init = WHISPER_MODEL.get_or_init(|| async {
+                                kalosm_sound::Whisper::new()
+                                    .await
+                                    .expect("Failed to initialize Whisper model")
+                            }).await;
+
+                            let stream_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                 let mic = kalosm_sound::MicInput::default();
+                                 mic.stream()
+                             }));
+
+                             let stream = match stream_res {
+                                 Ok(s) => s,
+                                 Err(e) => {
+                                     let err_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                                         s.to_string()
+                                     } else if let Some(s) = e.downcast_ref::<String>() {
+                                         s.clone()
+                                     } else {
+                                         "Error starting stream: Requested stream configuration is not supported by the device".to_string()
+                                     };
+                                     let _ = tui_event_tx.send(TuiEvent::AudioStatus(format!("⚠️ {}", err_msg))).await;
+                                     return;
+                                 }
+                             };
+                            
+                             let _ = tui_event_tx.send(TuiEvent::AudioStatus("🎙️ Speak now! [Ctrl+G to stop]".to_string())).await;
+                             
+                             use futures::StreamExt;
+                             let mut text_stream = stream.transcribe(model_init.clone());
+                              #[cfg(target_os = "macos")]
+                              unsafe extern "C" {
+                                  fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+                                  fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+                              }
+
+                              tokio::select! {
+                                  _ = &mut cancel_rx => {
+                                      // Stopped by user
+                                  }
+                                  _ = async {
+                                      loop {
+                                          #[cfg(target_os = "macos")]
+                                          let pool_addr: usize = unsafe { objc_autoreleasePoolPush() as usize };
+
+                                          let transcription_opt = text_stream.next().await;
+
+                                          #[cfg(target_os = "macos")]
+                                          unsafe { objc_autoreleasePoolPop(pool_addr as *mut std::ffi::c_void) };
+
+                                          if let Some(transcription) = transcription_opt {
+                                              let text = transcription.text().to_string();
+                                              let _ = tui_event_tx.send(TuiEvent::AudioChunk(text)).await;
+                                              tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                                          } else {
+                                              break;
+                                          }
+                                      }
+                                  } => {}
+                              }
+                              
+                              let _ = tui_event_tx.send(TuiEvent::AudioStatus("".to_string())).await;
+                        });
+                    }
+                    AudioCommand::Stop => {
+                        if let Some(cancel) = active_recording_cancel_tx.take() {
+                            let _ = cancel.send(());
+                        }
+                    }
+                }
+            }
+        });
+    });
+
     let tick_rate = Duration::from_millis(50);
     let mut last_tick = Instant::now();
 
@@ -328,6 +502,200 @@ pub async fn run_tui(
         if event::poll(timeout).into_diagnostic()? {
             let ev = event::read().into_diagnostic()?;
             
+            use rat_event::{HandleEvent, Regular, Outcome};
+            let focus_outcome = app.focus.handle(&ev, Regular);
+            if focus_outcome == Outcome::Changed {
+                continue;
+            }
+            
+            // --- COMMAND PALETTE POPUP EVENTS ---
+            if app.show_command_palette {
+                use rat_event::{HandleEvent, Popup};
+                use rat_menu::event::MenuOutcome;
+                match app.command_palette_state.handle(&ev, Popup) {
+                    MenuOutcome::Activated(idx) => {
+                        if let Some(opt) = app.command_palette_options.get(idx) {
+                            let option = opt.clone();
+                            app.push_message(format!("⚡ [PALETTE]: Executing '{}'", option));
+                            
+                            if option.starts_with("Theme: ") {
+                                let theme_name = match option.as_str() {
+                                    "Theme: Base16 Ocean (Dark)" => "base16-ocean.dark",
+                                    "Theme: Base16 Mocha" => "base16-mocha.dark",
+                                    "Theme: Base16 Eighties" => "base16-eighties.dark",
+                                    "Theme: Solarized (Dark)" => "Solarized (dark)",
+                                    "Theme: Solarized (Light)" => "Solarized (light)",
+                                    _ => "base16-ocean.dark",
+                                };
+                                app.current_theme = theme_name.to_string();
+                                app.push_message(format!("🎨 Aesthetic updated to {}", theme_name));
+                                
+                                // --- 💾 PERSIST TO CONFIG.TOML ---
+                                if let Ok(mut content) = std::fs::read_to_string("config.toml") {
+                                    let re = regex::Regex::new(r#"(?m)^tui_theme\s*=\s*".*""#).unwrap();
+                                    if re.is_match(&content) {
+                                        content = re.replace(&content, &format!(r#"tui_theme = "{}""#, theme_name)).into_owned();
+                                    } else {
+                                        if content.contains("[🧹 BASE SETTINGS]") {
+                                            content = content.replace("[🧹 BASE SETTINGS]", &format!("[🧹 BASE SETTINGS]\ntui_theme = \"{}\"", theme_name));
+                                        } else {
+                                            content.push_str(&format!("\ntui_theme = \"{}\"\n", theme_name));
+                                        }
+                                    }
+                                    let _ = std::fs::write("config.toml", content);
+                                }
+                            } else {
+                                let cmd = match option.as_str() {
+                                    "Hot-Swap: DeepSeek R1 (Distill)" => "/switch deepseek-r1:8b".to_string(),
+                                    "Hot-Swap: Qwen 2.5 Coder" => "/switch qwen2.5-coder:7b".to_string(),
+                                    "Toggle Safe Mode: ON/OFF" => "/safemode".to_string(),
+                                    "Recall: Latest Memory Item" => "/recall".to_string(),
+                                    "System: Compact Context" => "/compact".to_string(),
+                                    "Sentinel: Toggle Hardcore Mode" => "/toggle_hardcore".to_string(),
+                                    other => format!("/{}", other.to_lowercase().replace(' ', "_")),
+                                };
+                                let _ = user_tx.send(cmd).await;
+                            }
+                        }
+                        app.show_command_palette = false;
+                        app.rebuild_focus();
+                        app.focus.focus(&app.input_buffer);
+                        continue;
+                    },
+                    MenuOutcome::Selected(_) => {
+                        continue;
+                    },
+                    MenuOutcome::Hide => {
+                        app.show_command_palette = false;
+                                app.rebuild_focus();
+                        app.focus.focus(&app.input_buffer);
+                        continue;
+                    },
+                    MenuOutcome::Changed | MenuOutcome::Unchanged => {
+                        if let Event::Key(key) = ev {
+                            if key.code == KeyCode::Esc {
+                                app.show_command_palette = false;
+                                app.rebuild_focus();
+                                app.focus.focus(&app.input_buffer);
+                            }
+                        }
+                        continue;
+                    },
+                    MenuOutcome::Continue => {
+                        if let Event::Key(key) = ev {
+                            if key.code == KeyCode::Esc {
+                                app.show_command_palette = false;
+                                app.rebuild_focus();
+                                app.focus.focus(&app.input_buffer);
+                                continue;
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+
+            // --- CONTEXT MENU POPUP EVENTS ---
+            if app.show_context_menu {
+                use rat_event::{HandleEvent, Popup};
+                use rat_menu::event::MenuOutcome;
+                match app.context_menu_state.handle(&ev, Popup) {
+                    MenuOutcome::Activated(idx) => {
+                        if let Some(opt) = app.context_menu_options.get(idx) {
+                            let option = opt.clone();
+                            if let Some(explorer_idx) = app.explorer_state.selected() {
+                                if let Some((entry_name, _entry_is_dir)) = app.explorer_files.get(explorer_idx).map(|e| (e.name.clone(), e.is_dir)) {
+                                    let full_path = app.current_explorer_dir.join(&entry_name);
+                                    let full_path_str = full_path.to_string_lossy().into_owned();
+                                    
+                                    app.push_message(format!("⚡ [MENU]: Executing '{}' on {}", option, entry_name));
+                                    
+                                    let cmd = match option.as_str() {
+                                        "View / Edit File" => {
+                                            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                                app.viewer_content = Some((full_path_str.clone(), content.clone()));
+                                                app.rebuild_focus();
+                                                app.viewer_scroll = 0;
+                                                let mut textarea = TextArea::from(content.lines().map(String::from));
+                                                textarea.set_block(Block::default().borders(Borders::ALL).title(format!(" 📝 EDITING: {} ", full_path_str)));
+                                                app.viewer_editor = Some(textarea);
+                                                app.is_editing = false;
+                                                app.focus.focus(&app.viewer_focus);
+                                            }
+                                            None
+                                        },
+                                        "Analyze Code with Tempest" => {
+                                            Some(format!("Explain this code and check for issues in: {}", full_path_str))
+                                        },
+                                        "Stage changes (Git Add)" => {
+                                            Some(format!("Stage this file to git: {}", full_path_str))
+                                        },
+                                        "Delete File safely" | "Delete Directory" => {
+                                            Some(format!("Delete this file safely: {}", full_path_str))
+                                        },
+                                        "Open Directory" => {
+                                            app.current_explorer_dir.push(&entry_name);
+                                            app.refresh_explorer();
+                                            app.explorer_state.select(Some(0));
+                                            None
+                                        },
+                                        "List Files with Tempest" => {
+                                            Some(format!("List files in this directory using Tempest: {}", full_path_str))
+                                        },
+                                        "Create Subdirectory" => {
+                                            Some(format!("Create a new subdirectory inside: {}", full_path_str))
+                                        },
+                                        _ => None,
+                                    };
+                                    
+                                    if let Some(cmd_str) = cmd {
+                                        app.push_message(format!("You: {}", cmd_str));
+                                        let _ = user_tx.send(cmd_str).await;
+                                        app.focus.focus(&app.input_buffer);
+                                    }
+                                }
+                            }
+                        }
+                        app.show_context_menu = false;
+                        app.rebuild_focus();
+                        if !app.viewer_focus.get() {
+                            app.focus.focus(&app.explorer_focus);
+                        }
+                        continue;
+                    },
+                    MenuOutcome::Selected(_) => {
+                        continue;
+                    },
+                    MenuOutcome::Hide => {
+                        app.show_context_menu = false;
+                        app.rebuild_focus();
+                        app.focus.focus(&app.explorer_focus);
+                        continue;
+                    },
+                    MenuOutcome::Changed | MenuOutcome::Unchanged => {
+                        if let Event::Key(key) = ev {
+                            if key.code == KeyCode::Esc {
+                                app.show_context_menu = false;
+                                app.rebuild_focus();
+                                app.focus.focus(&app.explorer_focus);
+                            }
+                        }
+                        continue;
+                    },
+                    MenuOutcome::Continue => {
+                        if let Event::Key(key) = ev {
+                            if key.code == KeyCode::Esc {
+                                app.show_context_menu = false;
+                                app.rebuild_focus();
+                                app.focus.focus(&app.explorer_focus);
+                                continue;
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+
             // --- 🖱️ MOUSE HIT-TESTING ---
             if let Event::Mouse(mev) = &ev {
                 if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = mev.kind {
@@ -362,32 +730,32 @@ pub async fn run_tui(
                     let mut current_idx = 0;
                     if app.show_explorer {
                         if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
-                            app.focused_pane = FocusedPane::Explorer;
+                            app.focus.focus(&app.explorer_focus);
                         }
                         current_idx += 1;
                     }
                     
                     if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
-                        app.focused_pane = FocusedPane::Chat;
+                        app.focus.focus(&app.input_buffer);
                     }
                     current_idx += 1;
 
                     if app.show_reasoning {
                         if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
-                            app.focused_pane = FocusedPane::Reasoning;
+                            app.focus.focus(&app.reasoning_focus);
                         }
                         current_idx += 1;
                     }
 
                     if app.viewer_content.is_some() {
                         if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
-                            app.focused_pane = FocusedPane::Viewer;
+                            app.focus.focus(&app.viewer_focus);
                         }
                     }
                 }
                 
                 // MOUSE WHEEL SCROLLING
-                if app.focused_pane == FocusedPane::Chat {
+                if app.input_buffer.is_focused() {
                     match mev.kind {
                         crossterm::event::MouseEventKind::ScrollUp => {
                             let cur = app.list_state.selected().unwrap_or(0);
@@ -400,7 +768,7 @@ pub async fn run_tui(
                         }
                         _ => {}
                     }
-                } else if app.focused_pane == FocusedPane::Viewer {
+                } else if app.viewer_focus.get() {
                     match mev.kind {
                         crossterm::event::MouseEventKind::ScrollUp => {
                             app.viewer_scroll = app.viewer_scroll.saturating_sub(1);
@@ -464,7 +832,7 @@ pub async fn run_tui(
                     }
                 } else {
                     // --- 📝 EDITOR PRIORITY INPUT ---
-                    if app.focused_pane == FocusedPane::Viewer && app.is_editing {
+                    if app.viewer_focus.get() && app.is_editing {
                         match key.code {
                             KeyCode::Esc => { /* Fall through to handle exit logic */ }
                             KeyCode::Char('s') | KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -479,6 +847,90 @@ pub async fn run_tui(
                         }
                     }
 
+                    // --- 🦾 MISSION CONTROL INPUT BUFFER ROUTING ---
+                    if app.input_buffer.is_focused() {
+                        let is_ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                        let is_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+                        
+                        match key.code {
+                            // Ctrl+C to quit
+                            crossterm::event::KeyCode::Char('c') | crossterm::event::KeyCode::Char('C') if is_ctrl => {
+                                // Fall through to global handler
+                            }
+                            // Ctrl+E to toggle explorer
+                            crossterm::event::KeyCode::Char('e') | crossterm::event::KeyCode::Char('E') if is_ctrl => {
+                                // Fall through to global handler
+                            }
+                            // Ctrl+P to toggle command palette
+                            crossterm::event::KeyCode::Char('p') | crossterm::event::KeyCode::Char('P') if is_ctrl => {
+                                // Fall through to global handler
+                            }
+                            // Ctrl+G to toggle voice transcription (cpal/Whisper)
+                            crossterm::event::KeyCode::Char('g') | crossterm::event::KeyCode::Char('G') if is_ctrl => {
+                                if app.is_recording {
+                                    if let Some(ref cmd_tx) = app.audio_cmd_tx {
+                                        let _ = cmd_tx.try_send(AudioCommand::Stop);
+                                    }
+                                    app.is_recording = false;
+                                    app.recording_status = None;
+                                    app.push_message("🎙️ [MIC]: Stopped recording.".to_string());
+                                } else {
+                                    if let Some(ref cmd_tx) = app.audio_cmd_tx {
+                                        let _ = cmd_tx.try_send(AudioCommand::Start);
+                                    }
+                                    app.is_recording = true;
+                                    app.recording_status = Some("🎙️ Loading Whisper...".to_string());
+                                    app.push_message("🎙️ [MIC]: Initializing Whisper audio...".to_string());
+                                }
+                                continue;
+                            }
+                            // Ctrl+Enter or Alt+Enter to submit message
+                            crossterm::event::KeyCode::Enter if is_ctrl || is_alt => {
+                                if !app.input_buffer.text().is_empty() {
+                                    let msg = app.input_buffer.text().to_string();
+                                    app.push_message(format!("You: {}", msg));
+                                    let _ = user_tx.send(msg).await;
+                                    app.auto_scroll = true;
+                                    app.input_buffer.set_text("");
+                                }
+                                continue;
+                            }
+                            // Ctrl+Up / Alt+Up to scroll chat up
+                            crossterm::event::KeyCode::Up if is_ctrl || is_alt => {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur.saturating_sub(1)));
+                                app.auto_scroll = false;
+                                continue;
+                            }
+                            // Ctrl+Down / Alt+Down to scroll chat down
+                            crossterm::event::KeyCode::Down if is_ctrl || is_alt => {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur + 1));
+                                continue;
+                            }
+                            // PageUp / PageDown to scroll chat
+                            crossterm::event::KeyCode::PageUp => {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur.saturating_sub(15)));
+                                app.auto_scroll = false;
+                                continue;
+                            }
+                            crossterm::event::KeyCode::PageDown => {
+                                let cur = app.list_state.selected().unwrap_or(0);
+                                app.list_state.select(Some(cur + 15));
+                                continue;
+                            }
+                            // For all other editing/navigation keys, delegate directly to input_buffer
+                            _ => {
+                                use rat_event::HandleEvent;
+                                use rat_markdown::MarkDown;
+                                let mark_down = MarkDown::new(80);
+                                app.input_buffer.handle(&ev, mark_down);
+                                continue;
+                            }
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Char(c) => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'c' || c == 'C') {
@@ -486,21 +938,25 @@ pub async fn run_tui(
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                             } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'e' || c == 'E') {
                                 app.show_explorer = !app.show_explorer;
+                                        app.rebuild_focus();
                                 if app.show_explorer {
                                     app.refresh_explorer();
-                                    app.focused_pane = FocusedPane::Explorer;
+                                    app.focus.focus(&app.explorer_focus);
                                     app.explorer_state.select(Some(0));
-                                } else if app.focused_pane == FocusedPane::Explorer {
-                                    app.focused_pane = FocusedPane::Chat;
+                                } else if app.explorer_focus.get() {
+                                    app.focus.focus(&app.input_buffer);
                                 }
                             } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'p' || c == 'P') {
                                 app.show_command_palette = !app.show_command_palette;
                                 if app.show_command_palette {
-                                    app.focused_pane = FocusedPane::CommandPalette;
-                                    app.command_palette_query.clear();
+                                    app.focus.focus(&app.command_palette_state);
+                                    app.command_palette_state.set_active(true);
                                     app.command_palette_state.select(Some(0));
-                                } else if app.focused_pane == FocusedPane::CommandPalette {
-                                    app.focused_pane = FocusedPane::Chat;
+                                } else {
+                                    app.command_palette_state.set_active(false);
+                                    if app.command_palette_state.is_focused() {
+                                        app.focus.focus(&app.input_buffer);
+                                    }
                                 }
                             } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') {
                                 // --- 💾 SAVE PROTOCOL ---
@@ -510,12 +966,13 @@ pub async fn run_tui(
                                     if std::fs::write(&path, &new_content).is_ok() {
                                         app.push_message(format!("💾 [SAVED]: {}", path));
                                         app.viewer_content = Some((path, new_content));
+                                                app.rebuild_focus();
                                     }
                                 }
                                 continue;
-                            } else if app.focused_pane == FocusedPane::CommandPalette {
-                                app.command_palette_query.push(c);
-                            } else if app.focused_pane == FocusedPane::Explorer {
+                            } else if app.command_palette_state.is_focused() {
+                                
+                            } else if app.explorer_focus.get() {
                                 match c {
                                     '1'..='5' => {
                                         if app.messages.is_empty() {
@@ -542,7 +999,7 @@ pub async fn run_tui(
                                                 }
                                                 app.push_message(format!("You: {}", cmd));
                                                 let _ = user_tx.send(cmd).await;
-                                                app.focused_pane = FocusedPane::Chat;
+                                                app.focus.focus(&app.input_buffer);
                                             }
                                         }
                                     }
@@ -576,6 +1033,7 @@ pub async fn run_tui(
                                                     if let Ok(content) = std::fs::read_to_string(&full_path) {
                                                         let path_str = full_path.to_string_lossy().into_owned();
                                                         app.viewer_content = Some((path_str.clone(), content.clone()));
+                                                app.rebuild_focus();
                                                         app.viewer_scroll = 0;
                                                         
                                                         // Initialize editor
@@ -584,7 +1042,7 @@ pub async fn run_tui(
                                                         app.viewer_editor = Some(textarea);
                                                         app.is_editing = false;
                                                         
-                                                        app.focused_pane = FocusedPane::Viewer;
+                                                        app.focus.focus(&app.viewer_focus);
                                                     }
                                                 }
                                             }
@@ -607,7 +1065,7 @@ pub async fn run_tui(
                                                     let cmd = format!("Fix this file: {}", full_path.to_string_lossy());
                                                     app.push_message(format!("You: {}", cmd));
                                                     let _ = user_tx.send(cmd).await;
-                                                    app.focused_pane = FocusedPane::Chat;
+                                                    app.focus.focus(&app.input_buffer);
                                                 }
                                             }
                                         }
@@ -620,7 +1078,7 @@ pub async fn run_tui(
                                                     let cmd = format!("Refactor this file: {}", full_path.to_string_lossy());
                                                     app.push_message(format!("You: {}", cmd));
                                                     let _ = user_tx.send(cmd).await;
-                                                    app.focused_pane = FocusedPane::Chat;
+                                                    app.focus.focus(&app.input_buffer);
                                                 }
                                             }
                                         }
@@ -630,9 +1088,35 @@ pub async fn run_tui(
                                             if let Some(entry) = app.explorer_files.get(idx) {
                                                 if !entry.is_dir {
                                                     let full_path = app.current_explorer_dir.join(&entry.name);
-                                                    app.input_buffer.push_str(&format!(" [CONTEXT: {}] ", full_path.to_string_lossy()));
-                                                    app.focused_pane = FocusedPane::Chat;
+                                                    app.input_buffer.insert_str(format!(" [CONTEXT: {}] ", full_path.to_string_lossy()));
+                                                    app.focus.focus(&app.input_buffer);
                                                 }
+                                            }
+                                        }
+                                    }
+                                    'm' => {
+                                        if let Some(idx) = app.explorer_state.selected() {
+                                            if let Some(entry) = app.explorer_files.get(idx) {
+                                                app.context_menu_options = if entry.is_dir {
+                                                    vec![
+                                                        "Open Directory".to_string(),
+                                                        "List Files with Tempest".to_string(),
+                                                        "Create Subdirectory".to_string(),
+                                                        "Delete Directory".to_string(),
+                                                    ]
+                                                } else {
+                                                    vec![
+                                                        "View / Edit File".to_string(),
+                                                        "Analyze Code with Tempest".to_string(),
+                                                        "Stage changes (Git Add)".to_string(),
+                                                        "Delete File safely".to_string(),
+                                                    ]
+                                                };
+                                                app.show_context_menu = true;
+                                                app.rebuild_focus();
+                                                app.focus.focus(&app.context_menu_state);
+                                                app.context_menu_state.set_active(true);
+                                                app.context_menu_state.select(Some(0));
                                             }
                                         }
                                     }
@@ -641,24 +1125,28 @@ pub async fn run_tui(
                                         app.refresh_explorer();
                                     }
                                 }
-                            } else if app.focused_pane == FocusedPane::Viewer {
+                            } else if app.viewer_focus.get() {
                                 if c == 'q' || c == 'Q' || c == 'x' || c == 'X' {
                                     app.viewer_content = None;
+                                                app.rebuild_focus();
                                     app.viewer_editor = None;
                                     app.is_editing = false;
-                                    app.focused_pane = if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat };
+                                    if app.show_explorer { app.focus.focus(&app.explorer_focus); } else { app.focus.focus(&app.input_buffer); }
                                 } else if c == 'i' || c == 'I' {
                                     app.is_editing = true;
                                     app.push_message("📝 [EDITOR]: Entered EDIT mode. Press Esc to exit, Ctrl+S to save.".to_string());
                                 }
-                            } else {
-                                app.input_buffer.push(c);
+                            } else if app.input_buffer.is_focused() {
+                                use rat_event::HandleEvent;
+                                use rat_markdown::MarkDown;
+                                let mark_down = MarkDown::new(80);
+                                app.input_buffer.handle(&ev, mark_down);
                             }
                         }
                         KeyCode::Backspace => {
-                            if app.focused_pane == FocusedPane::CommandPalette {
-                                app.command_palette_query.pop();
-                            } else if app.focused_pane == FocusedPane::Explorer {
+                            if app.command_palette_state.is_focused() {
+                                
+                            } else if app.explorer_focus.get() {
                                 if !app.explorer_query.is_empty() {
                                     app.explorer_query.pop();
                                     app.refresh_explorer();
@@ -667,12 +1155,15 @@ pub async fn run_tui(
                                     app.refresh_explorer();
                                     app.explorer_state.select(Some(0));
                                 }
-                            } else {
-                                app.input_buffer.pop();
+                            } else if app.input_buffer.is_focused() {
+                                use rat_event::HandleEvent;
+                                use rat_markdown::MarkDown;
+                                let mark_down = MarkDown::new(80);
+                                app.input_buffer.handle(&ev, mark_down);
                             }
                         }
                         KeyCode::Enter => {
-                            if app.focused_pane == FocusedPane::CommandPalette {
+                            if app.command_palette_state.is_focused() {
                                 if let Some(idx) = app.command_palette_state.selected() {
                                     let option = app.command_palette_options[idx].clone();
                                     app.push_message(format!("⚡ [PALETTE]: Executing '{}'", option));
@@ -695,7 +1186,6 @@ pub async fn run_tui(
                                             if re.is_match(&content) {
                                                 content = re.replace(&content, &format!(r#"tui_theme = "{}""#, theme_name)).into_owned();
                                             } else {
-                                                // If not found, append it to the [🧹 BASE SETTINGS] section or end of file
                                                 if content.contains("[🧹 BASE SETTINGS]") {
                                                     content = content.replace("[🧹 BASE SETTINGS]", &format!("[🧹 BASE SETTINGS]\ntui_theme = \"{}\"", theme_name));
                                                 } else {
@@ -704,12 +1194,24 @@ pub async fn run_tui(
                                             }
                                             let _ = std::fs::write("config.toml", content);
                                         }
+                                    } else {
+                                        let cmd = match option.as_str() {
+                                            "Hot-Swap: DeepSeek R1 (Distill)" => "/switch deepseek-r1:8b".to_string(),
+                                            "Hot-Swap: Qwen 2.5 Coder" => "/switch qwen2.5-coder:7b".to_string(),
+                                            "Toggle Safe Mode: ON/OFF" => "/safemode".to_string(),
+                                            "Recall: Latest Memory Item" => "/recall".to_string(),
+                                            "System: Compact Context" => "/compact".to_string(),
+                                            "Sentinel: Toggle Hardcore Mode" => "/toggle_hardcore".to_string(),
+                                            other => format!("/{}", other.to_lowercase().replace(' ', "_")),
+                                        };
+                                        let _ = user_tx.send(cmd).await;
                                     }
 
                                     app.show_command_palette = false;
-                                    app.focused_pane = FocusedPane::Chat;
+                                    app.rebuild_focus();
+                                    app.focus.focus(&app.input_buffer);
                                 }
-                            } else if app.focused_pane == FocusedPane::Explorer {
+                            } else if app.explorer_focus.get() {
                                 if let Some(idx) = app.explorer_state.selected() {
                                     if let Some(entry) = app.explorer_files.get(idx).cloned() {
                                         if entry.is_dir {
@@ -725,82 +1227,71 @@ pub async fn run_tui(
                                             let full_path = app.current_explorer_dir.join(entry.name);
                                             if let Ok(content) = std::fs::read_to_string(&full_path) {
                                                 app.viewer_content = Some((full_path.to_string_lossy().into_owned(), content));
+                                                app.rebuild_focus();
                                                 app.viewer_scroll = 0;
-                                                app.focused_pane = FocusedPane::Viewer;
+                                                app.focus.focus(&app.viewer_focus);
                                             }
                                         }
                                     }
                                 }
-                            } else if !app.input_buffer.is_empty() {
-                                let msg = app.input_buffer.drain(..).collect::<String>();
+                            } else if app.input_buffer.is_focused() && !app.input_buffer.text().is_empty() {
+                                let msg = app.input_buffer.text().to_string();
                                 app.push_message(format!("You: {}", msg));
                                 let _ = user_tx.send(msg).await;
                                 app.auto_scroll = true;
+                                app.input_buffer.set_text("");
                             }
                         }
-                        KeyCode::Tab => {
-                            app.focused_pane = match app.focused_pane {
-                                FocusedPane::Chat => {
-                                    if app.show_reasoning { FocusedPane::Reasoning } 
-                                    else if app.viewer_content.is_some() { FocusedPane::Viewer }
-                                    else if app.show_explorer { FocusedPane::Explorer } 
-                                    else { FocusedPane::Chat }
-                                },
-                                FocusedPane::Reasoning => if app.viewer_content.is_some() { FocusedPane::Viewer } else if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
-                                FocusedPane::Viewer => if app.show_explorer { FocusedPane::Explorer } else { FocusedPane::Chat },
-                                FocusedPane::Explorer => FocusedPane::Chat,
-                                FocusedPane::CommandPalette => FocusedPane::Chat,
-                            };
-                        }
+
                         KeyCode::Up => {
-                            if app.focused_pane == FocusedPane::Chat {
+                            if app.input_buffer.is_focused() {
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur.saturating_sub(1)));
                                 app.auto_scroll = false;
-                            } else if app.focused_pane == FocusedPane::Explorer {
+                            } else if app.explorer_focus.get() {
                                 let cur = app.explorer_state.selected().unwrap_or(0);
                                 app.explorer_state.select(Some(cur.saturating_sub(1)));
-                            } else if app.focused_pane == FocusedPane::CommandPalette {
+                            } else if app.command_palette_state.is_focused() {
                                 let cur = app.command_palette_state.selected().unwrap_or(0);
                                 app.command_palette_state.select(Some(cur.saturating_sub(1)));
-                            } else if app.focused_pane == FocusedPane::Viewer {
+                            } else if app.viewer_focus.get() {
                                 app.viewer_scroll = app.viewer_scroll.saturating_sub(1);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_sub(1);
                             }
                         }
                         KeyCode::Down => {
-                            if app.focused_pane == FocusedPane::Chat {
+                            if app.input_buffer.is_focused() {
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur + 1));
-                            } else if app.focused_pane == FocusedPane::Explorer {
+                            } else if app.explorer_focus.get() {
                                 let cur = app.explorer_state.selected().unwrap_or(0);
                                 app.explorer_state.select(Some(cur + 1));
-                            } else if app.focused_pane == FocusedPane::CommandPalette {
+                            } else if app.command_palette_state.is_focused() {
                                 let cur = app.command_palette_state.selected().unwrap_or(0);
                                 app.command_palette_state.select(Some(cur + 1));
-                            } else if app.focused_pane == FocusedPane::Viewer {
+                            } else if app.viewer_focus.get() {
                                 app.viewer_scroll = app.viewer_scroll.saturating_add(1);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_add(1);
                             }
                         }
                         KeyCode::PageUp => {
-                            if app.focused_pane == FocusedPane::Chat {
+                            if app.input_buffer.is_focused() {
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur.saturating_sub(15)));
                                 app.auto_scroll = false;
-                            } else if app.focused_pane == FocusedPane::Viewer {
+                            } else if app.viewer_focus.get() {
                                 app.viewer_scroll = app.viewer_scroll.saturating_sub(15);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_sub(15);
                             }
                         }
                         KeyCode::PageDown => {
-                            if app.focused_pane == FocusedPane::Chat {
+                            if app.input_buffer.is_focused() {
                                 let cur = app.list_state.selected().unwrap_or(0);
                                 app.list_state.select(Some(cur + 15));
-                            } else if app.focused_pane == FocusedPane::Viewer {
+                            } else if app.viewer_focus.get() {
                                 app.viewer_scroll = app.viewer_scroll.saturating_add(15);
                             } else {
                                 app.reasoning_scroll = app.reasoning_scroll.saturating_add(15);
@@ -814,14 +1305,15 @@ pub async fn run_tui(
                             app.auto_scroll = true;
                         }
                         KeyCode::Esc => {
-                            if app.focused_pane == FocusedPane::Viewer {
+                            if app.viewer_focus.get() {
                                 if app.is_editing {
                                     app.is_editing = false;
                                     app.push_message("📝 [EDITOR]: Exited EDIT mode.".to_string());
                                 } else {
                                     app.viewer_content = None;
+                                                app.rebuild_focus();
                                     app.viewer_editor = None;
-                                    app.focused_pane = FocusedPane::Chat;
+                                    app.focus.focus(&app.input_buffer);
                                 }
                             } else if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -837,6 +1329,21 @@ pub async fn run_tui(
                     }
                 }
             }
+
+        while let Ok(tui_event) = tui_event_rx.try_recv() {
+            match tui_event {
+                TuiEvent::AudioChunk(text) => {
+                    app.input_buffer.insert_str(&text);
+                }
+                TuiEvent::AudioStatus(status) => {
+                    if status.is_empty() {
+                        app.recording_status = None;
+                    } else {
+                        app.recording_status = Some(status);
+                    }
+                }
+            }
+        }
 
         while let Ok(event) = agent_rx.try_recv() {
             match event {
@@ -929,8 +1436,9 @@ pub async fn run_tui(
                 }
                 AgentEvent::ShowManual(content) => {
                     app.viewer_content = Some(("OPERATIONAL MANUAL".to_string(), content));
+                                                app.rebuild_focus();
                     app.viewer_scroll = 0;
-                    app.focused_pane = FocusedPane::Viewer;
+                    app.focus.focus(&app.viewer_focus);
                 }
                 AgentEvent::AgentError(e) => {
                     app.push_message(format!("❌ [CRITICAL ERROR]: {}", e));
@@ -963,6 +1471,91 @@ pub async fn run_tui(
     Ok(())
 }
 
+struct ChatBlock {
+    is_code: bool,
+    language: String,
+    content: String,
+}
+
+fn split_markdown_and_code(text: &str) -> Vec<ChatBlock> {
+    let mut blocks = Vec::new();
+    let mut current_block = String::new();
+    let mut in_code = false;
+    let mut current_lang = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_code {
+                blocks.push(ChatBlock {
+                    is_code: true,
+                    language: current_lang.clone(),
+                    content: current_block,
+                });
+                current_block = String::new();
+                in_code = false;
+                current_lang.clear();
+            } else {
+                if !current_block.is_empty() {
+                    blocks.push(ChatBlock {
+                        is_code: false,
+                        language: String::new(),
+                        content: current_block,
+                    });
+                    current_block = String::new();
+                }
+                
+                let lang_id = trimmed["```".len()..].trim();
+                current_lang = match lang_id {
+                    "rust" | "rs" => "rs".to_string(),
+                    "python" | "py" => "py".to_string(),
+                    "json" => "json".to_string(),
+                    "toml" => "toml".to_string(),
+                    "bash" | "sh" => "sh".to_string(),
+                    other => {
+                        if other.is_empty() {
+                            "rs".to_string()
+                        } else {
+                            other.to_string()
+                        }
+                    }
+                };
+                in_code = true;
+            }
+        } else {
+            if !current_block.is_empty() {
+                current_block.push('\n');
+            }
+            current_block.push_str(line);
+        }
+    }
+
+    if !current_block.is_empty() {
+        blocks.push(ChatBlock {
+            is_code: in_code,
+            language: current_lang,
+            content: current_block,
+        });
+    }
+
+    blocks
+}
+
+fn make_span_static(span: Span<'_>) -> Span<'static> {
+    Span {
+        content: std::borrow::Cow::Owned(span.content.into_owned()),
+        style: span.style,
+    }
+}
+
+fn make_line_static(line: Line<'_>) -> Line<'static> {
+    Line {
+        spans: line.spans.into_iter().map(make_span_static).collect(),
+        alignment: line.alignment,
+        style: line.style,
+    }
+}
+
 fn highlight_text(text: &str, extension: &str, syntax_set: &SyntaxSet, theme_set: &ThemeSet, theme_name: &str) -> Vec<Line<'static>> {
     let syntax = syntax_set.find_syntax_by_extension(extension)
         .or_else(|| syntax_set.find_syntax_by_extension("txt"))
@@ -989,12 +1582,19 @@ fn highlight_text(text: &str, extension: &str, syntax_set: &SyntaxSet, theme_set
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    let input_lines = if app.input_buffer.is_focused() {
+        app.input_buffer.text().lines().count().max(1).min(8) as u16
+    } else {
+        1
+    };
+    let input_height = input_lines + 2; // +2 for borders
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(8), // Header/Logo area
             Constraint::Min(3),    // Main Content Area
-            Constraint::Length(3), // Input Box
+            Constraint::Length(input_height), // Input Box (Dynamic)
         ].as_ref())
         .split(f.area());
 
@@ -1031,7 +1631,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let explorer_area = main_chunks[pane_idx];
         pane_idx += 1;
         
-        let explorer_border_color = if app.focused_pane == FocusedPane::Explorer { Color::Yellow } else { Color::DarkGray };
+        let explorer_border_color = if app.explorer_focus.get() { Color::Yellow } else { Color::DarkGray };
         let explorer_title = format!(" 📂 EXPLORER: {} {} ", 
             app.current_explorer_dir.file_name().unwrap_or_default().to_string_lossy(),
             if app.explorer_query.is_empty() { "".to_string() } else { format!("(🔍 {})", app.explorer_query) }
@@ -1104,7 +1704,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         f.render_stateful_widget(explorer, explorer_area, &mut app.explorer_state);
 
         // Help text at bottom of explorer
-        if app.focused_pane == FocusedPane::Explorer {
+        if app.explorer_focus.get() {
              let help_area = ratatui::layout::Rect {
                  x: explorer_area.x + 1,
                  y: explorer_area.y + explorer_area.height.saturating_sub(2),
@@ -1147,8 +1747,8 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.messages.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(if app.focused_pane == FocusedPane::Chat { " 🦾 MISSION CONTROL [FOCUS] " } else { " 🦾 MISSION CONTROL " })
-            .border_style(Style::default().fg(if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray }));
+            .title(if app.input_buffer.is_focused() { " 🦾 MISSION CONTROL [FOCUS] " } else { " 🦾 MISSION CONTROL " })
+            .border_style(Style::default().fg(if app.input_buffer.is_focused() { Color::Yellow } else { Color::DarkGray }));
 
         let selected_file = if let Some(idx) = app.explorer_state.selected() {
             app.explorer_files.get(idx).map(|e| app.current_explorer_dir.join(&e.name).to_string_lossy().into_owned())
@@ -1165,7 +1765,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let mut content = vec![
             Line::from(vec![
                 Span::styled("🌪️  TEMPEST AI ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled("v0.3.2 \"Cyber-Orchestrator\"", Style::default().fg(Color::DarkGray)),
+                Span::styled("v0.3.5 \"Cyber-Orchestrator\"", Style::default().fg(Color::DarkGray)),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -1201,14 +1801,46 @@ fn ui(f: &mut Frame, app: &mut App) {
         let mut list_items = Vec::new();
         let chat_width = top_chunks[0].width.saturating_sub(2) as usize;
 
-        let push_wrapped = |text: &str, items: &mut Vec<ListItem>, is_user: bool, show_header: bool| {
+        let push_wrapped = |text: &str, items: &mut Vec<ListItem>, is_user: bool, show_header: bool, is_streaming: bool| {
             if chat_width == 0 { return; }
             let (prefix, color) = if is_user { ("You: ", Color::Blue) } else { ("Tempest: ", Color::Cyan) };
             
             let has_prefix = text.starts_with(prefix);
             let content_to_wrap = if has_prefix { &text[prefix.len()..] } else { text };
             
-            // --- 🌈 SYNTAX HIGHLIGHTING FOR CODE BLOCKS IN CHAT ---
+            // --- 🌊 HYBRID RENDERING: MARKDOWN + SYNTECT CODE BLOCKS ---
+            if !is_user && !is_streaming {
+                let blocks = split_markdown_and_code(content_to_wrap);
+                let mut first_line = true;
+                
+                for block in blocks {
+                    if block.is_code {
+                        let ext = &block.language;
+                        let highlighted = highlight_text(&block.content, ext, &app.syntax_set, &app.theme_set, &app.current_theme);
+                        
+                        for mut line in highlighted {
+                            if first_line && show_header && has_prefix {
+                                line.spans.insert(0, Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                                first_line = false;
+                            }
+                            items.push(ListItem::new(line));
+                        }
+                    } else {
+                        let parsed = tui_markdown::from_str(&block.content);
+                        for line in parsed.lines {
+                            let mut line_static = make_line_static(line);
+                            if first_line && show_header && has_prefix {
+                                line_static.spans.insert(0, Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                                first_line = false;
+                            }
+                            items.push(ListItem::new(line_static));
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Fallback for streaming and user messages (plain text wrapping, except streaming code blocks use full highlighting if they contain "```")
             if !is_user && content_to_wrap.contains("```") {
                  let ext = if content_to_wrap.contains("```rust") || content_to_wrap.contains("```rs") { "rs" }
                            else if content_to_wrap.contains("```python") || content_to_wrap.contains("```py") { "py" }
@@ -1278,15 +1910,15 @@ fn ui(f: &mut Frame, app: &mut App) {
 
         for msg in &app.messages {
             let is_user = msg.starts_with("You: ");
-            push_wrapped(msg, &mut list_items, is_user, true);
+            push_wrapped(msg, &mut list_items, is_user, true, false);
         }
 
         if !app.current_stream.is_empty() {
-            push_wrapped(&format!("Tempest: {}", app.current_stream), &mut list_items, false, true);
+            push_wrapped(&format!("Tempest: {}", app.current_stream), &mut list_items, false, true, true);
         }
 
-        let core_border_color = if app.focused_pane == FocusedPane::Chat { Color::Yellow } else { Color::DarkGray };
-        let core_title = if app.focused_pane == FocusedPane::Chat { " 🦾 CORE SESSION [FOCUS] " } else { " 🦾 CORE SESSION " };
+        let core_border_color = if app.input_buffer.is_focused() { Color::Yellow } else { Color::DarkGray };
+        let core_title = if app.input_buffer.is_focused() { " 🦾 CORE SESSION [FOCUS] " } else { " 🦾 CORE SESSION " };
         
         let item_count = list_items.len();
         let list = List::new(list_items)
@@ -1457,8 +2089,8 @@ fn ui(f: &mut Frame, app: &mut App) {
     // --- REASONING TRACE PANE (With Syntax Highlighting) ---
     if app.show_reasoning {
         let reasoning_area = main_chunks[pane_idx];
-        let reasoning_border_color = if app.focused_pane == FocusedPane::Reasoning { Color::Yellow } else { Color::Magenta };
-        let reasoning_title = if app.focused_pane == FocusedPane::Reasoning { " 🧠 REASONING [FOCUS] " } else { " 🧠 REASONING " };
+        let reasoning_border_color = if app.reasoning_focus.get() { Color::Yellow } else { Color::Magenta };
+        let reasoning_title = if app.reasoning_focus.get() { " 🧠 REASONING [FOCUS] " } else { " 🧠 REASONING " };
 
         let highlighted_lines = highlight_text(&app.reasoning_buffer, "md", &app.syntax_set, &app.theme_set, &app.current_theme);
 
@@ -1476,7 +2108,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // --- 📄 CYBER-VIEWER PANE (Syntax Highlighted / Editable) ---
     if let Some((path, content)) = &app.viewer_content {
         let viewer_area = main_chunks[pane_idx];
-        let viewer_border_color = if app.focused_pane == FocusedPane::Viewer { Color::Yellow } else { Color::Green };
+        let viewer_border_color = if app.viewer_focus.get() { Color::Yellow } else { Color::Green };
         
         if app.is_editing {
             // --- 🩹 SELF-HEALING: Initialize editor if missing ---
@@ -1518,7 +2150,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(editor_para, viewer_area);
             
             // --- ⌨️ HARDWARE ANCHOR ---
-            if app.focused_pane == FocusedPane::Viewer {
+            if app.viewer_focus.get() {
                 let display_cursor_y = cursor.0.saturating_sub(scroll_y as usize);
                 if display_cursor_y < viewer_area.height as usize {
                     f.set_cursor_position((
@@ -1530,7 +2162,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         } else {
             let viewer_title = format!(" 📄 VIEWER: {} {} ", 
                 path, 
-                if app.focused_pane == FocusedPane::Viewer { "[FOCUS] - Press 'i' to Edit" } else { "" }
+                if app.viewer_focus.get() { "[FOCUS] - Press 'i' to Edit" } else { "" }
             );
 
             let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("rs");
@@ -1547,31 +2179,55 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
     }
 
-    let mut input_title = " 🗨️ INPUT ".to_string();
-    let mut input_text = app.input_buffer.clone();
-    let mut input_style = Style::default();
-
     if let Some((tool, question)) = &app.pending_input {
-        input_title = format!(" ⚠️  APPROVAL REQUIRED for {} ", tool);
-        input_text = format!("{} >> {}", question, app.input_response_buffer);
-        input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let input_title = format!(" ⚠️  APPROVAL REQUIRED for {} ", tool);
+        let input_text = format!("{} >> {}", question, app.input_response_buffer);
+        let input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let input = Paragraph::new(input_text.clone())
+            .style(input_style)
+            .block(Block::default().borders(Borders::ALL).title(input_title));
+        f.render_widget(input, chunks[2]);
+        if app.input_buffer.is_focused() || app.explorer_focus.get() {
+            f.set_cursor_position((
+                chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
+                chunks[2].y + 1,
+            ));
+        }
     } else if let Some((rationale, _resp_tx)) = &app.pending_privilege_request {
-        input_title = format!(" 🔒 PRIVILEGE ESCALATION ");
-        input_text = format!("Rationale: {} | Accept root? (y/n)", rationale);
-        input_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    }
-
-    let input = Paragraph::new(input_text.clone())
-        .style(input_style)
-        .block(Block::default().borders(Borders::ALL).title(input_title));
-    f.render_widget(input, chunks[2]);
-
-    // --- ⌨️ DYNAMIC CURSOR ANCHORING ---
-    if app.focused_pane == FocusedPane::Chat || app.focused_pane == FocusedPane::Explorer {
-        f.set_cursor_position((
-            chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
-            chunks[2].y + 1,
-        ));
+        let input_title = format!(" 🔒 PRIVILEGE ESCALATION ");
+        let input_text = format!("Rationale: {} | Accept root? (y/n)", rationale);
+        let input_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let input = Paragraph::new(input_text.clone())
+            .style(input_style)
+            .block(Block::default().borders(Borders::ALL).title(input_title));
+        f.render_widget(input, chunks[2]);
+        if app.input_buffer.is_focused() || app.explorer_focus.get() {
+            f.set_cursor_position((
+                chunks[2].x + (UnicodeWidthStr::width(input_text.as_str()) as u16) + 1,
+                chunks[2].y + 1,
+            ));
+        }
+    } else {
+        use rat_text::text_area::TextArea;
+        let (title, border_color) = if app.is_recording {
+            let status = app.recording_status.as_deref().unwrap_or("🎙️ Recording...");
+            (format!(" 🎙️ VOICE RECORDING ACTIVE: {} ", status), Color::Red)
+        } else if app.input_buffer.is_focused() {
+            (" 🦾 MISSION CONTROL (Ctrl+Enter to Submit) ".to_string(), Color::Yellow)
+        } else {
+            (" 🗨️ MISSION CONTROL ".to_string(), Color::DarkGray)
+        };
+        let widget = TextArea::new().block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, Style::default().fg(border_color).add_modifier(Modifier::BOLD)))
+                .border_style(Style::default().fg(border_color))
+        );
+        f.render_stateful_widget(widget, chunks[2], &mut app.input_buffer);
+        use rat_text::HasScreenCursor;
+        if let Some(cursor) = app.input_buffer.screen_cursor() {
+            f.set_cursor_position((cursor.0, cursor.1));
+        }
     }
 
     // --- ⌨️ FUZZY COMMAND PALETTE OVERLAY ---
@@ -1579,31 +2235,49 @@ fn ui(f: &mut Frame, app: &mut App) {
         let area = centered_rect(60, 40, f.area());
         f.render_widget(ratatui::widgets::Clear, area); // Clear background
 
+        use rat_menu::popup_menu::{PopupMenu, PopupConstraint};
+
+        let mut menu = PopupMenu::new();
+        for opt in &app.command_palette_options {
+            menu = menu.item_string(opt.clone());
+        }
+        
         let block = Block::default()
-            .title(" ⌨️ COMMAND PALETTE [Fuzzy Search] ")
+            .title(" ⚡ Command Palette ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-        
-        let filtered_options: Vec<ListItem> = app.command_palette_options.iter()
-            .filter(|opt| opt.to_lowercase().contains(&app.command_palette_query.to_lowercase()))
-            .map(|opt| ListItem::new(Span::raw(opt.clone())))
-            .collect();
 
-        let list = List::new(filtered_options)
-            .block(block)
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ");
+        menu = menu.block(block)
+            .constraint(PopupConstraint::None)
+            .style(Style::default().bg(Color::DarkGray))
+            .focus_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .split(area);
+        f.render_stateful_widget(menu, area, &mut app.command_palette_state);
+    }
 
-        let query_box = Paragraph::new(app.command_palette_query.clone())
-            .block(Block::default().borders(Borders::ALL).title(" 🔍 Search "));
-        
-        f.render_widget(query_box, chunks[0]);
-        f.render_stateful_widget(list, chunks[1], &mut app.command_palette_state);
+    // --- 📂 EXPLORER CONTEXT MENU OVERLAY ---
+    if app.show_context_menu {
+        let area = centered_rect(30, 25, f.area());
+        f.render_widget(ratatui::widgets::Clear, area); // Clear background
+
+        use rat_menu::popup_menu::{PopupMenu, PopupConstraint};
+
+        let mut menu = PopupMenu::new();
+        for opt in &app.context_menu_options {
+            menu = menu.item_string(opt.clone());
+        }
+
+        let block = Block::default()
+            .title(" 📂 Explorer Menu ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+        menu = menu.block(block)
+            .constraint(PopupConstraint::None)
+            .style(Style::default().bg(Color::DarkGray))
+            .focus_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+        f.render_stateful_widget(menu, area, &mut app.context_menu_state);
     }
 }
 

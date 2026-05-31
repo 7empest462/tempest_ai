@@ -23,19 +23,27 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     total
 }
 
-/// Returns true if the estimated token count exceeds the threshold (85% of limit).
+/// Returns true if the estimated token count exceeds the trigger threshold.
+/// Incorporates a hard focal cap of 20,000 tokens for local models to prevent
+/// "lost in the middle" reasoning degradation and maximize prompt processing speeds.
 pub fn needs_compaction(messages: &[ChatMessage], ctx_limit: u64) -> bool {
     let estimated = estimate_tokens(messages);
-    let threshold = (ctx_limit as f64 * 0.85) as usize;
+    let focal_cap = 20000;
+    let threshold = ((ctx_limit as f64 * 0.85) as usize).min(focal_cap);
     estimated > threshold
 }
 
-/// Compacts the middle of the history by summarizing it using the sub-agent model.
+use ollama_rs::generation::chat::MessageRole;
+
+/// Compacts the middle of the history by summarizing it using the sub-agent model,
+/// and simultaneously indexing granular conversation turns into the semantic VectorBrain.
 pub async fn compact_history(
     backend: &Backend,
     sub_model: &str,
     mut messages: Vec<ChatMessage>,
     _ctx_limit: u64,
+    vector_brain: &Arc<parking_lot::Mutex<crate::vector_brain::VectorBrain>>,
+    brain_path: &std::path::Path,
 ) -> Result<Vec<ChatMessage>> {
     let initial_count = estimate_tokens(&messages);
     let pressure_pct = (initial_count as f64 / _ctx_limit as f64 * 100.0).min(100.0);
@@ -59,14 +67,61 @@ pub async fn compact_history(
     
     let compaction_target_range = head_size..(messages.len() - tail_size);
     let target_messages: Vec<ChatMessage> = messages[compaction_target_range.clone()].to_vec();
+
+    // 🧠 SEMANTIC VECTOR INDEXING
+    // Group targets into User-Assistant conversation chunks and embed them in the VectorBrain
+    {
+        let mut current_chunk = String::new();
+        let mut chunks_to_embed = Vec::new();
+        for msg in &target_messages {
+            let role = match msg.role {
+                MessageRole::User => "User",
+                MessageRole::Assistant => "Assistant",
+                MessageRole::System => "System",
+                _ => "Other",
+            };
+            current_chunk.push_str(&format!("{}: {}\n\n", role, msg.content));
+            
+            // Slice when we reach the end of an Assistant turn or if the text gets large
+            if msg.role == MessageRole::Assistant || current_chunk.len() > 1200 {
+                let chunk_text = current_chunk.trim().to_string();
+                if !chunk_text.is_empty() {
+                    chunks_to_embed.push(chunk_text);
+                }
+                current_chunk.clear();
+            }
+        }
+        
+        let chunk_text = current_chunk.trim().to_string();
+        if !chunk_text.is_empty() {
+            chunks_to_embed.push(chunk_text);
+        }
+        
+        // Generate embeddings and store them (acquiring and dropping the MutexGuard between await boundaries)
+        for chunk in chunks_to_embed {
+            if let Ok(embedding) = backend.generate_embeddings(&chunk).await {
+                let mut brain = vector_brain.lock();
+                brain.add_entry(
+                    chunk,
+                    embedding,
+                    "context_compaction".to_string(),
+                    std::collections::HashMap::new(),
+                );
+            }
+        }
+        
+        // Save the updated VectorBrain to disk
+        let brain = vector_brain.lock();
+        let _ = brain.save_to_disk(brain_path);
+    }
     
     // Construct the summarization request
     let mut summary_context = String::new();
     for msg in &target_messages {
         let role = match msg.role {
-            ollama_rs::generation::chat::MessageRole::User => "User",
-            ollama_rs::generation::chat::MessageRole::Assistant => "Assistant",
-            ollama_rs::generation::chat::MessageRole::System => "System",
+            MessageRole::User => "User",
+            MessageRole::Assistant => "Assistant",
+            MessageRole::System => "System",
             _ => "Other",
         };
         summary_context.push_str(&format!("{}: {}\n\n", role, msg.content));
@@ -74,21 +129,21 @@ pub async fn compact_history(
 
     let summary_prompt = format!(
         "### TASK: CONTEXT DENSITY COMPACTION (Pressure: {:.1}%)
-You are a high-speed context compressor. Summarize the following session history.
-
-### DENSITY TARGET: {}
-{}
-
-### RULES:
-1. OUTPUT DENSITY: Achieve the target ratio above.
-2. TECHNICAL PRESERVATION: Retain all tool calls, file paths, PIDs, and error codes.
-3. NO LOGORRHEA: Do NOT use phrases like 'The user and assistant discussed...'. 
-4. NO VERBATIM: Do not repeat long blocks of text.
-5. NO PREAMBLE: Start immediately with the summary.
-
-### CONVERSATION STREAM:
-{}
-",
+    You are a high-speed context compressor. Summarize the following session history.
+    
+    ### DENSITY TARGET: {}
+    {}
+    
+    ### RULES:
+    1. OUTPUT DENSITY: Achieve the target ratio above.
+    2. TECHNICAL PRESERVATION: Retain all tool calls, file paths, PIDs, and error codes.
+    3. NO LOGORRHEA: Do NOT use phrases like 'The user and assistant discussed...'. 
+    4. NO VERBATIM: Do not repeat long blocks of text.
+    5. NO PREAMBLE: Start immediately with the summary.
+    
+    ### CONVERSATION STREAM:
+    {}
+    ",
         pressure_pct, ratio, intensity, summary_context
     );
 
@@ -107,7 +162,7 @@ You are a high-speed context compressor. Summarize the following session history
         tokio::time::Duration::from_secs(30),
         backend.stream_chat(
             sub_model.to_string(),
-            vec![ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, summary_prompt)],
+            vec![ChatMessage::new(MessageRole::User, summary_prompt)],
             sampling,
             event_tx,
             stop,
@@ -121,28 +176,56 @@ You are a high-speed context compressor. Summarize the following session history
         Ok(Ok(response)) => {
             let summary_text = response.content;
             let summary_message = ChatMessage::new(
-                ollama_rs::generation::chat::MessageRole::System,
+                MessageRole::System,
                 format!("[CONTEXT SUMMARY - COMPACTED]:\n{}", summary_text)
             );
             messages.splice(compaction_target_range, std::iter::once(summary_message));
         },
         Ok(Err(e)) => {
             // Model error (e.g. model not found)
+            // 🛡️ INTENT PRESERVATION: Extract the last user message before draining
+            let last_user_msg = messages[compaction_target_range.clone()].iter().rev()
+                .find(|m| m.role == MessageRole::User)
+                .map(|m| m.content.clone());
+            
             messages.drain(compaction_target_range);
             let panic_message = ChatMessage::new(
-                ollama_rs::generation::chat::MessageRole::System,
+                MessageRole::System,
                 format!("⚠️ [CRITICAL OVERLOAD]: Summarization model error ({}). Old history hard-pruned to restore stability.", e)
             );
             messages.insert(1, panic_message);
+            
+            // Re-inject the last user message so the model knows what it was doing
+            if let Some(user_msg) = last_user_msg {
+                let intent_msg = ChatMessage::new(
+                    MessageRole::System,
+                    format!("[USER INTENT PRESERVED]: The user's last request before compaction was:\n\n{}", user_msg)
+                );
+                messages.insert(2, intent_msg);
+            }
         },
         Err(_) => {
             // Timeout fallback
+            // 🛡️ INTENT PRESERVATION: Extract the last user message before draining
+            let last_user_msg = messages[compaction_target_range.clone()].iter().rev()
+                .find(|m| m.role == MessageRole::User)
+                .map(|m| m.content.clone());
+            
             messages.drain(compaction_target_range);
             let panic_message = ChatMessage::new(
-                ollama_rs::generation::chat::MessageRole::System,
+                MessageRole::System,
                 "⚠️ [CRITICAL OVERLOAD]: Summarization TIMEOUT (30s). Background model too slow. History hard-pruned.".to_string()
             );
             messages.insert(1, panic_message);
+            
+            // Re-inject the last user message so the model knows what it was doing
+            if let Some(user_msg) = last_user_msg {
+                let intent_msg = ChatMessage::new(
+                    MessageRole::System,
+                    format!("[USER INTENT PRESERVED]: The user's last request before compaction was:\n\n{}", user_msg)
+                );
+                messages.insert(2, intent_msg);
+            }
         }
     }
 
