@@ -69,14 +69,20 @@ Lightweight, direct command-line interface for rapid tasks and piping.
 
 ## ⚙️ Multi-Backend Architecture
 
-Tempest supports four inference backends, selectable at launch:
+Tempest supports six inference backends, selectable at launch:
 
 | Backend | Flag | Hardware | Description |
 |:--------|:-----|:---------|:------------|
 | **🍏 MLX** | `--mlx` | Apple Silicon M1–M4 | Native Metal GPU + Neural Engine, ultra-low latency |
+| **🧠 Kalosm** | `--kalosm` | Any (GPU/CPU) | Native Rust-based local inference using the Kalosm framework |
 | **🐋 Ollama** | *(default)* | Any | Cross-platform local inference via Ollama API |
+| **🌐 Gemini** | `--gemini` | Any | Google Gemini API with smart 503 fallback routing |
 | **⚡ AI Bridge** | `--bridge` | Any | Remote providers, provider-agnostic API bridging |
 | **🔬 LM Studio** | `--lmstudio` | Any | Local LM Studio integration |
+
+### Using the New Backends
+- **Google Gemini**: Set your API key as an environment variable (`export GEMINI_API_KEY="..."`) and launch with `./tempest_ai --gemini`. Configure your preferred model (e.g., `gemini-3.5-flash`) via the `gemini_model` field in your `config.toml`. *(Note: To avoid 429 Too Many Requests errors, ensure your Google AI Studio project has billing enabled for the "Pay-as-you-go" tier).*
+- **Kalosm**: Launch with `./tempest_ai --kalosm`. Ensure the `kalosm_model` path in your `config.toml` points to a valid local GGUF model file.
 
 ---
 

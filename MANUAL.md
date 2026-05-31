@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.1` — "Cyber-Orchestrator"
+# 🌪️ Tempest AI `v0.3.5` — "Cyber-Orchestrator"
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer."
@@ -12,6 +12,8 @@ Tempest can be started in several modes depending on your hardware and desired i
 | :--- | :--- | :--- |
 | `./tempest_ai` | **TUI (Default)** | Ollama |
 | `./tempest_ai --mlx` | **TUI** | MLX (Apple Silicon) |
+| `./tempest_ai --gemini` | **TUI** | Google Gemini API |
+| `./tempest_ai --kalosm` | **TUI** | Kalosm (Native Rust) |
 | `./tempest_ai --cli` | **CLI** | Ollama |
 | `./tempest_ai --mlx --cli` | **CLI** | MLX (Apple Silicon) |
 
@@ -65,9 +67,11 @@ Every modification made by Tempest triggers an **Automatic Checkpoint**.
 ---
 
 ## 🔧 Configuration
-Configuration is stored in `config.toml`. Key v0.3.1 fields:
+Configuration is stored in `config.toml`. Key v0.3.5 fields:
 - `tui_theme`: Your persistent aesthetic choice (Ocean, Mocha, Solarized).
 - `mlx_model`: Default native engine preset for Apple Silicon.
+- `gemini_model`: The default model string for Gemini mode (e.g. `gemini-3.5-flash`).
+- `kalosm_model`: The absolute path to your local GGUF file for Kalosm mode.
 - `planner_model` / `executor_model`: Ollama-tier logic configuration.
 - `safe_mode`: Persistent toggle for execution safety.
 
