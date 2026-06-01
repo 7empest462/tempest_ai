@@ -291,7 +291,7 @@ async fn main() -> Result<()> {
     } else if cli.gemini {
         cli.model.clone()
             .or(config.gemini_model.clone())
-            .unwrap_or_else(|| "gemini-3.5-flash".to_string())
+            .unwrap_or_else(|| "gemini-2.0-flash".to_string())
     } else {
         cli.model.clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
@@ -549,8 +549,16 @@ async fn main() -> Result<()> {
 
     if cli.web {
         println!("{} Launching Tempest Nexus...", "🌐".green());
-        let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.kalosm { "kalosm" } else if cli.mlx { "mlx" } else { "ollama" };
-        tempest_ai::nexus::run_nexus(agent, nexus_port, backend_id.to_string(), event_rx, tool_tx_opt).await;
+        let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.kalosm { "kalosm" } else if cli.mlx { "mlx" } else if cli.gemini { "gemini" } else { "ollama" };
+        let agent_clone = agent.clone();
+        
+        tokio::select! {
+            _ = tempest_ai::nexus::run_nexus(agent, nexus_port, backend_id.to_string(), event_rx, tool_tx_opt) => {}
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n{} Shutting down Nexus...", "🛑".red());
+                agent_clone.print_interaction_summary();
+            }
+        }
         return Ok(());
     }
 
