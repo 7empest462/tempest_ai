@@ -7,6 +7,7 @@ pub struct SentinelAction {
     pub message: String,
     pub needs_compaction: bool,
     pub needs_privilege: bool,
+    pub hardcore_kill: bool,
     pub active_sentinels: Vec<String>,
 }
 
@@ -51,11 +52,12 @@ impl SentinelManager {
 
     /// Analyzes the current state and returns an action. 
     /// Now always returns Some to ensure the TUI HUD stays populated.
-    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64, repetition_stack: &[(String, String, Option<String>)]) -> Option<SentinelAction> {
+    pub fn analyze_state(&self, messages: &[ChatMessage], ctx_limit: u64, repetition_stack: &[(String, String, Option<String>)], is_hardcore: bool) -> Option<SentinelAction> {
         let mut action = SentinelAction {
             message: String::new(),
             needs_compaction: false,
             needs_privilege: false,
+            hardcore_kill: false,
             active_sentinels: vec![
                 "Context Runway".into(),
                 "Privilege Escalator".into(),
@@ -79,6 +81,7 @@ impl SentinelManager {
                 let prev2 = &repetition_stack[repetition_stack.len() - 3];
                 if last == prev1 && last == prev2 {
                     action.message.push_str(&format!("⚠️ [SENTINEL - REPETITION]: You have called '{}' with the same arguments 3 times in a row. YOU ARE LOOPING.\n", last.0));
+                    if is_hardcore { action.hardcore_kill = true; }
                 }
             }
 
@@ -90,6 +93,7 @@ impl SentinelManager {
                         // If it's a read operation, it's definitely redundant
                         if last.0 == "read_file" || last.0 == "search_files" || last.0 == "ls" {
                              action.message.push_str(&format!("⚠️ [SENTINEL - REDUNDANCY]: You already successfully called '{}' with these arguments in this session. CHECK YOUR CONTEXT.\n", last.0));
+                             if is_hardcore { action.hardcore_kill = true; }
                              break;
                         }
                     }
@@ -97,9 +101,10 @@ impl SentinelManager {
             }
         }
 
-        // 1. Context Runway Check - Tightened to 75% for MLX safety
-        if context_manager::needs_compaction(messages, (ctx_limit as f64 * 0.75) as u64) {
-            action.message.push_str("⚠️ [SENTINEL - CONTEXT RUNWAY]: History is >75% full. Automatic compaction recommended.\n");
+        // 1. Context Runway Check
+        let threshold = if is_hardcore { 0.40 } else { 0.75 };
+        if context_manager::needs_compaction(messages, (ctx_limit as f64 * threshold) as u64) {
+            action.message.push_str(&format!("⚠️ [SENTINEL - CONTEXT RUNWAY]: History is >{}% full. Automatic compaction recommended.\n", (threshold * 100.0) as u32));
             action.needs_compaction = true;
             
         }
@@ -121,9 +126,11 @@ impl SentinelManager {
             if last_msg.role == ollama_rs::generation::chat::MessageRole::Assistant {
                 if content.contains("tool not found in registry") || content.contains("hallucinated a capability") {
                     action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Tool hallucination detected. Model is inventing tools.\n");
+                    if is_hardcore { action.hardcore_kill = true; }
                 }
-                if content.contains("=== tool result ===") || content.contains("=== tool error ===") {
+                if content.contains("=== system observation ===") || content.contains("=== system error ===") || content.contains("=== tool result ===") {
                     action.message.push_str("⚠️ [SENTINEL - HALLUCINATION GUARD]: Faked tool output detected. Assistant is pretending to be the system.\n");
+                    if is_hardcore { action.hardcore_kill = true; }
                 }
             }
 
@@ -140,8 +147,10 @@ impl SentinelManager {
                 }
                 state.last_error_count = Some(error_count);
 
-                if state.stagnation_counter >= 3 {
+                let stagnation_threshold = if is_hardcore { 1 } else { 3 };
+                if state.stagnation_counter >= stagnation_threshold {
                     action.message.push_str(&format!("⚠️ [SENTINEL - COMPILER GUARD]: Build is STAGNANT ({} errors).\n", error_count));
+                    if is_hardcore { action.hardcore_kill = true; }
                     
                     state.stagnation_counter = 0; 
                 }
@@ -175,6 +184,7 @@ impl SentinelManager {
 
                 if has_code && !has_explicit_thought && !has_metadata_thought {
                     action.message.push_str("⚠️ [SENTINEL - CODE GUARD]: Raw code dump detected without thinking phase.\n");
+                    if is_hardcore { action.hardcore_kill = true; }
                 }
             }
         }

@@ -106,6 +106,10 @@ struct Cli {
     /// Enable Safe Mode (block for approvals on file modifications)
     #[arg(short, long)]
     pub safe: bool,
+
+    /// Resume a previous session by providing its Session ID
+    #[arg(long)]
+    pub resume: Option<String>,
 }
 
 use tempest_ai::AppConfig;
@@ -299,13 +303,20 @@ async fn main() -> Result<()> {
     config_dir.push("tempest_ai");
     let _ = std::fs::create_dir_all(&config_dir);
 
-    let history_raw = config.history_path
-        .unwrap_or_else(|| "history.json".to_string());
+    let session_id = cli.resume.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     
-    let history_path = if std::path::Path::new(&history_raw).is_absolute() {
-        history_raw
+    let sessions_dir = config_dir.join("sessions");
+    let _ = std::fs::create_dir_all(&sessions_dir);
+    
+    let history_path = if cli.resume.is_some() || config.history_path.is_none() {
+        sessions_dir.join(format!("{}.json", session_id)).to_string_lossy().to_string()
     } else {
-        config_dir.join(&history_raw).to_string_lossy().to_string()
+        let history_raw = config.history_path.as_ref().unwrap();
+        if std::path::Path::new(history_raw).is_absolute() {
+            history_raw.clone()
+        } else {
+            config_dir.join(history_raw).to_string_lossy().to_string()
+        }
     };
     
     let key_path = config_dir.join("master.key");
@@ -462,6 +473,7 @@ async fn main() -> Result<()> {
         quant, 
         system_prompt, 
         history_path, 
+        session_id,
         memory_store.clone(), 
         sub_agent_model,
         config.planner_model.clone(),
@@ -557,7 +569,8 @@ async fn main() -> Result<()> {
     }
 
     if cli.cli {
-        run_cli_mode(agent).await?;
+        run_cli_mode(agent.clone()).await?;
+        agent.print_interaction_summary();
         return Ok(());
     }
     
@@ -794,6 +807,8 @@ async fn main() -> Result<()> {
     
     // KILL SWITCH: Signal Ollama to unload the model from VRAM immediately on exit
     agent.shutdown().await;
+    
+    agent.print_interaction_summary();
     
     Ok(())
 }

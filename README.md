@@ -63,6 +63,9 @@ Lightweight, direct command-line interface for rapid tasks and piping.
 ```bash
 ./target/release/tempest_ai --cli
 ./target/release/tempest_ai --mlx --cli
+
+# Resume a previous session and optionally swap the underlying model backend
+./target/release/tempest_ai --cli --resume my_session_123 --gemini
 ```
 
 ---
@@ -117,6 +120,8 @@ Tempest supports six inference backends, selectable at launch:
 - **🔌 MCP Protocol Support**: Native integration with any Model Context Protocol server
 - **⚡ Parallel Tool Execution**: Independent tool calls dispatched concurrently
 - **⏪ Multi-Level Undo**: Automatic file snapshots before every modification — `/undo` to revert
+- **🔥 Hardcore Mode**: Zero-tolerance execution profile with ruthless context compaction and strict task-driven behavior via `/toggle_hardcore`
+- **🔄 Session Resumption**: Resume past interactions and chat histories with `--resume <session_id>` while seamlessly swapping AI models
 - **📊 Real-Time Telemetry**: CPU, GPU (Metal/Linux), and RAM monitoring via `tempest-monitor`
 - **📦 Standalone Portable**: Web Command Center assets embedded via `include_dir` for single-file deployment
 - **🛡️ Safe Mode**: Visual diff previews for all proposed changes during the approval phase

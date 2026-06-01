@@ -888,10 +888,31 @@ pub async fn run_tui(
                             crossterm::event::KeyCode::Enter if is_ctrl || is_alt => {
                                 if !app.input_buffer.text().is_empty() {
                                     let msg = app.input_buffer.text().to_string();
-                                    app.push_message(format!("You: {}", msg));
-                                    let _ = user_tx.send(msg).await;
-                                    app.auto_scroll = true;
-                                    app.input_buffer.set_text("");
+                                    if msg.trim() == "/quit" {
+                                        app.should_quit = true;
+                                        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    } else {
+                                        app.push_message(format!("You: {}", msg));
+                                        let _ = user_tx.send(msg).await;
+                                        app.auto_scroll = true;
+                                        app.input_buffer.set_text("");
+                                    }
+                                }
+                                continue;
+                            }
+                            // Many Unix terminals send Ctrl+Enter as Ctrl+J (Line Feed)
+                            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Char('J') if is_ctrl => {
+                                if !app.input_buffer.text().is_empty() {
+                                    let msg = app.input_buffer.text().to_string();
+                                    if msg.trim() == "/quit" {
+                                        app.should_quit = true;
+                                        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    } else {
+                                        app.push_message(format!("You: {}", msg));
+                                        let _ = user_tx.send(msg).await;
+                                        app.auto_scroll = true;
+                                        app.input_buffer.set_text("");
+                                    }
                                 }
                                 continue;
                             }
@@ -1236,10 +1257,15 @@ pub async fn run_tui(
                                 }
                             } else if app.input_buffer.is_focused() && !app.input_buffer.text().is_empty() {
                                 let msg = app.input_buffer.text().to_string();
-                                app.push_message(format!("You: {}", msg));
-                                let _ = user_tx.send(msg).await;
-                                app.auto_scroll = true;
-                                app.input_buffer.set_text("");
+                                if msg.trim() == "/quit" {
+                                    app.should_quit = true;
+                                    stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                } else {
+                                    app.push_message(format!("You: {}", msg));
+                                    let _ = user_tx.send(msg).await;
+                                    app.auto_scroll = true;
+                                    app.input_buffer.set_text("");
+                                }
                             }
                         }
 
@@ -1581,6 +1607,55 @@ fn highlight_text(text: &str, extension: &str, syntax_set: &SyntaxSet, theme_set
     lines
 }
 
+fn wrap_ratatui_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 { return vec![line]; }
+    
+    let mut wrapped_lines = Vec::new();
+    let mut current_spans = Vec::new();
+    let mut current_width = 0;
+    
+    for span in line.spans {
+        let content = span.content.as_ref();
+        let style = span.style;
+        
+        let mut word_start = 0;
+        let mut char_indices = content.char_indices().peekable();
+        
+        while let Some((i, c)) = char_indices.next() {
+            let c_width = UnicodeWidthStr::width(c.to_string().as_str());
+            
+            if current_width + c_width > max_width {
+                if i > word_start {
+                    current_spans.push(Span::styled(
+                        content[word_start..i].to_string(),
+                        style
+                    ));
+                }
+                wrapped_lines.push(Line::from(current_spans));
+                current_spans = Vec::new();
+                current_width = 0;
+                word_start = i;
+            }
+            current_width += c_width;
+        }
+        
+        if word_start < content.len() {
+            current_spans.push(Span::styled(
+                content[word_start..].to_string(),
+                style
+            ));
+        }
+    }
+    
+    if !current_spans.is_empty() {
+        wrapped_lines.push(Line::from(current_spans));
+    } else if wrapped_lines.is_empty() {
+        wrapped_lines.push(Line::default());
+    }
+    
+    wrapped_lines
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
     let input_lines = if app.input_buffer.is_focused() {
         app.input_buffer.text().lines().count().max(1).min(8) as u16
@@ -1823,7 +1898,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                                 line.spans.insert(0, Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)));
                                 first_line = false;
                             }
-                            items.push(ListItem::new(line));
+                            let wrapped_lines = wrap_ratatui_line(line, chat_width);
+                            for wl in wrapped_lines {
+                                items.push(ListItem::new(wl));
+                            }
                         }
                     } else {
                         let parsed = tui_markdown::from_str(&block.content);
@@ -1833,7 +1911,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                                 line_static.spans.insert(0, Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)));
                                 first_line = false;
                             }
-                            items.push(ListItem::new(line_static));
+                            let wrapped_lines = wrap_ratatui_line(line_static, chat_width);
+                            for wl in wrapped_lines {
+                                items.push(ListItem::new(wl));
+                            }
                         }
                     }
                 }

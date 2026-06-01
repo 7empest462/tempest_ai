@@ -157,6 +157,10 @@ pub struct Agent {
     pub mcp_clients: Arc<DashMap<String, Arc<tokio::sync::Mutex<crate::mcp::McpClient>>>>,
     pub tool_registry_skg: Arc<skg_tool::ToolRegistry>,
     pub vram_time_sharing: bool,
+    pub session_id: String,
+    pub start_time: std::time::Instant,
+    pub api_time_ms: Arc<std::sync::atomic::AtomicU64>,
+    pub tool_time_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub struct AgentStream<'a> {
@@ -777,6 +781,7 @@ impl Agent {
         mut quant: String, 
         system_prompt: String, 
         history_path: String, 
+        session_id: String,
         memory_store: Arc<Mutex<MemoryStore>>, 
         sub_agent_model: String,
         planner_model: Option<String>,
@@ -959,6 +964,10 @@ impl Agent {
         let vector_brain = Arc::new(Mutex::new(crate::vector_brain::VectorBrain::load_from_disk(&brain_path)
             .unwrap_or_else(|_| crate::vector_brain::VectorBrain::new())));
 
+        let start_time = std::time::Instant::now();
+        let api_time_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tool_time_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
         Ok(Agent {
             mode,
             phase: Arc::new(Mutex::new(AgentPhase::Planning)),
@@ -1022,6 +1031,10 @@ impl Agent {
             mcp_clients: Arc::new(DashMap::new()),
             tool_registry_skg,
             vram_time_sharing,
+            session_id,
+            start_time,
+            api_time_ms,
+            tool_time_ms,
             system_prompt: {
                 let mut final_system_prompt = system_prompt.clone();
                 if mode == AgentMode::MLX {
@@ -1175,9 +1188,15 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             ""
         };
 
+        let hardcore_str = if self.hardcore_mode.load(std::sync::atomic::Ordering::SeqCst) {
+            "\n\n[HARDCORE MODE ACTIVE]: STRICT EXECUTION ONLY. DO NOT use conversational filler, apologies, or pleasantries. Output ONLY raw technical data, code diffs, and tool calls. Any conversational deviation will result in immediate termination."
+        } else {
+            ""
+        };
+
         let state_msg = format!(
-            "[STATE] {} | DIRECTIVE: AUTONOMY ENGAGED. Focus on tool-driven execution and technical reporting.{} | ADVISORY: Verify all path assumptions and results before proceeding.{}",
-            mode_str.to_uppercase(), competency_str, whisperer_str
+            "[STATE] {} | DIRECTIVE: AUTONOMY ENGAGED. Focus on tool-driven execution and technical reporting.{} | ADVISORY: Verify all path assumptions and results before proceeding.{}{}",
+            mode_str.to_uppercase(), competency_str, whisperer_str, hardcore_str
         );
 
         let mut h_lock = self.history.lock();
@@ -1826,8 +1845,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let rep_stack = self.tool_repetition_stack.lock().clone();
         let history = self.history.lock().clone();
         let sentinel = self.sentinel.clone();
+        let is_hardcore = self.hardcore_mode.load(std::sync::atomic::Ordering::SeqCst);
         let action_opt = tokio::task::spawn_blocking(move || {
-            sentinel.analyze_state(&history, ctx_limit, &rep_stack)
+            sentinel.analyze_state(&history, ctx_limit, &rep_stack, is_hardcore)
         }).await.into_diagnostic()?;
 
         if let Some(action) = action_opt {
@@ -1846,6 +1866,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                         format!("SENTINEL INTERVENTION: {}", action.message)
                     ));
                 }
+            }
+
+            if action.hardcore_kill {
+                return Err(miette::miette!("HARDCORE KILL TRIGGERED: {}", action.message));
             }
 
             if action.needs_compaction {
@@ -2163,6 +2187,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("📡 Dispatching request to {} ({}) [Waiting for GPU]...", backend_name, model_name))));
         }
 
+        let start_api = std::time::Instant::now();
         let output = self.backend.read().await.stream_chat(
             model_name,
             final_history,
@@ -2173,6 +2198,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             Some(tool_tx),
             Some(dynamic_tool_registry),
         ).await?;
+        self.api_time_ms.fetch_add(start_api.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Signal end of tool calls and wait for all mid-stream tools to finish
         // (though in reality the task completes as soon as tool_tx is dropped)
@@ -2403,7 +2429,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     }
                 }
 
+                let start_tool = std::time::Instant::now();
                 let res = self_clone.process_single_tool_call(call_clone, true).await;
+                self_clone.tool_time_ms.fetch_add(start_tool.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
                 
                 if is_mod {
                     if res.2 {
@@ -3171,6 +3199,62 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
     #[cfg(target_os = "macos")]
     async fn _unused_placeholder() {}
+
+    pub fn print_interaction_summary(&self) {
+        let uptime = self.start_time.elapsed();
+        let hours = uptime.as_secs() / 3600;
+        let minutes = (uptime.as_secs() % 3600) / 60;
+        let secs = uptime.as_secs() % 60;
+
+        let api_time = std::time::Duration::from_millis(self.api_time_ms.load(std::sync::atomic::Ordering::Relaxed));
+        let tool_time = std::time::Duration::from_millis(self.tool_time_ms.load(std::sync::atomic::Ordering::Relaxed));
+        
+        let api_secs = api_time.as_secs();
+        let tool_secs = tool_time.as_secs();
+        let uptime_secs = uptime.as_secs().max(1);
+
+        let mut total_success = 0;
+        let mut total_fail = 0;
+
+        for entry in self.tool_stats.iter() {
+            let (s, f) = *entry.value();
+            total_success += s;
+            total_fail += f;
+        }
+        let total_tools = total_success + total_fail;
+
+        let success_rate = if total_tools > 0 {
+            (total_success as f64 / total_tools as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let w: usize = 130;
+        let line = |s: &str| {
+            let len = s.chars().count();
+            let pad = w.saturating_sub(len);
+            println!(" │{}{}│", s, " ".repeat(pad));
+        };
+        
+        // Ensure standard terminal colors are reset before printing
+        println!("\x1b[0m");
+        println!(" ╭{}╮", "─".repeat(w));
+        line("  Agent powering down. Goodbye!");
+        line("");
+        line("  Interaction Summary");
+        line(&format!("  Session ID:                 {}", self.session_id));
+        line(&format!("  Tool Calls:                 {} ( ✓ {} x {} )", total_tools, total_success, total_fail));
+        line(&format!("  Success Rate:               {:.1}%", success_rate));
+        line("");
+        line("  Performance");
+        line(&format!("  Wall Time:                  {}h {}m {}s", hours, minutes, secs));
+        line(&format!("  Agent Active:               {}s", api_secs + tool_secs));
+        line(&format!("    » API Time:               {}s ({:.1}%)", api_secs, (api_secs as f64 / uptime_secs as f64) * 100.0));
+        line(&format!("    » Tool Time:              {}s ({:.1}%)", tool_secs, (tool_secs as f64 / uptime_secs as f64) * 100.0));
+        line("");
+        line(&format!("  To resume this session: tempest_ai --resume {}", self.session_id));
+        println!(" ╰{}╯", "─".repeat(w));
+    }
 }
 
 #[cfg(test)]
@@ -3186,6 +3270,7 @@ mod tests {
             "Q4_K_M".to_string(),
             "test-prompt".to_string(),
             "/tmp/tempest_test_history.json".to_string(),
+            "test-session-id".to_string(),
             memory_store,
             "test-sub-model".to_string(),
             None,
@@ -3230,6 +3315,7 @@ mod tests {
             "Q4_K_M".to_string(),
             "test-prompt".to_string(),
             "/tmp/tempest_test_history_sharing.json".to_string(),
+            "test-session-id-2".to_string(),
             memory_store,
             "test-sub-model".to_string(),
             Some("deepseek-r1:8b".to_string()),
