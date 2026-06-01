@@ -120,6 +120,7 @@ impl Backend {
             let _ = event_tx;
             let _ = paged_attn;
             let _ = ctx_limit;
+            let _ = pa_memory_mb;
         }
 
         match mode {
