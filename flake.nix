@@ -29,6 +29,7 @@
           dbus
           zlib
           expat
+          alsa-lib
           # X11 libs for arboard (clipboard)
           libx11
           libxcursor

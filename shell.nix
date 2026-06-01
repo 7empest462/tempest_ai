@@ -27,6 +27,7 @@ pkgs.mkShell {
     dbus
     zlib
     expat
+    alsa-lib
     libx11
     libxcursor
     libxinerama
