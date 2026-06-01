@@ -51,7 +51,7 @@ mlx_repeat_penalty_execution = 1.02
 # 🧹 BASE SETTINGS
 # ==========================================
 model = "deepseek-r1:8b"
-gemini_model = "gemini-2.0-flash"
+gemini_model = "gemini-3.5-flash"
 kalosm_model = "/Users/7empest_mac/.cache/huggingface/hub/models--bartowski--Qwen2.5-Coder-7B-Instruct-GGUF/snapshots/1f629da0c8bed16b9e50cee91c70693650e66c35/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 
 # ==========================================

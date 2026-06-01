@@ -291,7 +291,7 @@ async fn main() -> Result<()> {
     } else if cli.gemini {
         cli.model.clone()
             .or(config.gemini_model.clone())
-            .unwrap_or_else(|| "gemini-2.0-flash".to_string())
+            .unwrap_or_else(|| "gemini-3.5-flash".to_string())
     } else {
         cli.model.clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
