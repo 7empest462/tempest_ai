@@ -190,6 +190,13 @@ impl TempestAiBridge {
                             let mut repaired = chunk_val.clone();
                             if let Some(choices) = repaired.get_mut("choices").and_then(|c| c.as_array_mut()) {
                                 for choice in choices {
+                                    if let Some(fr) = choice.get_mut("finish_reason") {
+                                        if let Some(fr_str) = fr.as_str() {
+                                            if !["stop", "length", "tool_calls", "content_filter", "function_call", "null"].contains(&fr_str) {
+                                                *fr = serde_json::Value::String("stop".to_string());
+                                            }
+                                        }
+                                    }
                                     if let Some(delta) = choice.get_mut("delta").and_then(|d| d.as_object_mut()) {
                                         if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
                                             for tc in tool_calls {
