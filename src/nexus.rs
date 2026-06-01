@@ -95,7 +95,7 @@ pub async fn run_nexus(
     event_rx: Option<tokio::sync::mpsc::Receiver<crate::tui::AgentEvent>>,
     tool_tx: Option<tokio::sync::mpsc::Sender<crate::tui::ToolResponse>>,
 ) {
-    let (b_tx, _b_rx) = tokio::sync::broadcast::channel(100);
+    let (b_tx, _b_rx) = tokio::sync::broadcast::channel(4096);
     
     let state = Arc::new(NexusState { 
         planner_model: agent.planner_model.clone().unwrap_or_default(),
@@ -227,7 +227,7 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
     let (mut sender, mut receiver) = socket.split();
-    let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<Message>(100);
+    let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<Message>(4096);
 
     // Mux Task: Send messages from channel to WebSocket
     tokio::spawn(async move {
@@ -242,8 +242,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
     let mut broadcast_rx = state.broadcast_tx.subscribe();
     let ws_tx_broadcast = ws_tx.clone();
     tokio::spawn(async move {
-        while let Ok(json) = broadcast_rx.recv().await {
-            let _ = ws_tx_broadcast.send(Message::Text(json.into())).await;
+        loop {
+            match broadcast_rx.recv().await {
+                Ok(json) => {
+                    let _ = ws_tx_broadcast.send(Message::Text(json.into())).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 
