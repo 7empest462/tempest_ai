@@ -1133,9 +1133,9 @@ impl Agent {
                     }
                 } else {
                     let fallbacks = vec![
+                        "gemini-3.1-pro-preview-customtools",
                         "gemini-3.5-flash",
                         "gemini-3.1-pro-preview",
-                        "gemini-3.1-pro-preview-customtools",
                     ];
                     
                     let mut models_to_try = vec![bridge.model_name.clone()];
