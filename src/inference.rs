@@ -606,25 +606,48 @@ impl Backend {
                             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                                 for tc in tool_calls {
                                     let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                                    while native_tool_calls.len() <= idx {
-                                        native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                            function: ollama_rs::generation::tools::ToolCallFunction {
-                                                name: String::new(),
-                                                arguments: serde_json::Value::Object(serde_json::Map::new()),
-                                            },
-                                        });
-                                    }
-
                                     if let Some(func) = tc.get("function") {
-                                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                            if !name.is_empty() {
-                                                native_tool_calls[idx].function.name = name.to_string();
+                                        let mut extracted_idx = idx; // Fallback
+                                        let mut actual_name = String::new();
+                                        
+                                        if let Some(name_str) = func.get("name").and_then(|n| n.as_str()) {
+                                            if name_str.starts_with("__idx_") {
+                                                if let Some(end) = name_str[6..].find("__") {
+                                                    let absolute_end = 6 + end;
+                                                    if let Ok(num) = name_str[6..absolute_end].parse::<usize>() {
+                                                        extracted_idx = num;
+                                                    }
+                                                    actual_name = name_str[absolute_end+2..].to_string();
+                                                }
+                                            } else {
+                                                actual_name = name_str.to_string();
+                                            }
+                                        }
+
+                                        while native_tool_calls.len() <= extracted_idx {
+                                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                                function: ollama_rs::generation::tools::ToolCallFunction {
+                                                    name: String::new(),
+                                                    arguments: serde_json::Value::Object(serde_json::Map::new()),
+                                                },
+                                            });
+                                        }
+
+                                        if !actual_name.is_empty() && native_tool_calls[extracted_idx].function.name != actual_name {
+                                            native_tool_calls[extracted_idx].function.name = actual_name.clone();
+                                            if let Some(tx) = event_tx.lock().clone() {
+                                                let _ = tx.try_send(AgentEvent::StreamToken(format!("\n\n```json\n// Tool: {}\n", actual_name)));
                                             }
                                         }
 
                                         if let Some(args_delta) = func.get("arguments").and_then(|a| a.as_str()) {
-                                            let entry = tool_arguments_deltas.entry(idx).or_default();
-                                            entry.push_str(args_delta);
+                                            if !args_delta.is_empty() {
+                                                let entry = tool_arguments_deltas.entry(extracted_idx).or_default();
+                                                entry.push_str(args_delta);
+                                                if let Some(tx) = event_tx.lock().clone() {
+                                                    let _ = tx.try_send(AgentEvent::StreamToken(args_delta.to_string()));
+                                                }
+                                            }
                                         }
                                     }
                                 }

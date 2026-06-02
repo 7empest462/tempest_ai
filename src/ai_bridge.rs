@@ -199,11 +199,11 @@ impl TempestAiBridge {
                                     }
                                     if let Some(delta) = choice.get_mut("delta").and_then(|d| d.as_object_mut()) {
                                         if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
-                                            for tc in tool_calls {
+                                            for (arr_i, tc) in tool_calls.iter_mut().enumerate() {
+                                                let orig_idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(arr_i as u64);
                                                 if let Some(func) = tc.get_mut("function").and_then(|f| f.as_object_mut()) {
-                                                    if !func.contains_key("name") {
-                                                        func.insert("name".to_string(), serde_json::Value::String("".to_string()));
-                                                    }
+                                                    let existing_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                                    func.insert("name".to_string(), serde_json::Value::String(format!("__idx_{}__{}", orig_idx, existing_name)));
                                                 }
                                             }
                                         }
