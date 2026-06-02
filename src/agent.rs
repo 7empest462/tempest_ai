@@ -1125,28 +1125,66 @@ impl Agent {
             crate::inference::Backend::Kalosm { .. } => {}
             crate::inference::Backend::Bridge(bridge) => {
                 use ai::chat_completions::ChatCompletionMessage;
-                let mut fallback_needed = false;
-                if let Err(e) = bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
-                    let err_str = e.to_string();
-                    if err_str.contains("503") || err_str.contains("UNAVAILABLE") {
-                        println!("{} {} is currently busy (503 UNAVAILABLE). Automatically falling back to gemini-3.1-pro...", "⚠️".yellow(), bridge.model_name);
-                        fallback_needed = true;
-                    } else {
+                
+                let is_gemini = bridge.model_name.starts_with("gemini");
+                if !is_gemini {
+                    if let Err(e) = bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
                         return Err(miette!("Bridge connection failed: {}. Ensure your local server (LM Studio/OpenAI) is running and the model '{}' is loaded.", e, self.model.lock()));
                     }
-                }
-                
-                if fallback_needed {
-                    drop(backend);
-                    *self.model.lock() = "gemini-3.1-pro".to_string();
+                } else {
+                    let fallbacks = vec![
+                        "gemini-3.5-flash",
+                        "gemini-3.1-pro-preview",
+                        "gemini-3.1-pro-preview-customtools",
+                    ];
                     
-                    let mut b_write = self.backend.write().await;
-                    let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-                    *b_write = crate::inference::Backend::Bridge(crate::ai_bridge::TempestAiBridge::new(
-                        crate::ai_bridge::ModelProvider::Gemini { api_key },
-                        "gemini-3.1-pro".to_string(),
-                    )?);
-                    return Ok(());
+                    let mut models_to_try = vec![bridge.model_name.clone()];
+                    for f in &fallbacks {
+                        if !models_to_try.contains(&f.to_string()) {
+                            models_to_try.push(f.to_string());
+                        }
+                    }
+
+                    let mut success = false;
+                    let mut last_err = String::new();
+
+                    for model_name in models_to_try {
+                        let test_bridge = if model_name == bridge.model_name {
+                            bridge.clone()
+                        } else {
+                            let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+                            crate::ai_bridge::TempestAiBridge::new(
+                                crate::ai_bridge::ModelProvider::Gemini { api_key },
+                                model_name.clone(),
+                            )?
+                        };
+
+                        match test_bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
+                            Ok(_) => {
+                                if model_name != bridge.model_name {
+                                    println!("{} Automatically falling back to {}...", "⚠️".yellow(), model_name);
+                                    drop(backend);
+                                    *self.model.lock() = model_name.clone();
+                                    let mut b_write = self.backend.write().await;
+                                    *b_write = crate::inference::Backend::Bridge(test_bridge);
+                                }
+                                success = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
+                                if last_err.contains("503") || last_err.contains("UNAVAILABLE") || last_err.contains("404") {
+                                    continue; // Try next fallback
+                                } else {
+                                    return Err(miette!("Bridge connection failed on model {}: {}", model_name, e));
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !success {
+                        return Err(miette!("All Gemini fallback models failed or are unavailable. Last error: {}", last_err));
+                    }
                 }
             }
             #[cfg(target_os = "macos")]
