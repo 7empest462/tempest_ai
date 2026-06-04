@@ -160,7 +160,7 @@ pub async fn compact_history(
     // If we are at critical capacity, try to summarize, but fallback to Hard-Prune if it fails or is too slow
     let summary_result = tokio::time::timeout(
         tokio::time::Duration::from_secs(30),
-        backend.stream_chat(
+        backend.clone().stream_chat(
             sub_model.to_string(),
             vec![ChatMessage::new(MessageRole::User, summary_prompt)],
             sampling,

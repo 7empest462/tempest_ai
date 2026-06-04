@@ -124,8 +124,7 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     // Check local directory first for developer-centric overrides
     paths_to_try.push(std::path::PathBuf::from("config.toml"));
     
-    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-        if !sudo_user.is_empty() && sudo_user != "root" {
+    if let Some(sudo_user) = std::env::var("SUDO_USER").ok().filter(|s| !s.is_empty() && s != "root") {
         cfg_select! {
             unix => {
                 let prefixes = ["/home", "/Users"];
@@ -152,7 +151,6 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
             },
             _ => {}
         }
-        }
     }
 
     if let Some(config_dir) = dirs::config_dir() {
@@ -163,15 +161,11 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     }
 
     for path in &paths_to_try {
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(config) = toml::from_str::<AppConfig>(&content) {
-                    if !tui_mode {
-                        println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
-                    }
-                    return config;
-                }
+        if let Some(config) = std::fs::read_to_string(path).ok().and_then(|content| toml::from_str::<AppConfig>(&content).ok()) {
+            if !tui_mode {
+                println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
             }
+            return config;
         }
     }
 
@@ -308,14 +302,18 @@ async fn main() -> Result<()> {
     let sessions_dir = config_dir.join("sessions");
     let _ = std::fs::create_dir_all(&sessions_dir);
     
-    let history_path = if cli.resume.is_some() || config.history_path.is_none() {
+    let history_path = if cli.resume.is_some() {
         sessions_dir.join(format!("{}.json", session_id)).to_string_lossy().to_string()
     } else {
-        let history_raw = config.history_path.as_ref().unwrap();
-        if std::path::Path::new(history_raw).is_absolute() {
-            history_raw.clone()
-        } else {
-            config_dir.join(history_raw).to_string_lossy().to_string()
+        match &config.history_path {
+            Some(history_raw) => {
+                if std::path::Path::new(history_raw).is_absolute() {
+                    history_raw.clone()
+                } else {
+                    config_dir.join(history_raw).to_string_lossy().to_string()
+                }
+            }
+            None => sessions_dir.join(format!("{}.json", session_id)).to_string_lossy().to_string(),
         }
     };
     
@@ -597,6 +595,7 @@ async fn main() -> Result<()> {
         let mut sys = System::new_all();
         let mut networks = Networks::new_with_refreshed_list();
         let mut components = Components::new_with_refreshed_list();
+        let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
 
         loop {
             sys.refresh_all();
@@ -607,7 +606,7 @@ async fn main() -> Result<()> {
             let mut tempest_mem_bytes = 0;
             let mut lmstudio_mem_bytes = 0;
 
-            for (_pid, process) in sys.processes() {
+            for process in sys.processes().values() {
                 let name = process.name().to_string_lossy().to_lowercase();
                 let exe = process.exe().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
                 
@@ -635,7 +634,6 @@ async fn main() -> Result<()> {
                             if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
                                 let s = String::from_utf8_lossy(&output.stdout);
                                 // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
-                                let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
                                 vram_re.captures_iter(&s)
                                     .filter_map(|caps| caps.get(1))
                                     .map(|m| m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024)
@@ -716,18 +714,16 @@ async fn main() -> Result<()> {
             let mut sum_temp = 0.0;
             let mut count_temp = 0;
             for comp in &components {
-                if let Some(mut temp) = comp.temperature() {
-                    if temp > 0.0 {
-                        // Some systems return milli-degrees Celsius (e.g. 45000)
-                        if temp > 500.0 { temp /= 1000.0; }
-                        
-                        // Safety cap for invalid sensors
-                        if temp > 150.0 { continue; }
-                        
-                        if temp > max_temp { max_temp = temp; }
-                        sum_temp += temp;
-                        count_temp += 1;
-                    }
+                if let Some(mut temp) = comp.temperature().filter(|&t| t > 0.0) {
+                    // Some systems return milli-degrees Celsius (e.g. 45000)
+                    if temp > 500.0 { temp /= 1000.0; }
+                    
+                    // Safety cap for invalid sensors
+                    if temp > 150.0 { continue; }
+                    
+                    if temp > max_temp { max_temp = temp; }
+                    sum_temp += temp;
+                    count_temp += 1;
                 }
             }
             let avg_temp = if count_temp > 0 { sum_temp / count_temp as f32 } else { 0.0 };
@@ -799,6 +795,19 @@ async fn main() -> Result<()> {
 
     *agent.event_tx.lock() = Some(agent_tx.clone());
     *agent.tool_rx.lock().await = Some(tool_rx);
+
+    {
+        let current_model = agent.get_model();
+        let status_msg = match agent.mode {
+            tempest_ai::inference::AgentMode::Gemini => format!("🟢 Connected: {}", current_model),
+            tempest_ai::inference::AgentMode::MLX => format!("🟢 MLX Engine Loaded: {}", current_model),
+            tempest_ai::inference::AgentMode::Kalosm => format!("🟢 Kalosm Loaded: {}", current_model),
+            tempest_ai::inference::AgentMode::LMStudio => format!("🟢 LM Studio Connected: {}", current_model),
+            tempest_ai::inference::AgentMode::Ollama => format!("🟢 Connected: {}", current_model),
+            _ => format!("🟢 Connected: {}", current_model),
+        };
+        let _ = agent_tx.send(tempest_ai::tui::AgentEvent::SubagentStatus(Some(status_msg))).await;
+    }
     
     let agent_tui = agent.clone();
     tokio::spawn(async move {

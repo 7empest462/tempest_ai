@@ -1374,7 +1374,13 @@ pub async fn run_tui(
         while let Ok(event) = agent_rx.try_recv() {
             match event {
                 AgentEvent::SystemUpdate(u) => {
-                    if u.contains("PLANNING mode") {
+                    if u.contains("-> Planning") || u.contains("-> PLANNING") {
+                        app.agent_mode = "PLANNING".to_string();
+                    } else if u.contains("-> Execution") || u.contains("-> EXECUTION") {
+                        app.agent_mode = "EXECUTING".to_string();
+                    } else if u.contains("-> Testing") || u.contains("-> TESTING") {
+                        app.agent_mode = "TESTING".to_string();
+                    } else if u.contains("PLANNING mode") {
                         app.agent_mode = "PLANNING".to_string();
                     } else if u.contains("EXECUTION mode") {
                         app.agent_mode = "EXECUTING".to_string();
@@ -1471,7 +1477,12 @@ pub async fn run_tui(
                     app.thinking_msg = None;
                     app.engine_status = Some("🛑 FAILED".to_string());
                 }
-                AgentEvent::AgentStateChange(_) | AgentEvent::ActiveTools(_) | AgentEvent::TaskUpdate(_) => {}
+                AgentEvent::AgentStateChange(state) => {
+                    if state == "Done" {
+                        app.agent_mode = "IDLE".to_string();
+                    }
+                }
+                AgentEvent::ActiveTools(_) | AgentEvent::TaskUpdate(_) => {}
                 AgentEvent::ToolSuccess { name } => {
                     app.push_message(format!("✅ [TOOL]: {} completed successfully.", name.to_uppercase()));
                 }
@@ -2019,6 +2030,14 @@ fn ui(f: &mut Frame, app: &mut App) {
     // --- ⚙️ STATUS / TELEMETRY ZONE (Always Visible) ---
     let status_title = format!(" ⚙️ STATUS [{}] ", app.agent_mode);
     let mut status_lines = Vec::new();
+    
+    if let Some(status) = &app.engine_status {
+        status_lines.push(Line::from(vec![
+            Span::styled("🤖 ENGINE STATUS: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(status, Style::default().fg(Color::Green)),
+        ]));
+        status_lines.push(Line::from(""));
+    }
     
     let spinner = if app.thinking_msg.is_some() {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

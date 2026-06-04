@@ -123,7 +123,7 @@ impl Default for AppConfig {
             mlx_model: Some("/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string()),
             mlx_quant: Some("None".to_string()),
             kalosm_model: Some("kalosm_default".to_string()),
-            gemini_model: Some("gemini-3.5-flash".to_string()),
+            gemini_model: Some("gemini-3.1-pro-preview-customtools".to_string()),
             paged_attn: Some(true),
             planner_model: Some("deepseek-r1:8b".to_string()),
             executor_model: Some("qwen2.5-coder:7b".to_string()),

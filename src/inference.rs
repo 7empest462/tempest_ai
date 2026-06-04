@@ -92,6 +92,13 @@ impl Backend {
         }
     }
 
+    pub fn raw_history(&self) -> Option<std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>>> {
+        match self {
+            Backend::Bridge(bridge) => Some(bridge.raw_history.clone()),
+            _ => None,
+        }
+    }
+
 
     #[allow(dead_code)]
     pub fn supports_tools(&self) -> bool {
@@ -259,7 +266,12 @@ impl Backend {
                 let provider = crate::ai_bridge::ModelProvider::Ollama { 
                     base_url: url 
                 };
-                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
+                let models: Vec<String> = model
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, models)?;
                 Ok((Backend::Bridge(bridge), model))
             }
             AgentMode::LMStudio => {
@@ -268,7 +280,12 @@ impl Backend {
                     api_key: "lm-studio".to_string(),
                     base_url: Some(url)
                 };
-                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
+                let models: Vec<String> = model
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, models)?;
                 Ok((Backend::Bridge(bridge), model))
             }
             AgentMode::Kalosm => {
@@ -346,7 +363,12 @@ impl Backend {
                 }
 
                 let provider = crate::ai_bridge::ModelProvider::Gemini { api_key };
-                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, model.clone())?;
+                let models: Vec<String> = model
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let bridge = crate::ai_bridge::TempestAiBridge::new(provider, models)?;
                 Ok((Backend::Bridge(bridge), model))
             }
         }
@@ -363,7 +385,11 @@ impl Backend {
         on_tool_call: Option<tokio::sync::mpsc::UnboundedSender<ollama_rs::generation::tools::ToolCall>>,
         tool_registry: Option<Vec<ollama_rs::generation::tools::ToolInfo>>,
     ) -> Result<InferenceOutput> {
-        let history = normalize_history(&history);
+        let history = if matches!(self, Backend::Bridge(_)) {
+            history
+        } else {
+            normalize_history(&history)
+        };
 
         // Pre-allocate with capacity to reduce reallocations during streaming
         // ~8192 tokens at ~4-5 chars per token ≈ 32-40KB; allocate 64KB to be safe
@@ -454,16 +480,6 @@ impl Backend {
                 });
             }
             Backend::Bridge(bridge) => {
-                use ai::chat_completions::ChatCompletionMessage;
-                let ai_messages: Vec<ChatCompletionMessage> = history.iter().map(|m| {
-                    match m.role {
-                        MessageRole::System => ChatCompletionMessage::System(m.content.clone().into()),
-                        MessageRole::User => ChatCompletionMessage::User(m.content.clone().into()),
-                        MessageRole::Assistant => ChatCompletionMessage::Assistant(m.content.clone().into()),
-                        _ => ChatCompletionMessage::User(m.content.clone().into()),
-                    }
-                }).collect();
-
                 let model_lower = model.to_lowercase();
                 let is_reasoning = model_lower.contains("r1") || model_lower.contains("deepseek") || model_lower.contains("deep-seek");
                 
@@ -472,7 +488,7 @@ impl Backend {
                     let _ = tx.send(AgentEvent::Thinking(Some("Thinking...".to_string()))).await;
                 }
 
-                let mut stream = bridge.stream_chat(ai_messages, tool_registry.clone()).await?;
+                let mut stream = bridge.stream_chat(history.clone(), tool_registry.clone()).await?;
                 
                 let tx_opt = event_tx.lock().clone();
                 if let Some(tx) = tx_opt {
@@ -487,13 +503,11 @@ impl Backend {
                 let start_time = std::time::Instant::now();
 
                 let mut tool_arguments_deltas: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+                let mut max_tool_index = 0usize;  // Track highest index used so far
 
                 while let Some(chunk_res) = stream.next().await {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                    let chunk = chunk_res.map_err(|e| miette!("Bridge Stream Error: {}", e))?;
-                    
-                    // Convert to Value for flexible parsing because the 'ai' crate types are rigid
-                    let chunk_val = serde_json::to_value(&chunk).unwrap_or_default();
+                    let chunk_val = chunk_res.map_err(|e| miette!("Bridge Stream Error: {}", e))?;
 
                     if let Some(choices) = chunk_val.get("choices").and_then(|c| c.as_array()) {
                         if let Some(choice) = choices.first() {
@@ -605,25 +619,53 @@ impl Backend {
 
                             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                                 for tc in tool_calls {
-                                    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                    // ⚠️ CRITICAL: Use the explicit index field if provided, otherwise track by call number
+                                    let index_from_provider = tc.get("index").and_then(|i| i.as_u64()).map(|i| i as usize);
+                                    
                                     if let Some(func) = tc.get("function") {
-                                        let mut extracted_idx = idx; // Fallback
                                         let mut actual_name = String::new();
+                                        let mut override_idx: Option<usize> = None;
                                         
                                         if let Some(name_str) = func.get("name").and_then(|n| n.as_str()) {
+                                            // Check if the name has index encoding: __idx_N__actual_name
                                             if name_str.starts_with("__idx_") {
                                                 if let Some(end) = name_str[6..].find("__") {
                                                     let absolute_end = 6 + end;
                                                     if let Ok(num) = name_str[6..absolute_end].parse::<usize>() {
-                                                        extracted_idx = num;
+                                                        // Successfully parsed index from encoding
+                                                        override_idx = Some(num);
+                                                        // Extract the REAL tool name (after __idx_N__)
+                                                        actual_name = name_str[absolute_end+2..].to_string();
                                                     }
-                                                    actual_name = name_str[absolute_end+2..].to_string();
                                                 }
                                             } else {
+                                                // No encoding, use name as-is
                                                 actual_name = name_str.to_string();
                                             }
                                         }
+                                        
+                                        // 🔄 Determine index FIRST — argument-delta chunks have no name
+                                        // but still carry arguments via the provider's index field.
+                                        let resolved_idx = override_idx.or(index_from_provider);
 
+                                        // Skip truly unprocessable chunks (no name AND no index)
+                                        if actual_name.is_empty() && resolved_idx.is_none() {
+                                            continue;
+                                        }
+
+                                        let extracted_idx = resolved_idx.unwrap_or_else(|| {
+                                            // Assign next available index and increment tracker
+                                            let idx = max_tool_index;
+                                            max_tool_index = max_tool_index.saturating_add(1);
+                                            idx
+                                        });
+                                        
+                                        // Also track the highest index we've used (from encoded or provider)
+                                        if let Some(idx) = resolved_idx {
+                                            max_tool_index = max_tool_index.max(idx + 1);
+                                        }
+                                        
+                                        // Grow array to accommodate this index
                                         while native_tool_calls.len() <= extracted_idx {
                                             native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                                 function: ollama_rs::generation::tools::ToolCallFunction {
@@ -632,20 +674,34 @@ impl Backend {
                                                 },
                                             });
                                         }
-
-                                        if !actual_name.is_empty() && native_tool_calls[extracted_idx].function.name != actual_name {
+                                        
+                                        // Set tool name only on chunks that carry one (first chunk per call)
+                                        if !actual_name.is_empty() && native_tool_calls[extracted_idx].function.name.is_empty() {
                                             native_tool_calls[extracted_idx].function.name = actual_name.clone();
                                             if let Some(tx) = event_tx.lock().clone() {
                                                 let _ = tx.try_send(AgentEvent::StreamToken(format!("\n\n```json\n// Tool: {}\n", actual_name)));
                                             }
                                         }
 
-                                        if let Some(args_delta) = func.get("arguments").and_then(|a| a.as_str()) {
+                                        // 🔄 ALWAYS accumulate arguments, even on name-less delta chunks
+                                        let args_delta_opt = if let Some(a) = func.get("arguments") {
+                                            if let Some(s) = a.as_str() {
+                                                Some(s.to_string())
+                                            } else if a.is_object() {
+                                                Some(a.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
+
+                                        if let Some(args_delta) = args_delta_opt {
                                             if !args_delta.is_empty() {
                                                 let entry = tool_arguments_deltas.entry(extracted_idx).or_default();
-                                                entry.push_str(args_delta);
+                                                entry.push_str(&args_delta);
                                                 if let Some(tx) = event_tx.lock().clone() {
-                                                    let _ = tx.try_send(AgentEvent::StreamToken(args_delta.to_string()));
+                                                    let _ = tx.try_send(AgentEvent::StreamToken(args_delta));
                                                 }
                                             }
                                         }
@@ -655,22 +711,56 @@ impl Backend {
                         }
                     }
 
-                    // 🛑 HARD STOP / YIELD: Truncate generation the millisecond the JSON tool is complete
-                    if crate::overwatch::is_complete_tool_json(&full_content) {
-                        let tx_opt = event_tx.lock().clone();
-                        if let Some(tx) = tx_opt {
-                            let _ = tx.try_send(AgentEvent::SystemUpdate("🛑 Hard Stop: Tool call detected, yielding execution.".to_string()));
-                        }
-                        break;
-                    }
+                    // 🛑 HARD STOP / YIELD: For Bridge backend, DO NOT break early on tool calls
+                    // Tool calls may arrive sequentially, and breaking after the first one will
+                    // cause subsequent tool calls to be missed. Let the stream complete naturally.
+                    // The fallback extraction will catch any tool calls we might have missed.
+                    // (Early break logic removed for Bridge backend - too aggressive)
                 }
 
                 // Finalize tool call arguments
                 for (idx, args_str) in tool_arguments_deltas {
-                    if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(&args_str) {
-                        native_tool_calls[idx].function.arguments = args_val;
+                    if args_str.is_empty() {
+                        // Empty arguments - leave as empty object
+                        continue;
+                    }
+                    
+                    // Try to parse as complete JSON first
+                    match serde_json::from_str::<serde_json::Value>(&args_str) {
+                        Ok(args_val) => {
+                            if idx < native_tool_calls.len() {
+                                native_tool_calls[idx].function.arguments = args_val;
+                            }
+                        }
+                        Err(_e) => {
+                            // If JSON parsing fails, try to repair it
+                            let repaired = crate::overwatch::repair_json_str(&args_str);
+                            match serde_json::from_str::<serde_json::Value>(&repaired) {
+                                Ok(args_val) => {
+                                    if idx < native_tool_calls.len() {
+                                        native_tool_calls[idx].function.arguments = args_val;
+                                    }
+                                }
+                                Err(_) => {
+                                    // Still failed - log as warning but don't crash
+                                    if let Some(tx) = event_tx.lock().clone() {
+                                        let _ = tx.try_send(AgentEvent::SystemUpdate(
+                                            format!("⚠️ Could not parse tool arguments for index {}: {}", idx, args_str.chars().take(100).collect::<String>())
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+
+                // Filter out invalid tool calls (empty names indicate incomplete parsing)
+                native_tool_calls.retain(|call| !call.function.name.is_empty());
+
+                // 🔄 Save content BEFORE appending native tool calls, for supplementary extraction.
+                // This captures text-based tool calls that the model output as content,
+                // without re-extracting native API calls that get appended below.
+                let content_for_extraction = format!("{}\n{}", reasoning_content, full_content);
 
                 // Incorporate native tool calls into full_content for consistent tracking
                 for call in &native_tool_calls {
@@ -687,22 +777,34 @@ impl Backend {
                 }
 
                 // --- 🛡️ HARDENED TOOL EXTRACTION (llm-extract) ---
-                // If native_tool_calls is empty but full_content has JSON blocks, parse them using
-                // self-repairing extraction logic. Handles markdown, malformed JSON, and field typos.
-                if native_tool_calls.is_empty() {
-                    let combined_content = format!("{}\n{}", reasoning_content, full_content);
+                // 🔄 ALWAYS run extraction, even when native API calls exist.
+                // Gemini often sends the first call natively and outputs the rest as text.
+                {
+                    let combined_content = content_for_extraction;
 
-                    // Extract multiple tool calls using self-repairing JSON logic
+                    let mut extract_success = false;
                     if let Ok(payloads) = llm_extract::extract_all::<ToolCallPayload>(&combined_content) {
-                        for payload in payloads {
-                            native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                                function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name: payload.name,
-                                    arguments: payload.arguments,
+                        if !payloads.is_empty() {
+                            extract_success = true;
+                            for payload in payloads {
+                                let mut name = payload.name;
+                                if name.starts_with("__idx_") {
+                                    if let Some(end) = name[6..].find("__") {
+                                        let absolute_end = 6 + end;
+                                        name = name[absolute_end+2..].to_string();
+                                    }
                                 }
-                            });
+                                native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                                    function: ollama_rs::generation::tools::ToolCallFunction {
+                                        name,
+                                        arguments: payload.arguments,
+                                    }
+                                });
+                            }
                         }
-                    } else {
+                    }
+                    
+                    if !extract_success {
                         // --- 🛡️ FALLBACK: tool-parser (v1.2.0) with DeepSeekParser ---
                         let parser = tool_parser::DeepSeekParser::new();
                         let mut parsed_success = false;
@@ -710,9 +812,16 @@ impl Backend {
                             if !calls.is_empty() {
                                 parsed_success = true;
                                 for call in calls {
+                                    let mut name = call.function.name;
+                                    if name.starts_with("__idx_") {
+                                        if let Some(end) = name[6..].find("__") {
+                                            let absolute_end = 6 + end;
+                                            name = name[absolute_end+2..].to_string();
+                                        }
+                                    }
                                     native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                         function: ollama_rs::generation::tools::ToolCallFunction {
-                                            name: call.function.name,
+                                            name,
                                             arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
                                         }
                                     });
@@ -757,15 +866,43 @@ impl Backend {
 
                                     if let Some(end_idx) = end_idx {
                                         let json_str: String = chars[start_idx..=end_idx].iter().collect();
-                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                        let json_str_repaired = crate::overwatch::repair_json_str(&json_str);
+                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str_repaired) {
                                             if let Some(obj) = val.as_object() {
-                                                let name_opt = obj.get("tool").or(obj.get("name")).or(obj.get("function")).or(obj.get("function_name")).and_then(|v| v.as_str());
-                                                let args_opt = obj.get("arguments").or(obj.get("args")).or(obj.get("parameters")).cloned();
+                                                let mut name_opt = obj.get("tool").or(obj.get("name")).or(obj.get("function")).or(obj.get("function_name")).and_then(|v| v.as_str());
+                                                let mut args_opt = obj.get("arguments").or(obj.get("args")).or(obj.get("parameters")).cloned();
+
+                                                let extracted_name = if name_opt.is_none() {
+                                                    let prefix: String = chars[..start_idx].iter().collect();
+                                                    if let Some(tool_comment_idx) = prefix.rfind("// Tool:") {
+                                                        let comment_line = &prefix[tool_comment_idx..];
+                                                        let name = if let Some(newline_idx) = comment_line.find('\n') {
+                                                            comment_line["// Tool:".len()..newline_idx].trim()
+                                                        } else {
+                                                            comment_line["// Tool:".len()..].trim()
+                                                        };
+                                                        if !name.is_empty() {
+                                                            Some(name.to_string())
+                                                        } else { None }
+                                                    } else { None }
+                                                } else { None };
+
+                                                if let Some(ref name_str) = extracted_name {
+                                                    name_opt = Some(name_str);
+                                                    args_opt = Some(val.clone());
+                                                }
 
                                                 if let Some(name) = name_opt {
+                                                    let mut final_name = name.to_string();
+                                                    if final_name.starts_with("__idx_") {
+                                                        if let Some(end) = final_name[6..].find("__") {
+                                                            let absolute_end = 6 + end;
+                                                            final_name = final_name[absolute_end+2..].to_string();
+                                                        }
+                                                    }
                                                     native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                                         function: ollama_rs::generation::tools::ToolCallFunction {
-                                                            name: name.to_string(),
+                                                            name: final_name,
                                                             arguments: args_opt.unwrap_or(serde_json::json!({})),
                                                         }
                                                     });
@@ -779,6 +916,15 @@ impl Backend {
                             }
                         }
                     }
+                }
+
+                // 🛡️ DEDUP: Remove duplicate tool calls that appeared both natively and in text
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    native_tool_calls.retain(|call| {
+                        let key = format!("{}:{}", call.function.name, call.function.arguments);
+                        seen.insert(key)
+                    });
                 }
 
                 // Enforce [ACTOR PROTOCOL]: Truncate content after first tool call if found
@@ -1974,17 +2120,29 @@ impl Backend {
         if native_tool_calls.is_empty() {
             let combined_content = format!("{}\n{}", reasoning_content, full_content);
 
-            // Extract multiple tool calls using self-repairing JSON logic
+            let mut extract_success = false;
             if let Ok(payloads) = llm_extract::extract_all::<ToolCallPayload>(&combined_content) {
-                for payload in payloads {
-                    native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
-                        function: ollama_rs::generation::tools::ToolCallFunction {
-                            name: payload.name,
-                            arguments: payload.arguments,
+                if !payloads.is_empty() {
+                    extract_success = true;
+                    for payload in payloads {
+                        let mut final_name = payload.name;
+                        if final_name.starts_with("__idx_") {
+                            if let Some(end) = final_name[6..].find("__") {
+                                let absolute_end = 6 + end;
+                                final_name = final_name[absolute_end+2..].to_string();
+                            }
                         }
-                    });
+                        native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
+                            function: ollama_rs::generation::tools::ToolCallFunction {
+                                name: final_name,
+                                arguments: payload.arguments,
+                            }
+                        });
+                    }
                 }
-            } else {
+            }
+            
+            if !extract_success {
                 // --- 🛡️ FALLBACK: tool-parser (v1.2.0) with DeepSeekParser ---
                 // If llm-extract fails, try specialized DeepSeekParser for multi-block recovery
                 let parser = tool_parser::DeepSeekParser::new();
@@ -1993,9 +2151,16 @@ impl Backend {
                     if !calls.is_empty() {
                         parsed_success = true;
                         for call in calls {
+                            let mut final_name = call.function.name;
+                            if final_name.starts_with("__idx_") {
+                                if let Some(end) = final_name[6..].find("__") {
+                                    let absolute_end = 6 + end;
+                                    final_name = final_name[absolute_end+2..].to_string();
+                                }
+                            }
                             native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                 function: ollama_rs::generation::tools::ToolCallFunction {
-                                    name: call.function.name,
+                                    name: final_name,
                                     arguments: serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({})),
                                 }
                             });
@@ -2041,7 +2206,8 @@ impl Backend {
 
                             if brace_count == 0 {
                                 let json_str: String = chars[start_idx..=end_idx].iter().collect();
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                let json_str_repaired = crate::overwatch::repair_json_str(&json_str);
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str_repaired) {
                                     if let Some(obj) = val.as_object() {
                                         let name_opt = obj.get("tool")
                                             .or_else(|| obj.get("name"))
@@ -2057,9 +2223,16 @@ impl Backend {
                                             .cloned();
 
                                         if let Some(name) = name_opt {
+                                            let mut final_name = name.clone();
+                                            if final_name.starts_with("__idx_") {
+                                                if let Some(end) = final_name[6..].find("__") {
+                                                    let absolute_end = 6 + end;
+                                                    final_name = final_name[absolute_end+2..].to_string();
+                                                }
+                                            }
                                             native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                                 function: ollama_rs::generation::tools::ToolCallFunction {
-                                                    name,
+                                                    name: final_name,
                                                     arguments: args_opt.unwrap_or(serde_json::json!({})),
                                                 }
                                             });

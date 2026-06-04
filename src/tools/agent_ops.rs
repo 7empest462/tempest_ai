@@ -123,7 +123,7 @@ impl AgentTool for SpawnSubAgentTool {
             ChatMessage::new(MessageRole::User, format!("{{\"jsonrpc\": \"2.0\", \"method\": \"prompt\", \"params\": {{\"task\": \"{}\"}}}}", task)),
         ];
 
-        let backend = context.backend.read().await;
+        let backend = context.backend.read().await.clone();
         let sampling = crate::inference::SamplingConfig {
             temperature: 0.1,
             top_p: 0.9,

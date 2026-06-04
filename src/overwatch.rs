@@ -585,6 +585,98 @@ pub fn is_complete_tool_json(text: &str) -> bool {
     false
 }
 
+/// Helper to repair unescaped nested double quotes in JSON values before parsing.
+/// It scans for key-value starts like `"command": "` and escapes any unescaped double quotes
+/// in the value before the matching closing quote (which is followed by a JSON delimiter).
+pub fn repair_json_str(s: &str) -> String {
+    let key_start_re = regex::Regex::new(r#""[a-zA-Z0-9_-]+"\s*:\s*""#).unwrap();
+    let mut result = s.to_string();
+    
+    // Scan backwards so that modifying indices doesn't affect earlier matches
+    let mut matches: Vec<(usize, usize)> = key_start_re.find_iter(s).map(|m| (m.start(), m.end())).collect();
+    matches.reverse();
+
+    for (_start_idx, end_idx) in matches {
+        let remaining = &result[end_idx..];
+        
+        let mut closing_quote_idx = None;
+        let chars: Vec<char> = remaining.chars().collect();
+        let mut j = 0;
+        while j < chars.len() {
+            if chars[j] == '"' {
+                // Check if followed by JSON delimiter: , or } or ]
+                let mut is_delimiter = false;
+                let mut k = j + 1;
+                while k < chars.len() {
+                    let c = chars[k];
+                    if c.is_whitespace() {
+                        k += 1;
+                        continue;
+                    }
+                    if c == ',' || c == '}' || c == ']' {
+                        is_delimiter = true;
+                    }
+                    break;
+                }
+                
+                if is_delimiter {
+                    closing_quote_idx = Some(j);
+                }
+            }
+            
+            // Stop scanning if we hit another key-value start
+            if j + 3 < chars.len() && chars[j] == '"' {
+                let mut k = j + 1;
+                while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-') {
+                    k += 1;
+                }
+                if k < chars.len() && chars[k] == '"' {
+                    let mut colon = k + 1;
+                    while colon < chars.len() && chars[colon].is_whitespace() {
+                        colon += 1;
+                    }
+                    if colon < chars.len() && chars[colon] == ':' {
+                        let mut quote = colon + 1;
+                        while quote < chars.len() && chars[quote].is_whitespace() {
+                            quote += 1;
+                        }
+                        if quote < chars.len() && chars[quote] == '"' {
+                            break;
+                        }
+                    }
+                }
+            }
+            j += 1;
+        }
+
+        if let Some(close_idx) = closing_quote_idx {
+            // Find character index boundary safely
+            let char_boundary_idx: usize = remaining.char_indices().map(|(idx, _)| idx).nth(close_idx).unwrap_or(close_idx);
+            let raw_value = &remaining[..char_boundary_idx];
+            let mut repaired_value = String::new();
+            let chars_val: Vec<char> = raw_value.chars().collect();
+            let mut idx = 0;
+            while idx < chars_val.len() {
+                let c = chars_val[idx];
+                if c == '"' {
+                    let is_escaped = idx > 0 && chars_val[idx - 1] == '\\';
+                    if !is_escaped {
+                        repaired_value.push('\\');
+                    }
+                }
+                repaired_value.push(c);
+                idx += 1;
+            }
+            
+            let prefix = &result[..end_idx];
+            let suffix = &result[end_idx + char_boundary_idx..];
+            result = format!("{}{}{}", prefix, repaired_value, suffix);
+        }
+    }
+    
+    result
+}
+
 // ============================================================
 // 🔌 RULE FACTORY & CONTEXT OPERATIONS
 // ============================================================
@@ -2272,5 +2364,18 @@ mod tests {
 
         // With user intent, it should pass
         assert_matches!(overwatch.validate_effects(&tiny_critical_write, Some("create Cargo.toml hello world")), OverwatchVerdict::Pass);
+    }
+
+    #[test]
+    fn test_repair_json_str() {
+        let malformed = r#"{"tool":"run_command","arguments":{"command":"grep -rn "Initiate Meltdown" /path/"}}"#;
+        let repaired = repair_json_str(malformed);
+        assert_eq!(repaired, r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Initiate Meltdown\" /path/"}}"#);
+        assert!(serde_json::from_str::<serde_json::Value>(&repaired).is_ok());
+
+        let already_escaped = r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Initiate Meltdown\" /path/"}}"#;
+        let repaired_escaped = repair_json_str(already_escaped);
+        assert_eq!(repaired_escaped, already_escaped);
+        assert!(serde_json::from_str::<serde_json::Value>(&repaired_escaped).is_ok());
     }
 }

@@ -824,10 +824,9 @@ impl Agent {
             }
         }
 
-        // --- 🌪️ BACKEND UNIFICATION GUARD ---
-        // If we are in MLX or LMStudio mode, we override the tiered models to None 
+        // If we are not in Ollama mode, we override the tiered models to None 
         // so they fallback to the unified primary model.
-        let (p_model, e_model, v_model) = if mode == AgentMode::MLX || mode == AgentMode::LMStudio {
+        let (p_model, e_model, v_model) = if mode != AgentMode::Ollama {
             (None, None, None)
         } else {
             (planner_model, executor_model, verifier_model)
@@ -1126,19 +1125,27 @@ impl Agent {
             crate::inference::Backend::Bridge(bridge) => {
                 use ai::chat_completions::ChatCompletionMessage;
                 
-                let is_gemini = bridge.model_name.starts_with("gemini");
+                let tx_opt = self.event_tx.lock().clone();
+                let is_gemini = bridge.models[0].starts_with("gemini");
                 if !is_gemini {
+                    if let Some(tx) = &tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🔌 Connecting to: {}...", bridge.models[0]))));
+                    }
                     if let Err(e) = bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
                         return Err(miette!("Bridge connection failed: {}. Ensure your local server (LM Studio/OpenAI) is running and the model '{}' is loaded.", e, self.model.lock()));
                     }
+                    if let Some(tx) = &tx_opt {
+                        let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🟢 Connected: {}", bridge.models[0]))));
+                    }
                 } else {
                     let fallbacks = vec![
-                        "gemini-3.1-pro-preview-customtools",
                         "gemini-3.5-flash",
                         "gemini-3.1-pro-preview",
+                        "gemini-2.5-flash",
+                        "gemini-1.5-pro-latest",
                     ];
                     
-                    let mut models_to_try = vec![bridge.model_name.clone()];
+                    let mut models_to_try = vec![bridge.models[0].clone()];
                     for f in &fallbacks {
                         if !models_to_try.contains(&f.to_string()) {
                             models_to_try.push(f.to_string());
@@ -1149,24 +1156,35 @@ impl Agent {
                     let mut last_err = String::new();
 
                     for model_name in models_to_try {
-                        let test_bridge = if model_name == bridge.model_name {
+                        if let Some(tx) = &tx_opt {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🔌 Connecting to: {}...", model_name))));
+                        }
+                        let test_bridge = if model_name == bridge.models[0] {
                             bridge.clone()
                         } else {
                             let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
                             crate::ai_bridge::TempestAiBridge::new(
                                 crate::ai_bridge::ModelProvider::Gemini { api_key },
-                                model_name.clone(),
+                                vec![model_name.clone()],
                             )?
                         };
 
                         match test_bridge.chat(vec![ChatCompletionMessage::User("ping".to_string().into())], None).await {
                             Ok(_) => {
-                                if model_name != bridge.model_name {
-                                    println!("{} Automatically falling back to {}...", "⚠️".yellow(), model_name);
+                                if model_name != bridge.models[0] {
+                                    let update_msg = format!("Automatically falling back to {}...", model_name);
+                                    if let Some(tx) = &tx_opt {
+                                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("⚠️ {}", update_msg)));
+                                    } else {
+                                        println!("{} {}", "⚠️".yellow(), update_msg);
+                                    }
                                     drop(backend);
                                     *self.model.lock() = model_name.clone();
                                     let mut b_write = self.backend.write().await;
                                     *b_write = crate::inference::Backend::Bridge(test_bridge);
+                                }
+                                if let Some(tx) = &tx_opt {
+                                    let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🟢 Connected: {}", model_name))));
                                 }
                                 success = true;
                                 break;
@@ -1277,7 +1295,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
         if is_not_mlx {
             let is_ollama = matches!(self.backend.read().await.mode(), crate::inference::AgentMode::Ollama);
-            if !(self.vram_time_sharing && is_ollama) {
+            if is_ollama && !self.vram_time_sharing {
                 *self.model.lock() = new_phase.default_model();
             }
         }
@@ -1310,6 +1328,20 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     }
                 }
 
+                // 🔄 Historical demangling for standard history
+                for msg in &mut history {
+                    for call in &mut msg.tool_calls {
+                        let mut name = call.function.name.clone();
+                        if name.starts_with("__idx_") {
+                            if let Some(end) = name[6..].find("__") {
+                                let absolute_end = 6 + end;
+                                name = name[absolute_end+2..].to_string();
+                                call.function.name = name;
+                            }
+                        }
+                    }
+                }
+
                 let mut h_lock = self.history.lock();
                 for msg in history {
                     if msg.role != MessageRole::System {
@@ -1318,6 +1350,55 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 }
             }
         }
+
+        // Load raw history if it exists to preserve thought signatures and extra fields
+        let raw_path = format!("{}.raw.json", self.history_path);
+        if std::path::Path::new(&raw_path).exists() {
+            if let Ok(raw_data) = std::fs::read_to_string(&raw_path) {
+                if let Ok(mut raw_history_vec) = serde_json::from_str::<Vec<serde_json::Value>>(&raw_data) {
+                    // 🔄 Historical demangling for raw history
+                    for msg_val in &mut raw_history_vec {
+                        if msg_val.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                            if let Some(tool_calls) = msg_val.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                                for tc in tool_calls {
+                                    if let Some(func) = tc.get_mut("function").and_then(|f| f.as_object_mut()) {
+                                        if let Some(name_val) = func.get_mut("name") {
+                                            if let Some(name_str) = name_val.as_str() {
+                                                if name_str.starts_with("__idx_") {
+                                                    if let Some(end) = name_str[6..].find("__") {
+                                                        let absolute_end = 6 + end;
+                                                        let actual_name = name_str[absolute_end+2..].to_string();
+                                                        *name_val = serde_json::Value::String(actual_name);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if msg_val.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                            if let Some(name_val) = msg_val.get_mut("name") {
+                                if let Some(name_str) = name_val.as_str() {
+                                    if name_str.starts_with("__idx_") {
+                                        if let Some(end) = name_str[6..].find("__") {
+                                            let absolute_end = 6 + end;
+                                            let actual_name = name_str[absolute_end+2..].to_string();
+                                            *name_val = serde_json::Value::String(actual_name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(raw_hist_arc) = self.backend.try_read().ok().and_then(|b| b.raw_history()) {
+                        let mut raw_hist = raw_hist_arc.lock();
+                        *raw_hist = raw_history_vec;
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1382,6 +1463,16 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let path = std::path::Path::new(&self.history_path);
         let file = std::fs::File::create(path).into_diagnostic()?;
         serde_json::to_writer_pretty(file, &*history).into_diagnostic()?;
+
+        // Save raw history to preserve thought signatures and extra fields
+        if let Some(raw_hist_arc) = self.backend.try_read().ok().and_then(|b| b.raw_history()) {
+            let raw_hist = raw_hist_arc.lock();
+            let raw_path = format!("{}.raw.json", self.history_path);
+            if let Ok(raw_file) = std::fs::File::create(raw_path) {
+                let _ = serde_json::to_writer_pretty(raw_file, &*raw_hist);
+            }
+        }
+
         Ok(())
     }
 
@@ -1842,8 +1933,12 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         
         let tx_opt = self.event_tx.lock().clone();
         if let Some(tx) = tx_opt {
-            let planner_model = self.planner_model.clone().unwrap_or_default();
-            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(format!("🤖 Engine: {} | Planner: {}", current_model, planner_model))));
+            let status = if let Some(planner) = &self.planner_model {
+                format!("🤖 Engine: {} | Planner: {}", current_model, planner)
+            } else {
+                format!("🤖 Engine: {}", current_model)
+            };
+            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(status)));
         }
 
         let full_system_prompt = self.build_system_prompt(current_phase, &current_model);
@@ -2011,8 +2106,8 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let is_planning = matches!(phase, AgentPhase::Planning);
         let is_mlx = mode == crate::inference::AgentMode::MLX;
 
-        // Resolve model name. If VRAM sharing is active with Ollama, pin to the primary model
-        let model_name = if self.vram_time_sharing && mode == crate::inference::AgentMode::Ollama {
+        // Resolve model name. If VRAM sharing is active with Ollama, or if we are not using Ollama backend, pin to the primary model
+        let model_name = if (self.vram_time_sharing && mode == crate::inference::AgentMode::Ollama) || mode != crate::inference::AgentMode::Ollama {
             self.model.lock().clone()
         } else {
             match phase {
@@ -2669,9 +2764,17 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             let executor = crate::effects::TempestEffectExecutor::new();
             match executor.execute_effect(effect).await {
                 Ok(res) => {
+                    metrics::counter!("tool.success", "tool" => tool_name.clone()).increment(1);
+                    self.tool_stats.entry(tool_name.to_string())
+                        .and_modify(|(s, _)| *s += 1)
+                        .or_insert((1, 0));
                     return (tool_name.clone(), res, true);
                 }
                 Err(e) => {
+                    metrics::counter!("tool.failure", "tool" => tool_name.clone()).increment(1);
+                    self.tool_stats.entry(tool_name.to_string())
+                        .and_modify(|(_, f)| *f += 1)
+                        .or_insert((0, 1));
                     return (tool_name.clone(), format!("Algebraic Effect Error: {}", e), false);
                 }
             }
@@ -2733,9 +2836,17 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                         Value::String(s) => s,
                         _ => res.to_string(),
                     };
+                    metrics::counter!("tool.success", "tool" => tool_name.clone()).increment(1);
+                    self.tool_stats.entry(tool_name.to_string())
+                        .and_modify(|(s, _)| *s += 1)
+                        .or_insert((1, 0));
                     return (tool_name.to_string(), res_str, true);
                 }
                 Err(e) => {
+                    metrics::counter!("tool.failure", "tool" => tool_name.clone()).increment(1);
+                    self.tool_stats.entry(tool_name.to_string())
+                        .and_modify(|(_, f)| *f += 1)
+                        .or_insert((0, 1));
                     return (tool_name.to_string(), format!("Skelegent Error: {}", e), false);
                 }
             }
@@ -2896,7 +3007,33 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         for caps in block_regex.captures_iter(content) {
             if let Some(m) = caps.get(1) {
                 let block_text = m.as_str().trim();
-                if let Ok(val) = serde_json::from_str::<Value>(block_text) {
+                
+                // Extract tool comment if present (e.g. // Tool: read_file)
+                let mut tool_comment_name = None;
+                let mut cleaned_block_text = block_text.to_string();
+                if let Some(idx) = block_text.find("// Tool:") {
+                    let comment_part = &block_text[idx..];
+                    let line = if let Some(nl) = comment_part.find('\n') {
+                        &comment_part[..nl]
+                    } else {
+                        comment_part
+                    };
+                    let name = line["// Tool:".len()..].trim();
+                    if !name.is_empty() {
+                        tool_comment_name = Some(name.to_string());
+                    }
+                    cleaned_block_text = block_text.replace(line, "");
+                }
+
+                let block_text_repaired = crate::overwatch::repair_json_str(&cleaned_block_text);
+                if let Ok(mut val) = serde_json::from_str::<Value>(&block_text_repaired) {
+                    if let Some(ref name) = tool_comment_name {
+                        if let Some(obj) = val.as_object_mut() {
+                            if !obj.contains_key("tool") && !obj.contains_key("name") && !obj.contains_key("function_name") && !obj.contains_key("function") {
+                                obj.insert("name".to_string(), serde_json::Value::String(name.clone()));
+                            }
+                        }
+                    }
                     // Single valid JSON value
                     if let Some(obj) = val.as_object() {
                         if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") {
@@ -2912,10 +3049,21 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                             }
                         }
                     }
-                } else if let Ok(val) = serde_json::from_str::<Value>(&format!("[{}]", block_text)) {
+                } else if let Ok(mut val) = serde_json::from_str::<Value>(&format!("[{}]", cleaned_block_text)) {
                     // 🛡️ MULTI-CALL RECOVERY: LM Studio models often output multiple JSON objects
                     // separated by commas in a single ```json block (e.g., `{...}, {...}`).
                     // This is invalid JSON on its own, but valid when wrapped in array brackets.
+                    if let Some(ref name) = tool_comment_name {
+                        if let Some(arr) = val.as_array_mut() {
+                            for item in arr {
+                                if let Some(obj) = item.as_object_mut() {
+                                    if !obj.contains_key("tool") && !obj.contains_key("name") && !obj.contains_key("function_name") && !obj.contains_key("function") {
+                                        obj.insert("name".to_string(), serde_json::Value::String(name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let Some(arr) = val.as_array() {
                         for item in arr {
                             if let Some(obj) = item.as_object() {
@@ -2969,11 +3117,38 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     
                     if brace_count == 0 {
                         let json_str: String = chars[start_idx..=end_idx].iter().collect();
-                        if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                        let json_str_repaired = crate::overwatch::repair_json_str(&json_str);
+                        if let Ok(val) = serde_json::from_str::<Value>(&json_str_repaired) {
                             if let Some(obj) = val.as_object() {
-                                if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
-                                    if !calls.iter().any(|existing: &Value| existing == &val) {
-                                        calls.push(val);
+                                let mut name_opt = obj.get("tool").or(obj.get("name")).or(obj.get("function")).or(obj.get("function_name")).or(obj.get("action")).and_then(|v| v.as_str());
+                                
+                                let extracted_name = if name_opt.is_none() {
+                                    let prefix: String = chars[..start_idx].iter().collect();
+                                    if let Some(tool_comment_idx) = prefix.rfind("// Tool:") {
+                                        let comment_line = &prefix[tool_comment_idx..];
+                                        let name = if let Some(newline_idx) = comment_line.find('\n') {
+                                            comment_line["// Tool:".len()..newline_idx].trim()
+                                        } else {
+                                            comment_line["// Tool:".len()..].trim()
+                                        };
+                                        if !name.is_empty() {
+                                            Some(name.to_string())
+                                        } else { None }
+                                    } else { None }
+                                } else { None };
+
+                                if let Some(ref name_str) = extracted_name {
+                                    name_opt = Some(name_str);
+                                }
+
+                                if let Some(name) = name_opt {
+                                    let mut with_name = obj.clone();
+                                    if !with_name.contains_key("name") && !with_name.contains_key("tool") {
+                                        with_name.insert("name".to_string(), serde_json::Value::String(name.to_string()));
+                                    }
+                                    let final_val = serde_json::Value::Object(with_name);
+                                    if !calls.iter().any(|existing: &Value| existing == &final_val) {
+                                        calls.push(final_val);
                                     }
                                 }
                             }
@@ -3145,7 +3320,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let model_name = self.model.lock().clone();
 
         // We use a tiny max_len for the warmup pulse
-        let _ = self.backend.read().await.stream_chat(
+        let _ = self.backend.read().await.clone().stream_chat(
             model_name,
             dummy_history,
             crate::inference::SamplingConfig {
@@ -3392,5 +3567,41 @@ mod tests {
 
         let testing_prompt = agent.build_system_prompt(AgentPhase::Testing, "qwen2.5-coder:7b");
         assert!(testing_prompt.contains("CURRENT OPERATIONAL PHASE: TESTING"));
+    }
+
+    #[tokio::test]
+    async fn test_extract_tool_calls_with_comments() {
+        let memory_store = Arc::new(Mutex::new(crate::memory::MemoryStore::new("test-passphrase".to_string()).unwrap()));
+        let agent = Agent::new(
+            crate::inference::AgentMode::Ollama,
+            "test-model".to_string(),
+            "Q4_K_M".to_string(),
+            "test-prompt".to_string(),
+            "/tmp/tempest_test_extract_comments.json".to_string(),
+            "test-session-id-3".to_string(),
+            memory_store,
+            "test-sub-model".to_string(),
+            None, None, None,
+            std::collections::HashMap::new(),
+            0.05, 0.25, 0.95, 0.92, 1.18, 1.12, 16384, 32768,
+            None, None, None, None, None, None,
+            false, true,
+            Arc::new(Mutex::new(None)),
+            None, None, false,
+        ).await.unwrap();
+
+        // 1. Raw text comment-based tool call (Brace-counting fallback)
+        let raw_content = "Please run this:\n// Tool: read_file\n{\"path\": \"src/main.rs\"}";
+        let calls = agent.extract_tool_calls(raw_content).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].get("name").and_then(|v| v.as_str()), Some("read_file"));
+        assert_eq!(calls[0].get("path").and_then(|v| v.as_str()), Some("src/main.rs"));
+
+        // 2. Markdown code block comment-based tool call
+        let md_content = "Here is the block:\n```json\n// Tool: run_command\n{\"command\": \"ls\"}\n```";
+        let calls_md = agent.extract_tool_calls(md_content).unwrap();
+        assert_eq!(calls_md.len(), 1);
+        assert_eq!(calls_md[0].get("name").and_then(|v| v.as_str()), Some("run_command"));
+        assert_eq!(calls_md[0].get("command").and_then(|v| v.as_str()), Some("ls"));
     }
 }

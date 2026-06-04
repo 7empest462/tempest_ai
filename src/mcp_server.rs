@@ -15,6 +15,7 @@ pub struct McpServer {
     agent: Agent,
     active_chat_id: Arc<Mutex<Option<Value>>>,
     event_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::tui::AgentEvent>>>>,
+    active_stop_flag: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl McpServer {
@@ -23,6 +24,7 @@ impl McpServer {
             agent,
             active_chat_id: Arc::new(Mutex::new(None)),
             event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
+            active_stop_flag: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -184,6 +186,13 @@ impl McpServer {
             TempestRequest::Chat { message, editor_context, .. } => {
                 println!("DEBUG RUST: Handling tempest/chat - message: '{}'", message);
 
+                // Abort any previous active runs gracefully by setting the stop flag
+                if let Some(prev_flag) = self.active_stop_flag.lock().clone() {
+                    prev_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                // Wait a brief moment to allow active stream and execution loops to exit cleanly
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
                 // Set active chat ID so the global relay knows where to send tokens
                 *self.active_chat_id.lock() = id.clone();
                 
@@ -196,7 +205,13 @@ impl McpServer {
                 let agent_clone = self.agent.clone();
                 let message_final = message.to_string();
                 let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                
+                // Save the new stop flag
+                *self.active_stop_flag.lock() = Some(stop_flag.clone());
+
                 let active_chat_id_clone = self.active_chat_id.clone();
+                let active_stop_flag_clone = self.active_stop_flag.clone();
+                let stop_flag_val = stop_flag.clone();
                 let mut stdout_clone = tokio::io::stdout();
                 
                 // Run the agent asynchronously
@@ -213,6 +228,14 @@ impl McpServer {
 
                     // Clear active chat ID
                     *active_chat_id_clone.lock() = None;
+
+                    // Clear active stop flag if it matches ours
+                    let mut flag_lock = active_stop_flag_clone.lock();
+                    if let Some(ref current_flag) = *flag_lock {
+                        if std::sync::Arc::ptr_eq(current_flag, &stop_flag_val) {
+                            *flag_lock = None;
+                        }
+                    }
                 });
 
                 // Send immediate acknowledgment so UI knows request was received
