@@ -2188,7 +2188,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "v0.3.5 \"Cyber-Orchestrator\"",
+                    "v0.3.6",
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),

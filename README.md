@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.5` — "Command Center"
+# 🌪️ Tempest AI `v0.3.6` — "Command Center"
 
 [![Download Latest Release](https://img.shields.io/badge/Download-Latest%20Release-blue?style=for-the-badge&logo=github)](https://github.com/7empest462/tempest_ai/releases/latest)
 
