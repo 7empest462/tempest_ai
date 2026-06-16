@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::fs;
-use similar::{TextDiff, ChangeTag};
 use chrono::Utc;
 use parking_lot::Mutex;
+use similar::{ChangeTag, TextDiff};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// A single checkpoint capturing the state of files before a batch of modifications.
 #[derive(Clone, Debug)]
@@ -88,7 +88,9 @@ impl CheckpointManager {
     /// Undo the most recent checkpoint by restoring all snapshotted files.
     /// Returns a summary of what was restored.
     pub fn undo(&mut self) -> Result<String, String> {
-        let checkpoint = self.stack.pop()
+        let checkpoint = self
+            .stack
+            .pop()
             .ok_or_else(|| "No checkpoints available to undo.".to_string())?;
 
         let mut restored = Vec::new();
@@ -100,17 +102,25 @@ impl CheckpointManager {
                     // File existed before — restore its content
                     match fs::write(path, content) {
                         Ok(_) => restored.push(format!("  ↩ Restored: {}", path.display())),
-                        Err(e) => errors.push(format!("  ✗ Failed to restore {}: {}", path.display(), e)),
+                        Err(e) => {
+                            errors.push(format!("  ✗ Failed to restore {}: {}", path.display(), e))
+                        }
                     }
                 }
                 None => {
                     // File didn't exist before — delete it
                     match fs::remove_file(path) {
-                        Ok(_) => restored.push(format!("  🗑 Removed (was new): {}", path.display())),
+                        Ok(_) => {
+                            restored.push(format!("  🗑 Removed (was new): {}", path.display()))
+                        }
                         Err(e) => {
                             // Not a hard error if the file is already gone
                             if path.exists() {
-                                errors.push(format!("  ✗ Failed to remove {}: {}", path.display(), e));
+                                errors.push(format!(
+                                    "  ✗ Failed to remove {}: {}",
+                                    path.display(),
+                                    e
+                                ));
                             }
                         }
                     }
@@ -175,6 +185,35 @@ impl CheckpointManager {
     pub fn discard_pending(&mut self) {
         self.pending = None;
     }
+
+    /// Get the original states and current states of all files modified in the last `n` checkpoints.
+    pub fn get_turn_modifications(
+        &self,
+        n: usize,
+    ) -> Vec<(PathBuf, Option<String>, Option<String>)> {
+        let mut original_states = HashMap::new();
+        let len = self.stack.len();
+        if n == 0 || len == 0 {
+            return Vec::new();
+        }
+
+        let start_idx = len.saturating_sub(n);
+        // Iterate from oldest to newest to capture the earliest original state
+        for cp in &self.stack[start_idx..] {
+            for (path, original_content) in &cp.snapshots {
+                if !original_states.contains_key(path) {
+                    original_states.insert(path.clone(), original_content.clone());
+                }
+            }
+        }
+
+        let mut results = Vec::new();
+        for (path, original) in original_states {
+            let current = fs::read_to_string(&path).ok();
+            results.push((path, original, current));
+        }
+        results
+    }
 }
 
 /// Generate a unified diff preview for a batch of file modifications.
@@ -185,7 +224,8 @@ pub fn generate_batch_diff(modifications: &[(PathBuf, String)]) -> String {
     }
 
     let mut output = String::new();
-    output.push_str(&format!("📋 Unified Diff Preview ({} file{})\n", 
+    output.push_str(&format!(
+        "📋 Unified Diff Preview ({} file{})\n",
         modifications.len(),
         if modifications.len() != 1 { "s" } else { "" }
     ));
@@ -195,18 +235,18 @@ pub fn generate_batch_diff(modifications: &[(PathBuf, String)]) -> String {
     for (path, new_content) in modifications {
         let old_content = fs::read_to_string(path).unwrap_or_default();
         let file_existed = path.exists();
-        
+
         let display_path = path.display().to_string();
-        
+
         if !file_existed {
             // New file
             output.push_str(&format!("\n┌─ 📄 NEW FILE: {}\n", display_path));
             output.push_str(&"─".repeat(60));
             output.push('\n');
-            
+
             let line_count = new_content.lines().count();
             output.push_str(&format!("  + {} lines\n", line_count));
-            
+
             // Show first 20 lines as preview
             for (i, line) in new_content.lines().take(20).enumerate() {
                 output.push_str(&format!("  + {:>4} │ {}\n", i + 1, line));
@@ -218,7 +258,7 @@ pub fn generate_batch_diff(modifications: &[(PathBuf, String)]) -> String {
             // Modified file — show unified diff
             let diff = TextDiff::from_lines(&old_content, new_content);
             let ops = diff.grouped_ops(3);
-            
+
             if ops.is_empty() {
                 output.push_str(&format!("\n┌─ 📄 {} (no changes)\n", display_path));
                 continue;
@@ -253,9 +293,11 @@ pub fn generate_batch_diff(modifications: &[(PathBuf, String)]) -> String {
                         let (sign, line_num) = match change.tag() {
                             ChangeTag::Delete => ("-", change.old_index().map(|i| i + 1)),
                             ChangeTag::Insert => ("+", change.new_index().map(|i| i + 1)),
-                            ChangeTag::Equal  => (" ", change.new_index().map(|i| i + 1)),
+                            ChangeTag::Equal => (" ", change.new_index().map(|i| i + 1)),
                         };
-                        let ln = line_num.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                        let ln = line_num
+                            .map(|n| format!("{:>4}", n))
+                            .unwrap_or_else(|| "    ".to_string());
                         output.push_str(&format!("  {} {} │ {}", sign, ln, change.value()));
                         // Ensure newline
                         if !change.value().ends_with('\n') {
@@ -291,33 +333,33 @@ mod tests {
     fn test_checkpoint_and_undo() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
-        
+
         // Create initial file
         let mut f = fs::File::create(&file_path).unwrap();
         write!(f, "original content").unwrap();
         drop(f);
 
         let mut mgr = CheckpointManager::new(10);
-        
+
         // Begin checkpoint and snapshot
         mgr.begin_checkpoint("test edit");
         mgr.snapshot_file(&file_path);
-        
+
         // Simulate modification
         fs::write(&file_path, "modified content").unwrap();
-        
+
         // Commit checkpoint
         let id = mgr.commit_checkpoint();
         assert!(id.is_some());
         assert_eq!(mgr.checkpoint_count(), 1);
-        
+
         // Verify file is modified
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "modified content");
-        
+
         // Undo
         let result = mgr.undo();
         assert!(result.is_ok());
-        
+
         // Verify file is restored
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "original content");
         assert_eq!(mgr.checkpoint_count(), 0);
@@ -327,19 +369,19 @@ mod tests {
     fn test_new_file_undo() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("new_file.txt");
-        
+
         let mut mgr = CheckpointManager::new(10);
-        
+
         // Begin checkpoint — file doesn't exist yet
         mgr.begin_checkpoint("create new file");
         mgr.snapshot_file(&file_path);
-        
+
         // Create the file
         fs::write(&file_path, "new content").unwrap();
-        
+
         mgr.commit_checkpoint();
         assert!(file_path.exists());
-        
+
         // Undo should delete the file
         mgr.undo().unwrap();
         assert!(!file_path.exists());
@@ -350,11 +392,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("code.rs");
         fs::write(&file_path, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
-        
-        let modifications = vec![
-            (file_path, "fn main() {\n    println!(\"goodbye\");\n    println!(\"world\");\n}\n".to_string()),
-        ];
-        
+
+        let modifications = vec![(
+            file_path,
+            "fn main() {\n    println!(\"goodbye\");\n    println!(\"world\");\n}\n".to_string(),
+        )];
+
         let preview = generate_batch_diff(&modifications);
         assert!(preview.contains("code.rs"));
         assert!(preview.contains("goodbye"));
@@ -363,16 +406,16 @@ mod tests {
     #[test]
     fn test_max_checkpoints() {
         let mut mgr = CheckpointManager::new(3);
-        
+
         for i in 0..5 {
             mgr.begin_checkpoint(&format!("checkpoint {}", i));
             mgr.pending.as_mut().unwrap().snapshots.insert(
-                PathBuf::from(format!("/tmp/fake_{}", i)), 
-                Some("content".to_string())
+                PathBuf::from(format!("/tmp/fake_{}", i)),
+                Some("content".to_string()),
             );
             mgr.commit_checkpoint();
         }
-        
+
         // Should only keep the last 3
         assert_eq!(mgr.checkpoint_count(), 3);
     }

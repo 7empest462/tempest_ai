@@ -14,8 +14,7 @@ Right now, I don't see any code in this file that actually listens for a button 
             let start_idx = i;
             let mut end_idx = None;
 
-            for j in i..chars.len() {
-                let c = chars[j];
+            for (j, &c) in chars.iter().enumerate().skip(i) {
                 if esc {
                     esc = false;
                     continue;
@@ -43,7 +42,12 @@ Right now, I don't see any code in this file that actually listens for a button 
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                     println!("Parsed successfully: {:?}", val);
                     if let Some(obj) = val.as_object() {
-                        let name_opt = obj.get("tool").or(obj.get("name")).or(obj.get("function")).or(obj.get("function_name")).and_then(|v| v.as_str());
+                        let name_opt = obj
+                            .get("tool")
+                            .or(obj.get("name"))
+                            .or(obj.get("function"))
+                            .or(obj.get("function_name"))
+                            .and_then(|v| v.as_str());
                         println!("Extracted name_opt: {:?}", name_opt);
                     }
                 } else {

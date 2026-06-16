@@ -1,16 +1,31 @@
+use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::Command;
-use miette::{Result, miette};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TempestEffect {
-    ReadFile { path: String },
-    WriteFile { path: String, content: String, force_overwrite: bool },
-    RunCommand { command: String, cwd: String },
+    ReadFile {
+        path: String,
+    },
+    WriteFile {
+        path: String,
+        content: String,
+        force_overwrite: bool,
+    },
+    RunCommand {
+        command: String,
+        cwd: String,
+    },
 }
 
 pub struct TempestEffectExecutor;
+
+impl Default for TempestEffectExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TempestEffectExecutor {
     pub fn new() -> Self {
@@ -25,11 +40,16 @@ impl TempestEffectExecutor {
                     .map_err(|e| miette!("Failed to read file {}: {}", path, e))?;
                 Ok(content)
             }
-            TempestEffect::WriteFile { path, content, force_overwrite: _ } => {
+            TempestEffect::WriteFile {
+                path,
+                content,
+                force_overwrite: _,
+            } => {
                 let path_expanded = shellexpand::tilde(&path).to_string();
                 if let Some(parent) = std::path::Path::new(&path_expanded).parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| miette!("Failed to create parent directory for {}: {}", path, e))?;
+                    fs::create_dir_all(parent).map_err(|e| {
+                        miette!("Failed to create parent directory for {}: {}", path, e)
+                    })?;
                 }
                 fs::write(&path_expanded, content)
                     .map_err(|e| miette!("Failed to write file {}: {}", path, e))?;
@@ -56,7 +76,11 @@ impl TempestEffectExecutor {
                 if output.status.success() {
                     Ok(stdout)
                 } else {
-                    Err(miette!("Command failed with exit code: {:?}\nError: {}", output.status.code(), stderr))
+                    Err(miette!(
+                        "Command failed with exit code: {:?}\nError: {}",
+                        output.status.code(),
+                        stderr
+                    ))
                 }
             }
         }

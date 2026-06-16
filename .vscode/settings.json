@@ -1,0 +1,4 @@
+{
+  "css.lint.unknownAtRules": "ignore",
+  "rust-analyzer.checkOnSave": false
+}

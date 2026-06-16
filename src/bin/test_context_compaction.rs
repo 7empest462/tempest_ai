@@ -1,7 +1,7 @@
-use tempest_ai::vector_brain::VectorBrain;
-use tempest_ai::context_manager::{estimate_tokens, needs_compaction};
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use std::collections::HashMap;
+use tempest_ai::context_manager::{estimate_tokens, needs_compaction};
+use tempest_ai::vector_brain::VectorBrain;
 
 fn main() {
     println!("🧪 [TEST]: Starting Context Compaction & Vector Retrieval Verification...");
@@ -23,7 +23,10 @@ fn main() {
     let messages = vec![system_prompt, user_msg_1, assistant_msg_1];
     let estimated = estimate_tokens(&messages);
     println!("📊 Estimated token count: {} tokens", estimated);
-    assert!(estimated > 0, "Estimated token count should be greater than zero");
+    assert!(
+        estimated > 0,
+        "Estimated token count should be greater than zero"
+    );
 
     // Check compaction trigger threshold (e.g. limit 50, threshold 42)
     let comp_needed = needs_compaction(&messages, 50);
@@ -40,7 +43,7 @@ fn main() {
     // Feature 2: CSS / Styling (index 1)
     // Feature 3: Rust compilation (index 2)
     // Feature 4: Other (index 3)
-    
+
     let db_embedding = vec![1.0, 0.0, 0.0, 0.0];
     let css_embedding = vec![0.0, 1.0, 0.0, 0.0];
     let rust_embedding = vec![0.0, 0.0, 1.0, 0.0];
@@ -69,24 +72,33 @@ fn main() {
     // Query 1: Database related question
     let query_vector_db = vec![0.9, 0.1, 0.0, 0.0]; // High database similarity
     let hits_db = brain.search(&query_vector_db, 2);
-    
+
     println!("🔍 Searching for database-related context...");
     assert!(!hits_db.is_empty(), "Search should return hits");
     println!("Top Hit: {}", hits_db[0].0.text);
     println!("Top Hit Similarity: {:.2}", hits_db[0].1);
-    assert!(hits_db[0].1 >= 0.70, "Database similarity score should be high");
-    assert!(hits_db[0].0.text.contains("port 5432"), "Should retrieve the correct database text");
+    assert!(
+        hits_db[0].1 >= 0.70,
+        "Database similarity score should be high"
+    );
+    assert!(
+        hits_db[0].0.text.contains("port 5432"),
+        "Should retrieve the correct database text"
+    );
 
     // Query 2: Styling / CSS related question
     let query_vector_css = vec![0.0, 0.95, 0.05, 0.0]; // High CSS similarity
     let hits_css = brain.search(&query_vector_css, 2);
-    
+
     println!("🔍 Searching for CSS-related context...");
     assert!(!hits_css.is_empty(), "Search should return hits");
     println!("Top Hit: {}", hits_css[0].0.text);
     println!("Top Hit Similarity: {:.2}", hits_css[0].1);
     assert!(hits_css[0].1 >= 0.70, "CSS similarity score should be high");
-    assert!(hits_css[0].0.text.contains("error code 0x800F081F"), "Should retrieve the correct CSS error text");
+    assert!(
+        hits_css[0].0.text.contains("error code 0x800F081F"),
+        "Should retrieve the correct CSS error text"
+    );
 
     println!("✅ [TEST]: Context Compaction and Semantic Memory recall tests passed successfully!");
 }

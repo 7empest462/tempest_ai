@@ -30,8 +30,7 @@ I'll search the rest of the codebase to locate where the UI button is created an
             let start_idx = i;
             let mut end_idx = None;
 
-            for j in i..chars.len() {
-                let c = chars[j];
+            for (j, &c) in chars.iter().enumerate().skip(i) {
                 if esc {
                     esc = false;
                     continue;
@@ -57,11 +56,11 @@ I'll search the rest of the codebase to locate where the UI button is created an
                 let json_str: String = chars[start_idx..=end_idx].iter().collect();
                 println!("--- Found block start_idx: {} ---", start_idx);
                 println!("{}", json_str);
-                
+
                 // Try to parse using serde_json
                 // But since we can't easily compile with serde_json here, we will just simulate it
                 // We know if it's a valid JSON it parses. Let's see if the JSON block is found!
-                
+
                 i = end_idx;
             }
         }

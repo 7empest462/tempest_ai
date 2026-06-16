@@ -1,5 +1,6 @@
 pub const NAME: &str = "git_workflow";
-pub const DESCRIPTION: &str = "Standard Git workflow for branching, committing, and pushing changes";
+pub const DESCRIPTION: &str =
+    "Standard Git workflow for branching, committing, and pushing changes";
 pub const INSTRUCTIONS: &str = r#"
 ## Branch Strategy
 1. Check current state: git status && git branch -a

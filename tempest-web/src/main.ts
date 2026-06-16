@@ -7,7 +7,7 @@ import '@xterm/xterm/css/xterm.css'
 declare var hljs: any;
 
 const extensionMap: Record<string, string> = {
-  'rs': 'rust', 'ts': 'typescript', 'js': 'javascript', 'sh': 'bash',
+  'rs': 'rust', 'ts': 'typescript', 'tsx': 'typescript', 'js': 'javascript', 'jsx': 'javascript', 'sh': 'bash',
   'toml': 'toml', 'md': 'markdown', 'json': 'json', 'html': 'xml',
   'css': 'css', 'py': 'python', 'yml': 'yaml', 'yaml': 'yaml',
   'zig': 'zig', 'nix': 'nix', 'c': 'c', 'cpp': 'cpp', 'h': 'cpp'

@@ -1,10 +1,10 @@
-use miette::{Result, IntoDiagnostic};
-use async_trait::async_trait;
-use serde_json::Value;
 use super::{AgentTool, ToolContext};
+use async_trait::async_trait;
+use miette::{IntoDiagnostic, Result};
+use ollama_rs::generation::tools::{ToolFunctionInfo, ToolInfo, ToolType};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use serde_json::Value;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ListSkillsArgs {}
@@ -13,20 +13,26 @@ pub struct ListSkillsTool;
 
 #[async_trait]
 impl AgentTool for ListSkillsTool {
-    fn name(&self) -> &'static str { "list_skills" }
-    fn description(&self) -> &'static str { "List all available skills from ~/.tempest/skills/. Skills are reusable, step-by-step recipes for common tasks." }
+    fn name(&self) -> &'static str {
+        "list_skills"
+    }
+    fn description(&self) -> &'static str {
+        "List all available skills from ~/.tempest/skills/. Skills are reusable, step-by-step recipes for common tasks."
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<ListSkillsArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<ListSkillsArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
@@ -49,20 +55,26 @@ pub struct SkillRecallTool;
 
 #[async_trait]
 impl AgentTool for SkillRecallTool {
-    fn name(&self) -> &'static str { "recall_skill" }
-    fn description(&self) -> &'static str { "Recall the full instructions of a specific skill by name. Use this to follow a predefined recipe for a task." }
+    fn name(&self) -> &'static str {
+        "recall_skill"
+    }
+    fn description(&self) -> &'static str {
+        "Recall the full instructions of a specific skill by name. Use this to follow a predefined recipe for a task."
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<SkillRecallArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<SkillRecallArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
@@ -71,9 +83,15 @@ impl AgentTool for SkillRecallTool {
         let name = typed_args.name;
         let skills = crate::skills::load_skills();
         if let Some(skill) = skills.iter().find(|s| s.name == name) {
-            Ok(format!("🔧 SKILL: {}\n{}\n\n--- INSTRUCTIONS ---\n{}", skill.name, skill.description, skill.instructions))
+            Ok(format!(
+                "🔧 SKILL: {}\n{}\n\n--- INSTRUCTIONS ---\n{}",
+                skill.name, skill.description, skill.instructions
+            ))
         } else {
-            Ok(format!("No skill found with name '{}'. Use `list_skills` to see available skills.", name))
+            Ok(format!(
+                "No skill found with name '{}'. Use `list_skills` to see available skills.",
+                name
+            ))
         }
     }
 }
@@ -82,26 +100,35 @@ pub struct DistillKnowledgeTool;
 
 #[async_trait]
 impl AgentTool for DistillKnowledgeTool {
-    fn name(&self) -> &'static str { "distill_knowledge" }
-    fn description(&self) -> &'static str { "After completing a significant task, write a distilled 1-paragraph summary to your brain for future reference. This creates a persistent knowledge item in ~/.tempest/brain/." }
-    fn is_modifying(&self) -> bool { true }
+    fn name(&self) -> &'static str {
+        "distill_knowledge"
+    }
+    fn description(&self) -> &'static str {
+        "After completing a significant task, write a distilled 1-paragraph summary to your brain for future reference. This creates a persistent knowledge item in ~/.tempest/brain/."
+    }
+    fn is_modifying(&self) -> bool {
+        true
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<DistillKnowledgeArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<DistillKnowledgeArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: DistillKnowledgeArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let typed_args: DistillKnowledgeArgs =
+            serde_json::from_value(args.clone()).into_diagnostic()?;
         let topic = &typed_args.topic;
         let summary = &typed_args.summary;
 
@@ -127,12 +154,16 @@ impl AgentTool for DistillKnowledgeTool {
                 summary.clone(),
                 embedding,
                 format!("brain:{}", filename),
-                std::collections::HashMap::new()
+                std::collections::HashMap::new(),
             );
             let _ = brain.save_to_disk(&context.brain_path);
         }
 
-        Ok(format!("🧠 Knowledge distilled! Saved '{}' to {}. This is now conceptually indexed in your neural memory.", topic, filepath.display()))
+        Ok(format!(
+            "🧠 Knowledge distilled! Saved '{}' to {}. This is now conceptually indexed in your neural memory.",
+            topic,
+            filepath.display()
+        ))
     }
 }
 
@@ -140,45 +171,65 @@ pub struct RecallBrainTool;
 
 #[async_trait]
 impl AgentTool for RecallBrainTool {
-    fn name(&self) -> &'static str { "recall_brain" }
-    fn description(&self) -> &'static str { "Search your brain directory for knowledge items related to a topic. Returns distilled summaries from previous sessions." }
+    fn name(&self) -> &'static str {
+        "recall_brain"
+    }
+    fn description(&self) -> &'static str {
+        "Search your brain directory for knowledge items related to a topic. Returns distilled summaries from previous sessions."
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<RecallBrainArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<RecallBrainArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: RecallBrainArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let keyword = &typed_args.keyword;
-        
+
         let tx_opt = context.tx.clone();
         if let Some(tx) = tx_opt {
-            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!("🧠 Searching neural memory for: '{}'...", keyword)));
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                "🧠 Searching neural memory for: '{}'...",
+                keyword
+            )));
         }
 
         let backend = context.backend.read().await;
         let query_vector = backend.generate_embeddings(keyword).await?;
-        
+
         let brain = context.vector_brain.lock();
         let results = brain.search(&query_vector, 5);
 
         if results.is_empty() {
-            Ok(format!("No brain knowledge items found matching the concept '{}'. Use `distill_knowledge` after a significant task to build your knowledge base.", keyword))
+            Ok(format!(
+                "No brain knowledge items found matching the concept '{}'. Use `distill_knowledge` after a significant task to build your knowledge base.",
+                keyword
+            ))
         } else {
-            let mut out = format!("🧠 Found {} relevant knowledge items for '{}':\n\n", results.len(), keyword);
+            let mut out = format!(
+                "🧠 Found {} relevant knowledge items for '{}':\n\n",
+                results.len(),
+                keyword
+            );
             for (entry, score) in results {
-                out.push_str(&format!("--- {} (Confidence: {:.1}%) ---\n{}\n\n", 
-                    entry.source, score * 100.0, entry.text));
+                out.push_str(&format!(
+                    "--- {} (Confidence: {:.1}%) ---\n{}\n\n",
+                    entry.source,
+                    score * 100.0,
+                    entry.text
+                ));
             }
             Ok(out)
         }

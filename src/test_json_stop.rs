@@ -15,7 +15,7 @@ The user is asking me to list the contents of the `./src/` directory."#;
             let mut escape = false;
             let start_idx = i;
             let mut end_idx = i;
-            
+
             let mut j = i;
             while j < chars.len() {
                 let c = chars[j];
@@ -23,32 +23,39 @@ The user is asking me to list the contents of the `./src/` directory."#;
                     in_string = !in_string;
                 }
                 if !in_string && !escape {
-                    if c == '{' { brace_count += 1; }
-                    else if c == '}' { brace_count -= 1; }
+                    if c == '{' {
+                        brace_count += 1;
+                    } else if c == '}' {
+                        brace_count -= 1;
+                    }
                 }
-                
+
                 if c == '\\' {
                     escape = !escape;
                 } else {
                     escape = false;
                 }
-                
+
                 if brace_count == 0 {
                     end_idx = j;
                     break;
                 }
                 j += 1;
             }
-            
+
             if brace_count == 0 {
                 let json_str: String = chars[start_idx..=end_idx].iter().collect();
                 println!("Found potential JSON: {}", json_str);
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    if let Some(obj) = val.as_object() {
-                        if obj.contains_key("tool") || obj.contains_key("name") || obj.contains_key("function_name") || obj.contains_key("function") || obj.contains_key("action") {
-                            calls.push(val);
-                            println!("Added tool call!");
-                        }
+                    if let Some(obj) = val.as_object()
+                        && (obj.contains_key("tool")
+                            || obj.contains_key("name")
+                            || obj.contains_key("function_name")
+                            || obj.contains_key("function")
+                            || obj.contains_key("action"))
+                    {
+                        calls.push(val);
+                        println!("Added tool call!");
                     }
                 } else {
                     println!("Failed to parse JSON!");
@@ -58,7 +65,7 @@ The user is asking me to list the contents of the `./src/` directory."#;
         }
         i += 1;
     }
-    
+
     println!("Extracted {} tool calls", calls.len());
     assert_eq!(calls.len(), 1);
 }

@@ -4,83 +4,86 @@ version = "0.3.5"
 edition = "2024"
 default-run = "tempest_ai"
 rust-version = "1.95"
+license = "BSL-1.0"
 authors = ["7empest462"]
 
 [dependencies]
-tempest-monitor = { version = "0.4.3", default-features = false }
+tempest-monitor = { version = "0.4.7", default-features = false }
 tokio = { version = "1.52.3", features = ["full", "tracing"] }
 console-subscriber = { version = "0.5.0", optional = true }
 ollama-rs = { version = "0.3.4", features = ["stream", "macros"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 portable-pty = "0.9.0"
 anyhow = "1.0.102"
-colored = "2.1"
-reqwest = { version = "0.13.4", features = ["json", "rustls", "form"], default-features = false }
-async-trait = "0.1"
-async-stream = "0.3"
-scraper = "0.20"
-html2text = "0.12"
+colored = "3.1.1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1.89"
+async-stream = "0.3.6"
+scraper = "0.27"
+html2text = "0.12.6"
 urlencoding = "2.1"
 url = "2.5"
 shellexpand = "3.1.2"
 rand = "0.10.1"
-sysinfo = "0.39.0"
+sysinfo = "0.39.3"
 sha2 = "0.11.0"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 notify = "8.2.0"
 clap = { version = "4.6.1", features = ["derive"] }
-config = "0.15"
-toml = "0.8"
-dirs = "5.0"
+config = "0.15.23"
+toml = "1.1.2"
+dirs = "6.0"
+minijinja = { version = "2.20.0", features = ["loader", "json"] }
+csv = "1.4.0"
+ractor = "0.15.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.11", features = ["v4", "serde"] }
-indicatif = "0.17"
-termimad = "0.31"
-syntect = "5.2"
-regex = "1.11"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "now", "serde", "wasmbind", "std"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
+indicatif = "0.18.4"
+termimad = "0.34.1"
+syntect = "5.3"
+regex = "1.12.3"
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = { version = "1.8", features = ["derive"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
 futures = "0.3.32"
-arboard = "3.4"
+arboard = "3.6.1"
 plotters = "0.3.7"
 sysctl = "0.7.1"
 nix = { version = "0.31", features = ["user"] }
 pnet = "0.35.0"
-ratatui = "0.30.0"
+ratatui = "0.30.1"
 crossterm = "0.29.0"
 tui-markdown = "0.3.7"
 rustyline = "18.0.0"
 include_dir = "0.7"
 walkdir = "2.5"
-ignore = "0.4"
-similar = "2.6"
+ignore = "0.4.26"
+similar = "3.1.1"
 schemars = "1.2.1"
 miette = { version = "7.6", features = ["fancy"] }
-color-eyre = "0.6"
+color-eyre = "0.6.5"
 parking_lot = "0.12.5"
-dashmap = "6.1"
-dyn-clone = "1.0"
-rig-core = "0.36.0"
+dashmap = "6.2.1"
+rig-core = "0.36"
 tool-parser = "1.2.0"
 llm-extract = "0.1.0"
 llm-extract-derive = "0.1.0"
-tracing-opentelemetry = "0.28"
-opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
-evalexpr = "11.0"
+metrics-exporter-prometheus = "0.18.3"
+evalexpr = "13.1.0"
 unicode-width = "0.2"
-tiktoken = "3.1.2"
+tiktoken = "3.5.1"
 fuzzy-matcher = "0.3.7"
 streaming-iterator = "0.1"
-arborium = { version = "2.17.0", default-features = false, features = [
+arborium = { version = "2.18.0", default-features = false, features = [
   "lang-rust", "lang-go", "lang-yaml", "lang-python", "lang-javascript", "lang-typescript",
   "lang-tsx", "lang-java", "lang-cpp", "lang-bash", "lang-c-sharp", "lang-html", "lang-css",
   "lang-c", "lang-json", "lang-hcl", "lang-lua", "lang-ruby", "lang-php", "lang-toml",
@@ -89,8 +92,9 @@ arborium = { version = "2.17.0", default-features = false, features = [
 ] }
 skg-tool = { version = "0.4.1", features = ["macros"] }
 layer0 = "0.4.1"
-ai = { version = "0.2.16", features = ["ollama_client", "openai_client"] }
-web-sys = { version = "0.3.69", features = [
+skg-state-memory = "0.4.1"
+skg-context = "0.4.1"
+web-sys = { version = "0.3.100", features = [
   "Blob",
   "Clipboard",
   "ClipboardEvent",
@@ -114,12 +118,13 @@ wgpu = { version = "29.0.1", default-features = false, features = [
   "metal",
   "parking_lot",
   "std",
+  "webgpu",
   "vulkan",
   "wgsl",
 ] }
 ratatui-textarea = "0.9.1"
 axum = { version = "0.8.9", features = ["ws"] }
-tower-http = { version = "0.6.10", features = ["fs", "cors"] }
+tower-http = { version = "0.6.11", features = ["fs", "cors"] }
 tower = { version = "0.5.3", features = ["full"] }
 mime_guess = "2.0.5"
 skg-context-engine = "0.4.1"
@@ -128,7 +133,7 @@ skg-tool-macro = "0.4.1"
 skg-turn-kit = "0.4.1"
 skg-effects-core = "0.4.1"
 skg-effects-local = "0.4.1"
-wasmtime = "29.0.0"
+wasmtime = "45.0.1"
 rat-markdown = "0.7.3"
 rat-focus = "2.1.1"
 rat-event = "2.1.0"
@@ -139,7 +144,8 @@ rat-text = "3.1.0"
 rayon = "1.12.0"
 kalosm = { version = "0.4.0", features = ["language"] }
 kalosm-sound = { version = "0.4.0" }
-agent-client-protocol-schema = "0.13.4"
+agent-client-protocol-schema = "0.13.6"
+grep = "0.4.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.25.3", features = ["metal", "accelerate"] }
@@ -152,22 +158,18 @@ candle-core = { version = "0.10.2" }
 chrono = "0.4"
 [dev-dependencies]
 tokio-console = "0.1"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
-tempfile = "3.0"
+criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
+pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
+tempfile = "3.27.0"
 tokio-test = "0.4.5"
-[profile.release]
-debug = true
-[profile.bench]
-debug = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nvml-wrapper = "0.12.0"
+nvml-wrapper = "0.12.1"
 procfs = "0.18.0"
 
 [[bin]]
 name = "test_regex"
-path = "src/test_regex.rs"
+path = "src/bin/test_regex.rs"
 
 [[bin]]
 name = "test_context_compaction"
@@ -180,3 +182,26 @@ path = "src/bin/test_tool_rag.rs"
 [features]
 console = ["dep:console-subscriber"]
 
+[[bench]]
+name = "tool_performance"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+debug-assertions = false
+debug = false
+overflow-checks = false
+rpath = false
+
+[profile.dev]
+opt-level = 1                  # Light optimization (good balance)
+debug = true                   # Full debug info
+split-debuginfo = "unpacked"   # Better debugging on macOS
+overflow-checks = true         # Catch bugs during development
+incremental = true             # Faster incremental compile
+
+[profile.bench]
+debug = true

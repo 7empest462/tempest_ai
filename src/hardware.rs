@@ -1,15 +1,13 @@
-use miette::{Result, miette};
+use crate::tools::{AgentTool, ToolContext};
 #[cfg(target_os = "linux")]
 use miette::IntoDiagnostic;
-use serde_json::Value;
-use crate::tools::{AgentTool, ToolContext};
-use schemars::JsonSchema;
-use serde::Deserialize;
-use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use miette::{Result, miette};
+use ollama_rs::generation::tools::{ToolFunctionInfo, ToolInfo, ToolType};
 #[cfg(target_os = "linux")]
 use procfs::WithCurrentSystemInfo;
-
-
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Deserialize, JsonSchema)]
 #[allow(dead_code)]
@@ -23,35 +21,39 @@ pub struct LinuxProcessAnalyzerTool;
 
 #[async_trait::async_trait]
 impl AgentTool for LinuxProcessAnalyzerTool {
-    fn name(&self) -> &'static str { "linux_process_analyzer" }
-    fn description(&self) -> &'static str { 
+    fn name(&self) -> &'static str {
+        "linux_process_analyzer"
+    }
+    fn description(&self) -> &'static str {
         "CRITICAL: NVIDIA ONLY. Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel. DO NOT USE ON MACOS. If you are on a Mac, use `system_diagnostic_scan` to see GPU stats."
     }
-    
+
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<LinuxProcessAnalyzerArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<LinuxProcessAnalyzerArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
-    
+
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: LinuxProcessAnalyzerArgs = serde_json::from_value(args.clone())
             .map_err(|e| miette!("Invalid arguments for linux_process_analyzer: {}", e))?;
-        
+
         #[cfg(target_os = "linux")]
         {
             let pid = typed_args.pid;
             let process = procfs::process::Process::new(pid).into_diagnostic()?;
-            
+
             let stat = process.stat().into_diagnostic()?;
             let io = process.io().into_diagnostic()?;
             let cmdline = process.cmdline().into_diagnostic()?.join(" ");
@@ -60,8 +62,11 @@ impl AgentTool for LinuxProcessAnalyzerTool {
             out.push_str(&format!("State: {:?}\n", stat.state));
             out.push_str(&format!("Threads: {}\n", stat.num_threads));
             out.push_str(&format!("RSS Memory: {} bytes\n", stat.rss_bytes().get()));
-            out.push_str(&format!("Char Read / Write: {} / {} bytes\n", io.rchar, io.wchar));
-            
+            out.push_str(&format!(
+                "Char Read / Write: {} / {} bytes\n",
+                io.rchar, io.wchar
+            ));
+
             Ok(out)
         }
         #[cfg(not(target_os = "linux"))]
@@ -84,35 +89,46 @@ pub struct GpuDiagnosticsTool;
 
 #[async_trait::async_trait]
 impl AgentTool for GpuDiagnosticsTool {
-    fn name(&self) -> &'static str { "gpu_diagnostics" }
-    fn description(&self) -> &'static str { "Read Nvidia GPU telemetry (temperature, clock speeds, active instances) natively." }
-    
+    fn name(&self) -> &'static str {
+        "gpu_diagnostics"
+    }
+    fn description(&self) -> &'static str {
+        "Read Nvidia GPU telemetry (temperature, clock speeds, active instances) natively."
+    }
+
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<GpuDiagnosticsArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<GpuDiagnosticsArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
-    
+
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
-        let typed_args: GpuDiagnosticsArgs = serde_json::from_value(args.clone())
-            .unwrap_or(GpuDiagnosticsArgs { gpu_id: Some(0) });
-            
+        let typed_args: GpuDiagnosticsArgs =
+            serde_json::from_value(args.clone()).unwrap_or(GpuDiagnosticsArgs { gpu_id: Some(0) });
+
         #[cfg(target_os = "linux")]
         {
             let gpu_id = typed_args.gpu_id.unwrap_or(0);
-            
+
             let nvml = match nvml_wrapper::Nvml::init() {
                 Ok(n) => n,
-                Err(e) => return Ok(format!("Failed to initialize NVML (Are Nvidia drivers accessible?): {}", e)),
+                Err(e) => {
+                    return Ok(format!(
+                        "Failed to initialize NVML (Are Nvidia drivers accessible?): {}",
+                        e
+                    ));
+                }
             };
 
             let device = match nvml.device_by_index(gpu_id) {
@@ -120,23 +136,42 @@ impl AgentTool for GpuDiagnosticsTool {
                 Err(e) => return Ok(format!("Failed to get GPU {}: {}", gpu_id, e)),
             };
 
-            let name = device.name().unwrap_or_else(|_| "Unknown Nvidia GPU".to_string());
-            let temp = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
-                .map(|t| format!("{}°C", t)).unwrap_or_else(|_| "N/A".to_string());
-            
+            let name = device
+                .name()
+                .unwrap_or_else(|_| "Unknown Nvidia GPU".to_string());
+            let temp = device
+                .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+                .map(|t| format!("{}°C", t))
+                .unwrap_or_else(|_| "N/A".to_string());
+
             let util = device.utilization_rates();
-            let util_gpu = util.as_ref().map(|u| format!("{}%", u.gpu)).unwrap_or_else(|_| "N/A".to_string());
-            let util_mem = util.as_ref().map(|u| format!("{}%", u.memory)).unwrap_or_else(|_| "N/A".to_string());
-            
+            let util_gpu = util
+                .as_ref()
+                .map(|u| format!("{}%", u.gpu))
+                .unwrap_or_else(|_| "N/A".to_string());
+            let util_mem = util
+                .as_ref()
+                .map(|u| format!("{}%", u.memory))
+                .unwrap_or_else(|_| "N/A".to_string());
+
             let mem = device.memory_info().ok();
-            let mem_used = mem.as_ref().map(|m| format!("{} MB", m.used / 1024 / 1024)).unwrap_or_else(|| "N/A".to_string());
-            let mem_total = mem.as_ref().map(|m| format!("{} MB", m.total / 1024 / 1024)).unwrap_or_else(|| "N/A".to_string());
+            let mem_used = mem
+                .as_ref()
+                .map(|m| format!("{} MB", m.used / 1024 / 1024))
+                .unwrap_or_else(|| "N/A".to_string());
+            let mem_total = mem
+                .as_ref()
+                .map(|m| format!("{} MB", m.total / 1024 / 1024))
+                .unwrap_or_else(|| "N/A".to_string());
 
             let mut out = format!("Device {}: {}\n", gpu_id, name);
             out.push_str(&format!("Temperature: {}\n", temp));
-            out.push_str(&format!("Utilization: GPU {} | VRAM {}\n", util_gpu, util_mem));
+            out.push_str(&format!(
+                "Utilization: GPU {} | VRAM {}\n",
+                util_gpu, util_mem
+            ));
             out.push_str(&format!("Memory Usage: {} / {}\n", mem_used, mem_total));
-            
+
             Ok(out)
         }
         #[cfg(not(target_os = "linux"))]
@@ -167,33 +202,39 @@ pub struct TelemetryChartTool;
 
 #[async_trait::async_trait]
 impl AgentTool for TelemetryChartTool {
-    fn name(&self) -> &'static str { "generate_telemetry_chart" }
-    fn description(&self) -> &'static str { "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes." }
-    
+    fn name(&self) -> &'static str {
+        "generate_telemetry_chart"
+    }
+    fn description(&self) -> &'static str {
+        "Generate a high-quality .png line-chart from arrays of X/Y data points. Useful for graphing CPU hogs, memory over time, or network spikes."
+    }
+
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<TelemetryChartArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<TelemetryChartArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
-    
+
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: TelemetryChartArgs = serde_json::from_value(args.clone())
             .map_err(|e| miette!("Invalid parameters for chart tool: {}", e))?;
-            
+
         let title = typed_args.title.as_str();
         let x_label = typed_args.x_label.as_str();
         let y_label = typed_args.y_label.as_str();
         let series_name = typed_args.series_name.as_str();
-        
+
         let mut points: Vec<(f64, f64)> = Vec::new();
         for p in typed_args.data_points {
             if p.len() == 2 {
@@ -211,12 +252,20 @@ impl AgentTool for TelemetryChartTool {
         let mut max_y = f64::MIN;
 
         for (x, y) in &points {
-            if *x < min_x { min_x = *x; }
-            if *x > max_x { max_x = *x; }
-            if *y < min_y { min_y = *y; }
-            if *y > max_y { max_y = *y; }
+            if *x < min_x {
+                min_x = *x;
+            }
+            if *x > max_x {
+                max_x = *x;
+            }
+            if *y < min_y {
+                min_y = *y;
+            }
+            if *y > max_y {
+                max_y = *y;
+            }
         }
-        
+
         let x_padding = (max_x - min_x) * 0.05;
         let y_padding = (max_y - min_y) * 0.05;
 
@@ -224,15 +273,25 @@ impl AgentTool for TelemetryChartTool {
         max_x += x_padding;
         min_y -= y_padding;
         max_y += y_padding;
-        
-        if min_x == max_x { max_x += 1.0; min_x -= 1.0; }
-        if min_y == max_y { max_y += 1.0; min_y -= 1.0; }
 
-        let path = format!("/tmp/tempest_chart_{}.png", format!("{}", chrono::Local::now().format("%H%M%S")));
-        
+        if min_x == max_x {
+            max_x += 1.0;
+            min_x -= 1.0;
+        }
+        if min_y == max_y {
+            max_y += 1.0;
+            min_y -= 1.0;
+        }
+
+        let path = format!(
+            "/tmp/tempest_chart_{}.png",
+            chrono::Local::now().format("%H%M%S")
+        );
+
         use plotters::prelude::*;
         let root = BitMapBackend::new(&path, (800, 600)).into_drawing_area();
-        root.fill(&WHITE).map_err(|e| miette!("Plotters Error: {}", e))?;
+        root.fill(&WHITE)
+            .map_err(|e| miette!("Plotters Error: {}", e))?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(title, ("sans-serif", 30).into_font())
@@ -242,26 +301,33 @@ impl AgentTool for TelemetryChartTool {
             .build_cartesian_2d(min_x..max_x, min_y..max_y)
             .map_err(|e| miette!("Plotters Error: {}", e))?;
 
-        chart.configure_mesh()
+        chart
+            .configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
             .draw()
             .map_err(|e| miette!("Plotters Error: {}", e))?;
 
-        chart.draw_series(LineSeries::new(points, &RED))
+        chart
+            .draw_series(LineSeries::new(points, &RED))
             .map_err(|e| miette!("Plotters Error: {}", e))?
             .label(series_name)
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
 
-        chart.configure_series_labels()
-            .background_style(&WHITE.mix(0.8))
-            .border_style(&BLACK)
+        chart
+            .configure_series_labels()
+            .background_style(WHITE.mix(0.8))
+            .border_style(BLACK)
             .draw()
             .map_err(|e| miette!("Plotters Error: {}", e))?;
 
-        root.present().map_err(|e| miette!("Plotters Error: {}", e))?;
+        root.present()
+            .map_err(|e| miette!("Plotters Error: {}", e))?;
 
-        Ok(format!("Successfully generated analytical chart! Saved natively to: {}", path))
+        Ok(format!(
+            "Successfully generated analytical chart! Saved natively to: {}",
+            path
+        ))
     }
 }
 

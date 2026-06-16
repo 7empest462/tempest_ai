@@ -2,17 +2,17 @@
 // Licensed under the Tempest AI Source-Available License.
 // See LICENSE in the project root for full license information.
 
-use miette::{Result, IntoDiagnostic, miette};
+use crate::tools::{AgentTool, ToolContext};
+use async_trait::async_trait;
+use miette::{IntoDiagnostic, Result, miette};
+use ollama_rs::generation::tools::{ToolFunctionInfo, ToolInfo, ToolType};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::time::{timeout, Duration};
 use std::collections::HashMap;
 use std::sync::Arc;
-use async_trait::async_trait;
-use crate::tools::{AgentTool, ToolContext};
-use ollama_rs::generation::tools::{ToolInfo, ToolType, ToolFunctionInfo};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::time::{Duration, timeout};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
@@ -31,18 +31,30 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    pub async fn new(name: String, command: &str, args: &[String], env: &HashMap<String, String>) -> Result<Self> {
+    pub async fn new(
+        name: String,
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<Self> {
         let mut child = Command::new(command)
             .args(args)
             .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
             .spawn()
             .into_diagnostic()?;
 
-        let stdin = child.stdin.take().ok_or_else(|| miette!("Failed to open stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| miette!("Failed to open stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| miette!("Failed to open stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| miette!("Failed to open stdout"))?;
         let reader = BufReader::new(stdout);
 
         Ok(Self {
@@ -86,8 +98,11 @@ impl McpClient {
         self.request_id += 1;
         self.send_request(request).await?;
         let response = self.read_response_with_id(id).await?;
-        
-        let tools_val = response.get("result").and_then(|r| r.get("tools")).ok_or_else(|| miette!("Invalid tools/list response"))?;
+
+        let tools_val = response
+            .get("result")
+            .and_then(|r| r.get("tools"))
+            .ok_or_else(|| miette!("Invalid tools/list response"))?;
         let tools: Vec<McpTool> = serde_json::from_value(tools_val.clone()).into_diagnostic()?;
         Ok(tools)
     }
@@ -106,13 +121,16 @@ impl McpClient {
         self.request_id += 1;
         self.send_request(request).await?;
         let response = self.read_response_with_id(id).await?;
-        
+
         if let Some(error) = response.get("error") {
             return Err(miette!("MCP Error: {}", error));
         }
 
-        let content = response.get("result").and_then(|r| r.get("content")).ok_or_else(|| miette!("Invalid tools/call response"))?;
-        
+        let content = response
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .ok_or_else(|| miette!("Invalid tools/call response"))?;
+
         let mut result_text = String::new();
         if let Some(arr) = content.as_array() {
             for item in arr {
@@ -128,11 +146,14 @@ impl McpClient {
     async fn send_request(&mut self, request: Value) -> Result<()> {
         let mut line = serde_json::to_string(&request).into_diagnostic()?;
         line.push('\n');
-        timeout(Duration::from_secs(5), self.stdin.write_all(line.as_bytes()))
-            .await
-            .map_err(|_| miette!("Timeout writing to MCP server stdin"))?
-            .into_diagnostic()?;
-        
+        timeout(
+            Duration::from_secs(5),
+            self.stdin.write_all(line.as_bytes()),
+        )
+        .await
+        .map_err(|_| miette!("Timeout writing to MCP server stdin"))?
+        .into_diagnostic()?;
+
         timeout(Duration::from_secs(2), self.stdin.flush())
             .await
             .map_err(|_| miette!("Timeout flushing MCP server stdin"))?
@@ -149,7 +170,10 @@ impl McpClient {
                 .into_diagnostic()?;
 
             if bytes_read == 0 {
-                return Err(miette!("MCP server '{}' closed stdout unexpectedly (EOF)", self.name));
+                return Err(miette!(
+                    "MCP server '{}' closed stdout unexpectedly (EOF)",
+                    self.name
+                ));
             }
 
             let trimmed = line.trim();
@@ -166,7 +190,10 @@ impl McpClient {
                                 return Ok(val);
                             } else {
                                 // Potentially a notification or out-of-order response
-                                eprintln!("Warning [MCP {}]: Received unexpected ID {} (expected {})", self.name, resp_id, expected_id);
+                                eprintln!(
+                                    "Warning [MCP {}]: Received unexpected ID {} (expected {})",
+                                    self.name, resp_id, expected_id
+                                );
                                 continue;
                             }
                         } else if val.get("method").is_some() {
@@ -196,8 +223,12 @@ pub struct McpToolProxy {
 
 #[async_trait]
 impl AgentTool for McpToolProxy {
-    fn name(&self) -> &'static str { self.name }
-    fn description(&self) -> &'static str { self.description }
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn description(&self) -> &'static str {
+        self.description
+    }
     fn tool_info(&self) -> ToolInfo {
         // We assume input_schema is pre-validated during registration
         ToolInfo {
@@ -213,7 +244,7 @@ impl AgentTool for McpToolProxy {
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let mut client = self.client.lock().await;
         let original_name = self.name.split('_').skip(1).collect::<Vec<_>>().join("_");
-        
+
         match client.call_tool(&original_name, args.clone()).await {
             Ok(res) => Ok(res),
             Err(e) => {

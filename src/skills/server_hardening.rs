@@ -1,5 +1,6 @@
 pub const NAME: &str = "server_hardening";
-pub const DESCRIPTION: &str = "Harden a Linux server with firewall, SSH, and security best practices";
+pub const DESCRIPTION: &str =
+    "Harden a Linux server with firewall, SSH, and security best practices";
 pub const INSTRUCTIONS: &str = r#"
 ## Steps
 1. Audit current state:

@@ -18,7 +18,7 @@ Would you like me to compile and run this calculator program to verify it works 
     for cap in re.captures_iter(text) {
         println!("MATCHED!");
         println!("{}", &cap[1]);
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cap[1]) {
+        if let Ok(_v) = serde_json::from_str::<serde_json::Value>(&cap[1]) {
             println!("PARSED JSON!");
         } else {
             println!("FAILED TO PARSE");

@@ -17,8 +17,8 @@
 //! - The full toolbox remains discoverable via `query_schema`
 
 use miette::{Result, miette};
-use ollama_rs::generation::tools::ToolInfo;
-use serde::{Serialize, Deserialize};
+use ollama_rs::generation::tools::{ToolInfo, ToolType, ToolFunctionInfo};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -70,45 +70,63 @@ pub struct ToolVectorIndex {
     all_tool_infos: Vec<ToolInfo>,
 }
 
+fn tool_dyn_to_info(tool: &dyn skg_tool::ToolDyn) -> ToolInfo {
+    let parameters: schemars::Schema = serde_json::from_value(tool.input_schema()).unwrap_or_else(|_| {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        settings.into_generator().into_root_schema_for::<()>()
+    });
+    ToolInfo {
+        tool_type: ToolType::Function,
+        function: ToolFunctionInfo {
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            parameters,
+        },
+    }
+}
+
 impl ToolVectorIndex {
     /// Build the index from a set of tools by generating embeddings for each tool's
     /// `"{name}: {description}"` string.
     ///
     /// This runs once at startup and takes ~100-500ms depending on the number of tools.
     pub async fn build(
-        tools: &[Arc<dyn crate::tools::AgentTool>],
+        tools: &[Arc<dyn skg_tool::ToolDyn>],
         backend: &crate::inference::Backend,
-        event_tx: Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
+        event_tx: Arc<
+            parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>,
+        >,
     ) -> Result<Self> {
         let mut entries = Vec::with_capacity(tools.len());
         let mut always_on = HashMap::new();
-        let all_tool_infos: Vec<ToolInfo> = tools.iter().map(|t| t.tool_info()).collect();
+        let all_tool_infos: Vec<ToolInfo> = tools.iter().map(|t| tool_dyn_to_info(t.as_ref())).collect();
 
         // Notify the TUI that we're building the tool index
         if let Some(tx) = event_tx.lock().clone() {
-            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                format!("🎯 [TOOL RAG]: Indexing {} tool descriptions with {}...", tools.len(), TOOL_RAG_EMBEDDING_MODEL)
-            ));
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                "🎯 [TOOL RAG]: Indexing {} tool descriptions with {}...",
+                tools.len(),
+                TOOL_RAG_EMBEDDING_MODEL
+            )));
         }
 
         // Separate always-on tools first
         for tool in tools {
             if ALWAYS_ON_TOOLS.contains(&tool.name()) {
-                always_on.insert(tool.name().to_string(), tool.tool_info());
+                always_on.insert(tool.name().to_string(), tool_dyn_to_info(tool.as_ref()));
             }
         }
 
         // Embed all tool descriptions (including always-on, for ranking visibility)
         let mut embed_failures = 0usize;
         for tool in tools {
-            let embed_text = format!(
-                "search_document: {}: {}",
-                tool.name(),
-                tool.description()
-            );
+            let embed_text = format!("search_document: {}: {}", tool.name(), tool.description());
 
             // Categorize tools for telemetry
             let category = categorize_tool(tool.name());
+
+            let tool_info = tool_dyn_to_info(tool.as_ref());
 
             match generate_tool_embedding(backend, &embed_text).await {
                 Ok(embedding) => {
@@ -119,7 +137,7 @@ impl ToolVectorIndex {
                             category,
                         },
                         embedding,
-                        tool_info: tool.tool_info(),
+                        tool_info,
                     });
                 }
                 Err(_) => {
@@ -133,7 +151,7 @@ impl ToolVectorIndex {
                             category,
                         },
                         embedding: Vec::new(),
-                        tool_info: tool.tool_info(),
+                        tool_info,
                     });
                 }
             }
@@ -141,9 +159,16 @@ impl ToolVectorIndex {
 
         if let Some(tx) = event_tx.lock().clone() {
             let status = if embed_failures == 0 {
-                format!("✅ [TOOL RAG]: Indexed {} tools successfully", entries.len())
+                format!(
+                    "✅ [TOOL RAG]: Indexed {} tools successfully",
+                    entries.len()
+                )
             } else {
-                format!("⚠️ [TOOL RAG]: Indexed {} tools ({} embedding failures — those tools remain available via always-on or query_schema)", entries.len(), embed_failures)
+                format!(
+                    "⚠️ [TOOL RAG]: Indexed {} tools ({} embedding failures — those tools remain available via always-on or query_schema)",
+                    entries.len(),
+                    embed_failures
+                )
             };
             let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(status));
         }
@@ -155,12 +180,12 @@ impl ToolVectorIndex {
         })
     }
 
-    pub fn build_fallback(tools: &[Arc<dyn crate::tools::AgentTool>]) -> Self {
-        let all_tool_infos: Vec<ToolInfo> = tools.iter().map(|t| t.tool_info()).collect();
+    pub fn build_fallback(tools: &[Arc<dyn skg_tool::ToolDyn>]) -> Self {
+        let all_tool_infos: Vec<ToolInfo> = tools.iter().map(|t| tool_dyn_to_info(t.as_ref())).collect();
         let mut always_on = HashMap::new();
         for tool in tools {
             if ALWAYS_ON_TOOLS.contains(&tool.name()) {
-                always_on.insert(tool.name().to_string(), tool.tool_info());
+                always_on.insert(tool.name().to_string(), tool_dyn_to_info(tool.as_ref()));
             }
         }
         Self {
@@ -182,13 +207,15 @@ impl ToolVectorIndex {
         top_k: Option<usize>,
     ) -> Result<(Vec<ToolInfo>, Vec<(String, f32)>)> {
         let k = top_k.unwrap_or(DEFAULT_TOP_K);
-        
+
         // Generate the query embedding using nomic-embed-text
         let query_text = format!("search_query: {}", prompt);
         let query_vec = generate_tool_embedding(backend, &query_text).await?;
 
         // Score all entries by cosine similarity
-        let mut scored: Vec<(&ToolVectorEntry, f32)> = self.entries.iter()
+        let mut scored: Vec<(&ToolVectorEntry, f32)> = self
+            .entries
+            .iter()
             .filter(|e| !e.embedding.is_empty())
             .map(|entry| {
                 let sim = cosine_similarity(&query_vec, &entry.embedding);
@@ -258,32 +285,45 @@ async fn generate_tool_embedding(
                 TOOL_RAG_EMBEDDING_MODEL.to_string(),
                 text.to_string().into(),
             );
-            let res = ollama.generate_embeddings(req).await
-                .map_err(|e| miette!("Tool RAG embedding failed ({}): {}", TOOL_RAG_EMBEDDING_MODEL, e))?;
+            let res = ollama.generate_embeddings(req).await.map_err(|e| {
+                miette!(
+                    "Tool RAG embedding failed ({}): {}",
+                    TOOL_RAG_EMBEDDING_MODEL,
+                    e
+                )
+            })?;
             Ok(res.embeddings.first().cloned().unwrap_or_default())
         }
         #[cfg(target_os = "macos")]
-        crate::inference::Backend::MLX { ollama_fallback, .. } => {
+        crate::inference::Backend::MLX {
+            ollama_fallback, ..
+        } => {
             // MLX embedder uses all-minilm natively, so for Tool RAG we prefer
             // the Ollama fallback which can route to nomic-embed-text
             if let Some(ollama) = ollama_fallback {
-                let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                    TOOL_RAG_EMBEDDING_MODEL.to_string(),
-                    text.to_string().into(),
-                );
-                let res = ollama.generate_embeddings(req).await
+                let req =
+                    ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                        TOOL_RAG_EMBEDDING_MODEL.to_string(),
+                        text.to_string().into(),
+                    );
+                let res = ollama
+                    .generate_embeddings(req)
+                    .await
                     .map_err(|e| miette!("Tool RAG embedding fallback failed: {}", e))?;
                 Ok(res.embeddings.first().cloned().unwrap_or_default())
             } else {
-                Err(miette!("Tool RAG requires Ollama for {} embeddings (no fallback available)", TOOL_RAG_EMBEDDING_MODEL))
+                Err(miette!(
+                    "Tool RAG requires Ollama for {} embeddings (no fallback available)",
+                    TOOL_RAG_EMBEDDING_MODEL
+                ))
             }
         }
         crate::inference::Backend::Bridge(bridge) => {
             bridge.generate_embeddings(text.to_string()).await
         }
-        crate::inference::Backend::Kalosm { .. } => {
-            Err(miette!("Tool RAG embedding failed (Kalosm not supported yet)"))
-        }
+        crate::inference::Backend::Kalosm { .. } => Err(miette!(
+            "Tool RAG embedding failed (Kalosm not supported yet)"
+        )),
     }
 }
 
@@ -304,21 +344,61 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Categorize a tool by its name prefix for telemetry grouping.
 pub fn categorize_tool(name: &str) -> String {
-    if name.starts_with("git_") || name == "git_action" { return "git".to_string(); }
-    if name.starts_with("skg_") { return "skelegent".to_string(); }
-    if name.contains("file") || name == "list_dir" || name == "create_directory" 
-        || name == "delete_file" || name == "rename_file" || name == "append_file"
-        || name == "patch_file" || name == "find_replace" || name == "diff_files" { return "filesystem".to_string(); }
-    if name.contains("web") || name == "read_url" || name == "http_request" 
-        || name == "download_file" || name == "stock_scraper" { return "web".to_string(); }
-    if name.contains("search") || name == "grep_search" || name == "semantic_search" { return "search".to_string(); }
-    if name.contains("memory") || name.contains("brain") || name.contains("knowledge") 
-        || name.contains("skill") { return "memory".to_string(); }
-    if name.contains("command") || name.contains("test") || name.contains("build") 
-        || name.contains("background") || name.contains("process") { return "execution".to_string(); }
-    if name.contains("telemetry") || name.contains("system") || name.contains("network") 
-        || name.contains("service") || name.contains("socket") { return "system".to_string(); }
-    if name.contains("cargo") || name.contains("rust") || name.contains("ast") { return "rust".to_string(); }
+    if name.starts_with("git_") || name == "git_action" {
+        return "git".to_string();
+    }
+    if name.starts_with("skg_") {
+        return "skelegent".to_string();
+    }
+    if name.contains("file")
+        || name == "list_dir"
+        || name == "create_directory"
+        || name == "delete_file"
+        || name == "rename_file"
+        || name == "append_file"
+        || name == "patch_file"
+        || name == "find_replace"
+        || name == "diff_files"
+    {
+        return "filesystem".to_string();
+    }
+    if name.contains("web")
+        || name == "read_url"
+        || name == "http_request"
+        || name == "download_file"
+        || name == "stock_scraper"
+    {
+        return "web".to_string();
+    }
+    if name.contains("search") || name == "grep_search" || name == "semantic_search" {
+        return "search".to_string();
+    }
+    if name.contains("memory")
+        || name.contains("brain")
+        || name.contains("knowledge")
+        || name.contains("skill")
+    {
+        return "memory".to_string();
+    }
+    if name.contains("command")
+        || name.contains("test")
+        || name.contains("build")
+        || name.contains("background")
+        || name.contains("process")
+    {
+        return "execution".to_string();
+    }
+    if name.contains("telemetry")
+        || name.contains("system")
+        || name.contains("network")
+        || name.contains("service")
+        || name.contains("socket")
+    {
+        return "system".to_string();
+    }
+    if name.contains("cargo") || name.contains("rust") || name.contains("ast") {
+        return "rust".to_string();
+    }
     "general".to_string()
 }
 

@@ -7,12 +7,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         revision: "main".to_string(),
         file: "qwen2.5-coder-7b-instruct-q4_k_m.gguf".to_string(),
     };
-    
+
     let _model = Llama::builder()
         .with_source(LlamaSource::new(source))
         .build()
         .await?;
-        
+
     println!("Model loaded successfully!");
     Ok(())
 }

@@ -1,5 +1,6 @@
 pub const NAME: &str = "launchd_service";
-pub const DESCRIPTION: &str = "Create and manage a launchd service (LaunchAgent or LaunchDaemon) on macOS";
+pub const DESCRIPTION: &str =
+    "Create and manage a launchd service (LaunchAgent or LaunchDaemon) on macOS";
 pub const INSTRUCTIONS: &str = r#"
 ## Steps
 1. Determine if this should be a LaunchAgent (runs when user logs in) or LaunchDaemon (runs at system boot).

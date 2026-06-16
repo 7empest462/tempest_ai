@@ -3,21 +3,24 @@ use regex::Regex;
 fn repair_json_str(s: &str) -> String {
     // 1. Find all key-value pairs where the value starts with a quote.
     // We can use a regex to find: "key"\s*:\s*"
-    // But since regex in Rust doesn't support arbitrary lookahead or overlap easily, 
+    // But since regex in Rust doesn't support arbitrary lookahead or overlap easily,
     // let's scan the characters manually or use a regex to find matches of key-value starts.
     let key_start_re = Regex::new(r#""[a-zA-Z0-9_-]+"\s*:\s*""#).unwrap();
     let mut result = s.to_string();
-    
+
     // We iterate backwards so that modifying the string (which changes indices) doesn't invalidate upcoming matches.
-    let mut matches: Vec<(usize, usize)> = key_start_re.find_iter(s).map(|m| (m.start(), m.end())).collect();
+    let mut matches: Vec<(usize, usize)> = key_start_re
+        .find_iter(s)
+        .map(|m| (m.start(), m.end()))
+        .collect();
     matches.reverse();
 
-    for (start_idx, end_idx) in matches {
+    for (_start_idx, end_idx) in matches {
         // end_idx is the index right after the opening quote of the value.
         // We scan forward from end_idx to find the closing quote of the value.
         // We must stop if we see another key-value start like `"another_key"\s*:\s*"`
         let remaining = &result[end_idx..];
-        
+
         // Find candidates for closing quote
         let mut closing_quote_idx = None;
         let chars: Vec<char> = remaining.chars().collect();
@@ -38,18 +41,20 @@ fn repair_json_str(s: &str) -> String {
                     }
                     break;
                 }
-                
+
                 if is_delimiter {
                     closing_quote_idx = Some(j);
                 }
             }
-            
+
             // Check if we hit another key-value start.
             // E.g., if we see `"key": "`
             if j + 3 < chars.len() && chars[j] == '"' {
                 // simple heuristic for key start
                 let mut k = j + 1;
-                while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-') {
+                while k < chars.len()
+                    && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-')
+                {
                     k += 1;
                 }
                 if k < chars.len() && chars[k] == '"' {
@@ -77,7 +82,7 @@ fn repair_json_str(s: &str) -> String {
             // We need to escape any unescaped double quotes in this content.
             let raw_value = &remaining[..close_idx];
             let mut repaired_value = String::new();
-            let mut chars_val: Vec<char> = raw_value.chars().collect();
+            let chars_val: Vec<char> = raw_value.chars().collect();
             let mut idx = 0;
             while idx < chars_val.len() {
                 let c = chars_val[idx];
@@ -91,14 +96,14 @@ fn repair_json_str(s: &str) -> String {
                 repaired_value.push(c);
                 idx += 1;
             }
-            
+
             // Reconstruct the result string
             let prefix = &result[..end_idx];
             let suffix = &result[end_idx + close_idx..];
             result = format!("{}{}{}", prefix, repaired_value, suffix);
         }
     }
-    
+
     result
 }
 
@@ -112,7 +117,8 @@ fn main() {
         Err(e) => println!("Failed: {}", e),
     }
 
-    let s2 = r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Already Escaped\" /src/"}}"#;
+    let s2 =
+        r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Already Escaped\" /src/"}}"#;
     let repaired2 = repair_json_str(s2);
     println!("Original 2: {}", s2);
     println!("Repaired 2: {}", repaired2);

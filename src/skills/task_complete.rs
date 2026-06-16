@@ -1,5 +1,6 @@
 pub const NAME: &str = "task_complete";
-pub const DESCRIPTION: &str = "Properly wrap up a significant task, verify results, and distill knowledge into the brain";
+pub const DESCRIPTION: &str =
+    "Properly wrap up a significant task, verify results, and distill knowledge into the brain";
 pub const INSTRUCTIONS: &str = r#"
 ## Steps
 1. **Final Verification**: If you modified files or ran commands, perform one last check (e.g., cargo build, python3 test.py, ls -l, or cat) to ensure the system is in a stable state.

@@ -1,5 +1,5 @@
-use reqwest::Client;
 use futures::StreamExt;
+use reqwest::Client;
 
 #[tokio::main]
 async fn main() {
@@ -54,7 +54,8 @@ async fn main() {
         ]
     });
 
-    let res = client.post(url)
+    let res = client
+        .post(url)
         .bearer_auth(api_key)
         .json(&body)
         .send()

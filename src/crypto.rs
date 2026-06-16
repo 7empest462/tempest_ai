@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, OsRng},
 };
 use argon2::Argon2;
-use zeroize::Zeroizing;
 use miette::{Result, miette};
+use zeroize::Zeroizing;
 
 const SALT: &[u8] = b"tempest_ai_v1_salt";
 const NONCE_SIZE: usize = 12;
@@ -25,7 +25,7 @@ pub fn encrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     let key = derive_key(passphrase);
     let cipher = Aes256Gcm::new_from_slice(key.as_ref())
         .map_err(|e| miette!("Cipher init failed: {}", e))?;
-    
+
     // Generate a random nonce
     let nonce_bytes: [u8; NONCE_SIZE] = {
         use aes_gcm::aead::rand_core::RngCore;
@@ -34,10 +34,11 @@ pub fn encrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
         buf
     };
     let nonce = Nonce::from_slice(&nonce_bytes);
-    
-    let ciphertext = cipher.encrypt(nonce, data)
+
+    let ciphertext = cipher
+        .encrypt(nonce, data)
         .map_err(|e| miette!("Encryption failed: {}", e))?;
-    
+
     // Prepend the nonce to the ciphertext for storage
     let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
     result.extend_from_slice(&nonce_bytes);
@@ -50,16 +51,17 @@ pub fn decrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     if data.len() < NONCE_SIZE {
         return Err(miette!("Encrypted data too short to contain nonce"));
     }
-    
+
     let key = derive_key(passphrase);
     let cipher = Aes256Gcm::new_from_slice(key.as_ref())
         .map_err(|e| miette!("Cipher init failed: {}", e))?;
-    
+
     let nonce = Nonce::from_slice(&data[..NONCE_SIZE]);
     let ciphertext = &data[NONCE_SIZE..];
-    
-    let plaintext = cipher.decrypt(nonce, ciphertext)
+
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
         .map_err(|e| miette!("Decryption failed (wrong passphrase?): {}", e))?;
-    
+
     Ok(plaintext)
 }

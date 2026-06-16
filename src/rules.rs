@@ -1,8 +1,8 @@
-use std::path::Path;
-use std::fs;
-use serde::Deserialize;
+use miette::{IntoDiagnostic, Result};
 use regex::Regex;
-use miette::{Result, IntoDiagnostic};
+use serde::Deserialize;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Rule {
@@ -17,6 +17,12 @@ pub struct Rule {
 #[derive(Clone)]
 pub struct RuleEngine {
     pub rules: Vec<Rule>,
+}
+
+impl Default for RuleEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RuleEngine {
@@ -59,27 +65,32 @@ impl RuleEngine {
 
     fn load_from_dir(&self, dir: &Path) -> Result<Vec<Rule>> {
         let mut rules = Vec::new();
-        if !dir.exists() { return Ok(rules); }
+        if !dir.exists() {
+            return Ok(rules);
+        }
 
         for entry in fs::read_dir(dir).into_diagnostic()? {
             let entry = entry.into_diagnostic()?;
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "md") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Some(rule) = self.parse_rule(&content) {
-                        rules.push(rule);
-                    }
-                }
+            if path.extension().is_some_and(|ext| ext == "md")
+                && let Ok(content) = fs::read_to_string(&path)
+                && let Some(rule) = self.parse_rule(&content)
+            {
+                rules.push(rule);
             }
         }
         Ok(rules)
     }
 
     fn parse_rule(&self, content: &str) -> Option<Rule> {
-        if !content.starts_with("---") { return None; }
-        
+        if !content.starts_with("---") {
+            return None;
+        }
+
         let parts: Vec<&str> = content.split("---").collect();
-        if parts.len() < 3 { return None; }
+        if parts.len() < 3 {
+            return None;
+        }
 
         let yaml = parts[1];
         let body = parts[2..].join("---").trim().to_string();
@@ -91,25 +102,27 @@ impl RuleEngine {
 
         for line in yaml.lines() {
             let line = line.trim();
-            if line.starts_with("name:") {
-                name = line["name:".len()..].trim().to_string();
-            } else if line.starts_with("description:") {
-                description = Some(line["description:".len()..].trim().to_string());
-            } else if line.starts_with("globs:") {
-                let glob_str = line["globs:".len()..].trim();
+            if let Some(stripped) = line.strip_prefix("name:") {
+                name = stripped.trim().to_string();
+            } else if let Some(stripped) = line.strip_prefix("description:") {
+                description = Some(stripped.trim().to_string());
+            } else if let Some(stripped) = line.strip_prefix("globs:") {
+                let glob_str = stripped.trim();
                 if glob_str.starts_with('[') && glob_str.ends_with(']') {
-                    let items: Vec<String> = glob_str[1..glob_str.len()-1]
+                    let items: Vec<String> = glob_str[1..glob_str.len() - 1]
                         .split(',')
                         .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
                         .collect();
                     globs = Some(items);
                 }
-            } else if line.starts_with("always_apply:") {
-                always_apply = Some(line["always_apply:".len()..].trim().parse::<bool>().unwrap_or(false));
+            } else if let Some(stripped) = line.strip_prefix("always_apply:") {
+                always_apply = Some(stripped.trim().parse::<bool>().unwrap_or(false));
             }
         }
 
-        if name.is_empty() { return None; }
+        if name.is_empty() {
+            return None;
+        }
 
         Some(Rule {
             name,
@@ -136,7 +149,7 @@ impl RuleEngine {
                         .replace("*", ".*")
                         .replace("?", ".");
                     let regex_str = format!("(?i)^{}$", regex_pattern);
-                    
+
                     if let Ok(re) = Regex::new(&regex_str) {
                         for file in current_files {
                             if re.is_match(file) {

@@ -17,10 +17,13 @@ fn main() {
     for caps in block_regex.captures_iter(content) {
         if let Some(m) = caps.get(1) {
             let block_text = m.as_str().trim();
-            if let Ok(_) = serde_json::from_str::<serde_json::Value>(block_text) {
+            if serde_json::from_str::<serde_json::Value>(block_text).is_ok() {
                 calls += 1;
             } else {
-                println!("FAILED TO PARSE: {}", serde_json::from_str::<serde_json::Value>(block_text).unwrap_err());
+                println!(
+                    "FAILED TO PARSE: {}",
+                    serde_json::from_str::<serde_json::Value>(block_text).unwrap_err()
+                );
             }
         }
     }

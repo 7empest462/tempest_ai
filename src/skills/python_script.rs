@@ -1,5 +1,6 @@
 pub const NAME: &str = "python_script";
-pub const DESCRIPTION: &str = "Create a well-structured Python script with argument parsing and error handling";
+pub const DESCRIPTION: &str =
+    "Create a well-structured Python script with argument parsing and error handling";
 pub const INSTRUCTIONS: &str = r#"
 ## Steps
 1. Ask the user what the script should do

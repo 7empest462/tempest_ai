@@ -2,9 +2,9 @@
 // Licensed under the Tempest AI Source-Available License.
 
 use crate::tui::AgentEvent;
+use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::mpsc::Sender;
-use std::time::Duration;
 use tokio::time::interval;
 
 pub struct TelemetryCollector {
@@ -24,25 +24,21 @@ impl TelemetryCollector {
         loop {
             interval.tick().await;
             self.sys.refresh_all();
-            
+
             // In sysinfo 0.30+, global_cpu_usage() returns f32 directly
             let cpu_usage = self.sys.global_cpu_usage() as u64;
             let total_ram = self.sys.total_memory();
             let used_ram = self.sys.used_memory();
-            let ram_usage_pct = if total_ram > 0 {
-                (used_ram * 100 / total_ram) as u64
-            } else {
-                0
-            };
+            let ram_usage_pct = (used_ram * 100).checked_div(total_ram).unwrap_or(0);
 
             // Simplified GPU metric for now
-            let gpu_usage = None; 
+            let gpu_usage = None;
 
-            let _ = self.event_tx.try_send(AgentEvent::TelemetryMetrics { 
-                cpu: Some(cpu_usage), 
-                gpu: gpu_usage, 
+            let _ = self.event_tx.try_send(AgentEvent::TelemetryMetrics {
+                cpu: Some(cpu_usage),
+                gpu: gpu_usage,
                 ram: Some(ram_usage_pct),
-                tps: None 
+                tps: None,
             });
         }
     }

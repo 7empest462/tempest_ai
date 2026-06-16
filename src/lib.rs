@@ -1,35 +1,38 @@
+pub mod actors;
 pub mod agent;
-pub mod crypto;
-pub mod error;
-pub mod memory;
-pub mod tools;
-pub mod hardware;
-pub mod daemon;
-pub mod tui;
-pub mod vector_brain;
-pub mod tool_rag;
-pub mod skills;
+pub mod ai_bridge;
+pub mod checkpoint;
 pub mod context_manager;
+pub mod crypto;
+pub mod daemon;
+pub mod effects;
+pub mod error;
 pub mod error_classifier;
+pub mod hardware;
+pub mod inference;
+pub mod mcp;
+pub mod mcp_protocol;
+pub mod mcp_server;
+pub mod memory;
+pub mod nexus;
+pub mod overwatch;
+pub mod prompts;
 pub mod rules;
 pub mod sentinel;
-pub mod inference;
-pub mod prompts;
-pub mod checkpoint;
-pub mod mcp;
-pub mod mcp_server;
-pub mod nexus;
-pub mod telemetry;
-pub mod mcp_protocol;
-pub mod ai_bridge;
-pub mod test_types;
-pub mod overwatch;
 pub mod skg_adapter;
-pub mod effects;
-pub mod turn_kit;
-pub mod wasm_engine;
+pub mod state_store;
+pub mod skills;
+pub mod telemetry;
+pub mod templates;
 #[cfg(test)]
 pub mod test_json_stop;
+pub mod test_types;
+pub mod tool_rag;
+pub mod tools;
+pub mod tui;
+pub mod turn_kit;
+pub mod vector_brain;
+pub mod wasm_engine;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -50,9 +53,19 @@ pub struct McpServerConfig {
     pub env: Option<HashMap<String, String>>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct OllamaRemoteConfig {
+    pub enabled: Option<bool>,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub api_key: Option<String>,
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct AppConfig {
+    pub ollama_remote: Option<OllamaRemoteConfig>,
     pub model: Option<String>,
     pub history_path: Option<String>,
     pub db_path: Option<String>,
@@ -90,29 +103,39 @@ pub struct AppConfig {
     pub metrics_port: Option<u16>,
     pub pa_memory_mb: Option<usize>,
     pub vram_time_sharing: Option<bool>,
+    pub tool_engine: Option<String>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         let mut mlx_presets = HashMap::new();
-        mlx_presets.insert("r1".to_string(), MlxPreset {
-            repo: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
-            quant: Some("Q8_0".to_string()),
-            path: None,
-            description: Some("DeepSeek R1 Distill Qwen 7B (GGUF)".to_string()),
-        });
-        mlx_presets.insert("qwen_big".to_string(), MlxPreset {
-            repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
-            quant: Some("Q8_0".to_string()),
-            path: None,
-            description: Some("Qwen 2.5 Coder 7B Instruct (GGUF)".to_string()),
-        });
-        mlx_presets.insert("qwen_small".to_string(), MlxPreset {
-            repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
-            quant: Some("Q4_K_M".to_string()),
-            path: None,
-            description: Some("Qwen 2.5 Coder 7B Instruct (Q4 GGUF)".to_string()),
-        });
+        mlx_presets.insert(
+            "r1".to_string(),
+            MlxPreset {
+                repo: Some("bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF".to_string()),
+                quant: Some("Q8_0".to_string()),
+                path: None,
+                description: Some("DeepSeek R1 Distill Qwen 7B (GGUF)".to_string()),
+            },
+        );
+        mlx_presets.insert(
+            "qwen_big".to_string(),
+            MlxPreset {
+                repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
+                quant: Some("Q8_0".to_string()),
+                path: None,
+                description: Some("Qwen 2.5 Coder 7B Instruct (GGUF)".to_string()),
+            },
+        );
+        mlx_presets.insert(
+            "qwen_small".to_string(),
+            MlxPreset {
+                repo: Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string()),
+                quant: Some("Q4_K_M".to_string()),
+                path: None,
+                description: Some("Qwen 2.5 Coder 7B Instruct (Q4 GGUF)".to_string()),
+            },
+        );
 
         AppConfig {
             model: Some("qwen2.5-coder:7b".to_string()),
@@ -120,7 +143,9 @@ impl Default for AppConfig {
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
             sub_agent_model: Some("llama3.2:1b".to_string()),
-            mlx_model: Some("/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string()),
+            mlx_model: Some(
+                "/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string(),
+            ),
             mlx_quant: Some("None".to_string()),
             kalosm_model: Some("kalosm_default".to_string()),
             gemini_model: Some("gemini-3.1-pro-preview-customtools".to_string()),
@@ -152,6 +177,8 @@ impl Default for AppConfig {
             metrics_port: Some(7777),
             pa_memory_mb: None,
             vram_time_sharing: Some(false),
+            ollama_remote: None,
+            tool_engine: Some("legacy".to_string()),
         }
     }
 }

@@ -1,11 +1,11 @@
+use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use skg_tool::{ToolError, ToolCallContext};
 
 #[skg_tool(
-    name = "skg_echo",
+    name = "echo",
     description = "Echoes back the message provided. Use this to test Skelegent integration."
 )]
-pub async fn skg_echo(
+pub async fn echo(
     message: String,
     _ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {

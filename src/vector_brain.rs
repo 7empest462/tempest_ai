@@ -1,8 +1,8 @@
+use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use miette::{Result, IntoDiagnostic};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VectorEntry {
@@ -20,16 +20,27 @@ pub struct VectorBrain {
 
 impl VectorBrain {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
-    pub fn add_entry(&mut self, text: String, embedding: Vec<f32>, source: String, metadata: HashMap<String, String>) {
+    pub fn add_entry(
+        &mut self,
+        text: String,
+        embedding: Vec<f32>,
+        source: String,
+        metadata: HashMap<String, String>,
+    ) {
         let entry = VectorEntry {
             text,
             embedding,
             source,
             metadata,
-            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         };
         self.entries.push(entry);
     }
@@ -45,7 +56,7 @@ impl VectorBrain {
         let dot_product: f32 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
         let norm_v1: f32 = v1.iter().map(|a| a * a).sum::<f32>().sqrt();
         let norm_v2: f32 = v2.iter().map(|a| a * a).sum::<f32>().sqrt();
-        
+
         if norm_v1 == 0.0 || norm_v2 == 0.0 {
             0.0
         } else {
@@ -54,7 +65,9 @@ impl VectorBrain {
     }
 
     pub fn search(&self, query_vector: &[f32], top_k: usize) -> Vec<(VectorEntry, f32)> {
-        let mut results: Vec<(VectorEntry, f32)> = self.entries.iter()
+        let mut results: Vec<(VectorEntry, f32)> = self
+            .entries
+            .iter()
             .map(|entry| {
                 let sim = Self::cosine_similarity(&entry.embedding, query_vector);
                 (entry.clone(), sim)

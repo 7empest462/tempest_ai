@@ -15,7 +15,6 @@ verifier_model = "deepseek-r1:8b"
 # to achieve multi-agent context multiplexing with 0ms physical model weight swapping overhead.
 vram_time_sharing = true
 
-
 # ==========================================
 # ⚡ MLX MODEL OPTIONS (Manual Switching)
 # ==========================================
@@ -50,7 +49,8 @@ mlx_repeat_penalty_execution = 1.02
 
 # 🧹 BASE SETTINGS
 # ==========================================
-model = "deepseek-r1:8b"
+model = "qwen3.5:9b-mlx"
+tool_engine = "skg"
 gemini_model = "gemini-3.1-pro-preview-customtools, gemini-3.5-flash, gemini-3.1-pro-preview"
 kalosm_model = "/Users/7empest_mac/.cache/huggingface/hub/models--bartowski--Qwen2.5-Coder-7B-Instruct-GGUF/snapshots/1f629da0c8bed16b9e50cee91c70693650e66c35/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 
@@ -99,8 +99,8 @@ paged_attn = true
 
 # Available MLX presets (May 2026 8GB GGUF Fleet - Non-Gated)
 [mlx_presets.battle_ready]
-path = "/Volumes/Corsair_Lab/Home/mlx_models/DeepSeek-R1-Distill-Qwen3-8B"
-description = "Battle-Ready DeepSeek-R1 - Distilled Qwen-8B reasoning engine"
+path = "/Volumes/Corsair_Lab/Home/mlx_models/Qwen3-8B-Tempest-Battle-Ready"
+description = "Battle-Ready Qwen-8B reasoning engine"
 
 [mlx_presets.tempest_centurion]
 path = "/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused"
@@ -133,4 +133,15 @@ quant = "Q8_0"
 [mlx_presets.r1_vintage]
 repo = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
 quant = "Q8_0"
+
+# ==========================================
+# 🌐 OLLAMA REMOTE CLIENT
+# ==========================================
+[ollama_remote]
+enabled = true
+host = "Robs-MacBook-Air.local"
+port = 9168
+user = "7empest_mac"
+api_key = "156b7a7c66754e84822a3a330aff13b6.lnWYF5YiFhV-imwKIylQ6Fxy"
+
 

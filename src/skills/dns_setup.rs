@@ -1,5 +1,6 @@
 pub const NAME: &str = "dns_setup";
-pub const DESCRIPTION: &str = "Configure and troubleshoot DNS servers (Unbound, Pi-hole, systemd-resolved)";
+pub const DESCRIPTION: &str =
+    "Configure and troubleshoot DNS servers (Unbound, Pi-hole, systemd-resolved)";
 pub const INSTRUCTIONS: &str = r#"
 ## Unbound Setup
 1. Install: sudo apt install unbound

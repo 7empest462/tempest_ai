@@ -4,15 +4,15 @@
 // See LICENSE in the project root for full license information.
 // Modules are now exported via src/lib.rs
 
-use tempest_ai::agent::Agent;
 use clap::Parser;
 use colored::*;
-use miette::{Result, IntoDiagnostic};
+use miette::{IntoDiagnostic, Result};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use tempest_ai::agent::Agent;
 
 /// Tempest AI — An autonomous AI pair-programmer and system assistant.
-/// 
+///
 /// Once started, you can use Slash Commands in the TUI:
 ///   /help      - Show the full user manual
 ///   /undo      - Revert the last file modifications
@@ -21,9 +21,9 @@ use std::sync::Arc;
 ///   /tool      - Test a tool directly (Diagnostic Mode)
 #[derive(Parser, Debug)]
 #[command(
-    name = "tempest_ai", 
-    version, 
-    about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.", 
+    name = "tempest_ai",
+    version,
+    about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.",
     after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --web    Launch Standalone Web Command Center\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.5 Operational Manual, launch the TUI and type '/help'."
 )]
 struct Cli {
@@ -53,7 +53,11 @@ struct Cli {
 
     /// Seed the MemoryStore database with Core Agent Instructions for system resilience
     #[arg(long)]
-    seed_memory: bool,
+    pub seed_memory: bool,
+
+    /// Connect to remote Ollama cloud instance via SSH tunnel
+    #[arg(long)]
+    pub cloud: bool,
 
     /// Use the MLX Backend (Apple Silicon Neural Engine + GPU) instead of Ollama
     #[arg(long)]
@@ -116,15 +120,18 @@ use tempest_ai::AppConfig;
 
 fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     let mut paths_to_try: Vec<std::path::PathBuf> = vec![];
-    
+
     if let Some(p) = cli_config_path {
         paths_to_try.push(std::path::PathBuf::from(p));
     }
-    
+
     // Check local directory first for developer-centric overrides
     paths_to_try.push(std::path::PathBuf::from("config.toml"));
-    
-    if let Some(sudo_user) = std::env::var("SUDO_USER").ok().filter(|s| !s.is_empty() && s != "root") {
+
+    if let Some(sudo_user) = std::env::var("SUDO_USER")
+        .ok()
+        .filter(|s| !s.is_empty() && s != "root")
+    {
         cfg_select! {
             unix => {
                 let prefixes = ["/home", "/Users"];
@@ -161,7 +168,10 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     }
 
     for path in &paths_to_try {
-        if let Some(config) = std::fs::read_to_string(path).ok().and_then(|content| toml::from_str::<AppConfig>(&content).ok()) {
+        if let Some(config) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| toml::from_str::<AppConfig>(&content).ok())
+        {
             if !tui_mode {
                 println!("{} Loaded config from: {}", "⚙️".blue(), path.display());
             }
@@ -170,14 +180,16 @@ fn load_config(cli_config_path: Option<&str>, tui_mode: bool) -> AppConfig {
     }
 
     if !tui_mode {
-        println!("{} No valid config found. Using default settings.", "ℹ️".dimmed());
+        println!(
+            "{} No valid config found. Using default settings.",
+            "ℹ️".dimmed()
+        );
     }
     AppConfig::default()
 }
 
-
-use std::net::SocketAddr;
 use metrics_exporter_prometheus::PrometheusBuilder;
+use std::net::SocketAddr;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
@@ -200,7 +212,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Determine base ports from CLI -> Config -> Defaults
-    let config = load_config(cli.config.as_deref(), !cli.web && !cli.cli && !cli.mcp_server);
+    let config = load_config(
+        cli.config.as_deref(),
+        !cli.web && !cli.cli && !cli.mcp_server,
+    );
 
     // 1. Resolve Nexus Port with automatic fallback
     let nexus_pref = cli.port.or(config.nexus_port).unwrap_or(8080);
@@ -214,7 +229,12 @@ async fn main() -> Result<()> {
         }
     }
     if nexus_port != nexus_pref {
-        println!("{} Port {} occupied. Nexus live on: http://localhost:{}", "⚠️".yellow(), nexus_pref, nexus_port);
+        println!(
+            "{} Port {} occupied. Nexus live on: http://localhost:{}",
+            "⚠️".yellow(),
+            nexus_pref,
+            nexus_port
+        );
     }
 
     // 2. Resolve Metrics Port with automatic fallback
@@ -229,11 +249,18 @@ async fn main() -> Result<()> {
         }
     }
     if metrics_port != metrics_pref {
-        println!("{} Port {} occupied. Metrics live on: {}", "⚠️".yellow(), metrics_pref, metrics_port);
+        println!(
+            "{} Port {} occupied. Metrics live on: {}",
+            "⚠️".yellow(),
+            metrics_pref,
+            metrics_port
+        );
     }
 
     // 3. Initialize Prometheus metrics exporter on the resolved port
-    let addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse().expect("Invalid metrics address");
+    let addr: SocketAddr = format!("0.0.0.0:{}", metrics_port)
+        .parse()
+        .expect("Invalid metrics address");
     PrometheusBuilder::new()
         .with_http_listener(addr)
         .install()
@@ -255,39 +282,48 @@ async fn main() -> Result<()> {
 
     let config = load_config(cli.config.as_deref(), !cli.cli);
 
-
     let os_name = match std::env::consts::OS {
         "macos" => "macOS",
         "linux" => "Linux",
         "windows" => "Windows",
         _ => std::env::consts::OS,
     };
-    let system_prompt = format!(
-        "{}\n\nOPERATING SYSTEM: {}\n\n{}",
+    let system_prompt = tempest_ai::templates::render_system_prompt(
         tempest_ai::prompts::SYSTEM_PROMPT_BASE,
         os_name,
-        tempest_ai::prompts::SYSTEM_PROMPT_TAIL
-    );
+        tempest_ai::prompts::SYSTEM_PROMPT_TAIL,
+    )
+    .expect("Failed to render system prompt template");
 
     // Model priority: CLI flag > Backend Default (if flag set) > env var > config file > default
     let model = if cli.mlx {
-        cli.model.clone()
+        cli.model
+            .clone()
             .or(config.mlx_model.clone())
             .unwrap_or_else(|| "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".to_string())
     } else if cli.lmstudio {
-        cli.model.clone()
+        cli.model
+            .clone()
             .or(config.lmstudio_model.clone())
             .unwrap_or_else(|| "LM Studio (External Inference)".to_string())
     } else if cli.kalosm {
-        cli.model.clone()
+        cli.model
+            .clone()
             .or(config.kalosm_model.clone())
             .unwrap_or_else(|| "kalosm_default".to_string())
     } else if cli.gemini {
-        cli.model.clone()
+        cli.model
+            .clone()
             .or(config.gemini_model.clone())
             .unwrap_or_else(|| "gemini-3.1-pro-preview-customtools".to_string())
+    } else if cli.cloud {
+        cli.model
+            .clone()
+            .or_else(|| std::env::var("OLLAMA_MODEL").ok())
+            .unwrap_or_else(|| "gemma4:31b-cloud".to_string())
     } else {
-        cli.model.clone()
+        cli.model
+            .clone()
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
             .or(config.model.clone())
             .unwrap_or_else(|| "qwen2.5-coder:7b".to_string())
@@ -297,13 +333,19 @@ async fn main() -> Result<()> {
     config_dir.push("tempest_ai");
     let _ = std::fs::create_dir_all(&config_dir);
 
-    let session_id = cli.resume.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    
+    let session_id = cli
+        .resume
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     let sessions_dir = config_dir.join("sessions");
     let _ = std::fs::create_dir_all(&sessions_dir);
-    
+
     let history_path = if cli.resume.is_some() {
-        sessions_dir.join(format!("{}.json", session_id)).to_string_lossy().to_string()
+        sessions_dir
+            .join(format!("{}.json", session_id))
+            .to_string_lossy()
+            .to_string()
     } else {
         match &config.history_path {
             Some(history_raw) => {
@@ -313,12 +355,15 @@ async fn main() -> Result<()> {
                     config_dir.join(history_raw).to_string_lossy().to_string()
                 }
             }
-            None => sessions_dir.join(format!("{}.json", session_id)).to_string_lossy().to_string(),
+            None => sessions_dir
+                .join(format!("{}.json", session_id))
+                .to_string_lossy()
+                .to_string(),
         }
     };
-    
+
     let key_path = config_dir.join("master.key");
-    
+
     let passphrase = if key_path.exists() {
         std::fs::read_to_string(&key_path).unwrap_or_else(|_| "fallback_key".to_string())
     } else {
@@ -335,60 +380,79 @@ async fn main() -> Result<()> {
         new_key
     };
 
-    let memory_store = Arc::new(Mutex::new(tempest_ai::memory::MemoryStore::new(passphrase).expect("Failed to initialize SQLite Memory Store")));
-    
+    let memory_store = Arc::new(Mutex::new(
+        tempest_ai::memory::MemoryStore::new(passphrase)
+            .expect("Failed to initialize SQLite Memory Store"),
+    ));
+
     if cli.seed_memory {
-        println!("{}", "🧠 Injecting Core Agent Routing Instructions into Memory...".cyan());
+        println!(
+            "{}",
+            "🧠 Injecting Core Agent Routing Instructions into Memory...".cyan()
+        );
         let core_memories = [
             (
-                "tool_routing_stocks",
-                "CORE INSTRUCTION (Tool Routing): Whenever the user asks to check a stock price, fetch financial data, or query NASDAQ/NYSE, you MUST use the `get_stock_price` tool. DO NOT use generic HTTP tools or web searches for stock prices.",
-                vec!["routing", "stocks", "finance", "tools"]
+                "tempest_identity",
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.5` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a multi-model architecture: a Native MLX 'Smarter' Engine (Local GPU) or AI Bridge for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization, semantic indexing, and search.",
+                vec!["identity", "branding", "instructions", "architecture"],
+            ),
+            (
+                "code_quality_guideline",
+                "CORE INSTRUCTION (Code Quality): When writing or modifying Rust code, ALWAYS ensure that the code compiles successfully by running `cargo check` or `cargo clippy`. Never leave placeholders, stubs, or comments like `// TODO` in code modifications. Implement the requested logic completely and professionally.",
+                vec!["coding", "quality", "rust", "verification"],
             ),
             (
                 "tool_routing_http",
-                "CORE INSTRUCTION (Tool Routing): The `raw_http_fetch` tool is ONLY for debugging broken REST APIs or webhooks. Never use it to fetch website HTML, stocks, or search results.",
-                vec!["routing", "http", "web", "tools"]
+                "CORE INSTRUCTION (Tool Routing): Use high-level tools like `search_web` and `read_url` for gathering web data and reading documentation. The `raw_http_fetch` tool is ONLY a last resort for debugging broken REST APIs or webhooks. Never use it to fetch website HTML, stocks, or search results.",
+                vec!["routing", "http", "web", "tools"],
             ),
             (
-                "tool_routing_network",
-                "CORE INSTRUCTION (Tool Routing): You do not need to perform ICMP ping tests, DNS resolution, or socket checks before connecting to the internet. Assume the machine has a direct unmetered uplink.",
-                vec!["routing", "network", "ping", "dns", "tools"]
+                "context_management",
+                "CORE INSTRUCTION (Context Management): To protect your main context window from token pressure, use the `skg-context` package. For long-running tasks or heavy search queries, delegate work to a sub-agent using `spawn_sub_agent`. The sub-agent will execute the task, report a distilled answer, and terminate, preserving the primary agent's token budget.",
+                vec!["context", "compaction", "sub-agent", "performance"],
             ),
             (
-                "tool_routing_memory_search",
-                "CORE INSTRUCTION (Context Management): If you need to search memory or research a topic, DO NOT run `memory_search` yourself. Instead, use `spawn_sub_agent` to dispatch a sub-agent to perform the search. The sub-agent must find the data, report the distilled answer, and immediately stop. This protects your main context window.",
-                vec!["routing", "memory", "sub-agent", "context", "tools"]
+                "file_modification_safety",
+                "CORE INSTRUCTION (Safety): Before making non-trivial modifications to files, check the sentinel constraints and verify build safety. Modify files incrementally and verify compilation at each step. Use the checkpoint and undo stack (`/undo` in TUI/CLI) if a change breaks the build.",
+                vec!["safety", "checkpoint", "undo", "files"],
             ),
             (
                 "tool_routing_hallucination",
-                "CORE INSTRUCTION (Tool Routing): You only have access to the explicit tools listed in your [TOOL SCHEMA]. If a tool name is not listed directly in your schema, IT DOES NOT EXIST. Do not guess commands.",
-                vec!["routing", "schema", "hallucination", "tools"]
+                "CORE INSTRUCTION (Tool Routing): You only have access to the explicit tools listed in your [TOOL SCHEMA]. If a tool name is not listed directly in your schema, IT DOES NOT EXIST. Do not guess or call non-existent tools. Check tool definitions to verify arguments.",
+                vec!["routing", "schema", "hallucination", "tools"],
             ),
             (
                 "task_completion",
-                "CORE INSTRUCTION (Task Flow): If the user says 'thanks', 'thank you', or expresses that the task is complete, simply acknowledge it politely and then STOP. Do NOT call tools like `query_schema` or `memory_search` after a task is finished.",
-                vec!["routing", "completion", "etiquette", "tools"]
+                "CORE INSTRUCTION (Task Flow): If the user says 'thanks', 'thank you', or indicates that the task is complete, simply acknowledge it politely and then STOP. Do NOT call tools like `query_schema` or `memory_search` after a task is finished.",
+                vec!["routing", "completion", "etiquette", "tools"],
             ),
-            (
-                "tempest_identity",
-                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.5` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a dual-model architecture: a Native MLX 'Smarter' Engine (Local GPU) for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization and semantic indexing.",
-                vec!["identity", "branding", "instructions", "architecture"]
-            )
         ];
         let mut count = 0;
         let store = memory_store.lock();
         for (slug, content, tags) in core_memories {
-            if store.store(slug, content, Some(tags.iter().map(|s| s.to_string()).collect())).is_ok() {
+            if store
+                .store(
+                    slug,
+                    content,
+                    Some(tags.iter().map(|s| s.to_string()).collect()),
+                )
+                .is_ok()
+            {
                 count += 1;
             }
         }
-        println!("{} {} Core Memories successfully injected and permanently stored.", "✅".green(), count);
+        println!(
+            "{} {} Core Memories successfully injected and permanently stored.",
+            "✅".green(),
+            count
+        );
         std::process::exit(0);
     }
 
-    let sub_agent_model = config.sub_agent_model.unwrap_or_else(|| "llama3.2:1b".to_string());
-    
+    let sub_agent_model = config
+        .sub_agent_model
+        .unwrap_or_else(|| "llama3.2:1b".to_string());
+
     let mode = if cli.bridge {
         tempest_ai::inference::AgentMode::Bridge
     } else if cli.lmstudio {
@@ -398,42 +462,65 @@ async fn main() -> Result<()> {
     } else {
         #[cfg(target_os = "macos")]
         {
-            if cli.mlx { tempest_ai::inference::AgentMode::MLX } else if cli.gemini { tempest_ai::inference::AgentMode::Gemini } else { tempest_ai::inference::AgentMode::Ollama }
+            if cli.mlx {
+                tempest_ai::inference::AgentMode::MLX
+            } else if cli.gemini {
+                tempest_ai::inference::AgentMode::Gemini
+            } else {
+                tempest_ai::inference::AgentMode::Ollama
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if cli.gemini { tempest_ai::inference::AgentMode::Gemini } else { tempest_ai::inference::AgentMode::Ollama }
+            if cli.gemini {
+                tempest_ai::inference::AgentMode::Gemini
+            } else {
+                tempest_ai::inference::AgentMode::Ollama
+            }
         }
     };
 
     if cli.mlx && cfg!(not(target_os = "macos")) {
-         println!("{} MLX Backend is only available on macOS (Apple Silicon). Defaulting to Ollama...", "⚠️".yellow());
+        println!(
+            "{} MLX Backend is only available on macOS (Apple Silicon). Defaulting to Ollama...",
+            "⚠️".yellow()
+        );
     }
 
-    let quant = cli.quant.or(config.mlx_quant).unwrap_or_else(|| "Q4_K_M".to_string());
+    let quant = cli
+        .quant
+        .or(config.mlx_quant)
+        .unwrap_or_else(|| "Q4_K_M".to_string());
 
     if !cli.cli {
         println!("{}", "=".repeat(60).blue());
         println!("{} {}", "🌪️".cyan(), "TEMPEST AI • ENGINE ONLINE".bold());
-        let backend_name = if cli.bridge { 
-            "AI Bridge (Unified)".to_string() 
+        let backend_name = if cli.bridge {
+            "AI Bridge (Unified)".to_string()
         } else if cli.lmstudio {
-            format!("LM Studio (Local) • {}", config.lmstudio_url.as_deref().unwrap_or("localhost:1234"))
+            format!(
+                "LM Studio (Local) • {}",
+                config.lmstudio_url.as_deref().unwrap_or("localhost:1234")
+            )
         } else if cli.kalosm {
             "Kalosm (Native GPU)".to_string()
         } else if cli.gemini {
             "Google Gemini (API)".to_string()
-        } else if cli.mlx { 
-            format!("MLX (Native Apple Silicon) • {}", quant) 
-        } else { 
-            "Ollama (Cross-Platform)".to_string() 
+        } else if cli.mlx {
+            format!("MLX (Native Apple Silicon) • {}", quant)
+        } else {
+            "Ollama (Cross-Platform)".to_string()
         };
         println!("{} {}", "⚡ Backend:".blue(), backend_name);
-        
+
         if cli.mlx {
             println!("{} {}", "🤖 Unified:".blue(), model);
         } else if cli.kalosm {
-            println!("{} {}", "🤖 Unified:".blue(), config.kalosm_model.as_deref().unwrap_or(&model));
+            println!(
+                "{} {}",
+                "🤖 Unified:".blue(),
+                config.kalosm_model.as_deref().unwrap_or(&model)
+            );
         } else if cli.gemini {
             println!("{} {}", "🤖 Unified:".blue(), model);
         } else if cli.lmstudio {
@@ -444,18 +531,31 @@ async fn main() -> Result<()> {
             if config.vram_time_sharing.unwrap_or(false) {
                 println!("{} {}", "🤖 Unified (VRAM Sharing):".blue(), model);
             } else {
-                println!("{} {}", "🧠 Planner:".blue(), config.planner_model.as_deref().unwrap_or(&model));
-                println!("{} {}", "💻 Executor:".blue(), config.executor_model.as_deref().unwrap_or(&model));
-                println!("{} {}", "🔬 Verifier:".blue(), config.verifier_model.as_deref().unwrap_or(&model));
+                println!(
+                    "{} {}",
+                    "🧠 Planner:".blue(),
+                    config.planner_model.as_deref().unwrap_or(&model)
+                );
+                println!(
+                    "{} {}",
+                    "💻 Executor:".blue(),
+                    config.executor_model.as_deref().unwrap_or(&model)
+                );
+                println!(
+                    "{} {}",
+                    "🔬 Verifier:".blue(),
+                    config.verifier_model.as_deref().unwrap_or(&model)
+                );
             }
         }
         println!("{}", "=".repeat(60).blue());
     }
-    
+
     // Pre-initialize event channel for MCP mode to capture startup logs
     let event_tx = Arc::new(parking_lot::Mutex::new(None));
     let mut event_rx = None;
-    let (tool_tx, tool_rx_internal) = tokio::sync::mpsc::channel::<tempest_ai::tui::ToolResponse>(1);
+    let (tool_tx, tool_rx_internal) =
+        tokio::sync::mpsc::channel::<tempest_ai::tui::ToolResponse>(1);
     let mut tool_tx_opt = None;
 
     if cli.mcp_server || cli.web {
@@ -466,40 +566,61 @@ async fn main() -> Result<()> {
     }
 
     let agent = Agent::new(
-        mode, 
-        model, 
-        quant, 
-        system_prompt, 
-        history_path, 
+        mode,
+        model,
+        quant,
+        system_prompt,
+        history_path,
         session_id,
-        memory_store.clone(), 
+        memory_store.clone(),
         sub_agent_model,
-        config.planner_model.clone(),
-        config.executor_model.clone(),
-        config.verifier_model.clone(),
-        config.mlx_presets.clone().unwrap_or_default(),
-        config.temp_planning.unwrap_or(0.05),
-        config.temp_execution.unwrap_or(0.25),
-        config.top_p_planning.unwrap_or(0.95),
-        config.top_p_execution.unwrap_or(0.92),
-        config.repeat_penalty_planning.unwrap_or(1.18),
-        config.repeat_penalty_execution.unwrap_or(1.12),
-        config.ctx_planning.unwrap_or(12288),
-        config.ctx_execution.unwrap_or(32768),
-        config.mlx_temp_planning,
-        config.mlx_temp_execution,
-        config.mlx_top_p_planning,
-        config.mlx_top_p_execution,
-        config.mlx_repeat_penalty_planning,
-        config.mlx_repeat_penalty_execution,
-        cli.paged_attn || config.paged_attn.unwrap_or(false),
-        config.planning_enabled.unwrap_or(true),
         event_tx.clone(),
-        config.lmstudio_url.clone(),
-        cli.pa_memory_mb.or(config.pa_memory_mb),
-        config.vram_time_sharing.unwrap_or(false),
-    ).await?;
-    
+        tempest_ai::agent::AgentConfig {
+            planner_model: config.planner_model.clone(),
+            executor_model: config.executor_model.clone(),
+            verifier_model: config.verifier_model.clone(),
+            mlx_presets: config.mlx_presets.clone().unwrap_or_default(),
+            temp_planning: config.temp_planning.unwrap_or(0.05),
+            temp_execution: config.temp_execution.unwrap_or(0.25),
+            top_p_planning: config.top_p_planning.unwrap_or(0.95),
+            top_p_execution: config.top_p_execution.unwrap_or(0.92),
+            repeat_penalty_planning: config.repeat_penalty_planning.unwrap_or(1.18),
+            repeat_penalty_execution: config.repeat_penalty_execution.unwrap_or(1.12),
+            ctx_planning: config.ctx_planning.unwrap_or(12288),
+            ctx_execution: config.ctx_execution.unwrap_or(32768),
+            mlx_temp_planning: config.mlx_temp_planning,
+            mlx_temp_execution: config.mlx_temp_execution,
+            mlx_top_p_planning: config.mlx_top_p_planning,
+            mlx_top_p_execution: config.mlx_top_p_execution,
+            mlx_repeat_penalty_planning: config.mlx_repeat_penalty_planning,
+            mlx_repeat_penalty_execution: config.mlx_repeat_penalty_execution,
+            paged_attn: cli.paged_attn || config.paged_attn.unwrap_or(false),
+            planning_enabled: config.planning_enabled.unwrap_or(true),
+            lmstudio_url: config.lmstudio_url.clone(),
+            pa_memory_mb: cli.pa_memory_mb.or(config.pa_memory_mb),
+            vram_time_sharing: config.vram_time_sharing.unwrap_or(false),
+            ollama_remote: {
+                if cli.cloud {
+                    let mut remote = config.ollama_remote.clone();
+                    if let Some(r) = &mut remote {
+                        r.enabled = Some(true);
+                    } else {
+                        println!(
+                            "{} {} is set but no ollama_remote block in config.toml",
+                            "⚠️".yellow(),
+                            "--cloud".blue()
+                        );
+                    }
+                    remote
+                } else {
+                    None
+                }
+            },
+            tool_engine: config.tool_engine.clone().unwrap_or_else(|| "legacy".to_string()),
+        },
+    )
+    .await?;
+
     if cli.web || cli.mcp_server {
         *agent.tool_rx.lock().await = Some(tool_rx_internal);
     }
@@ -507,15 +628,17 @@ async fn main() -> Result<()> {
     if let Err(e) = agent.check_connection().await {
         if !cli.cli {
             // In TUI mode, we might want to just exit or show an error later?
-            // But since TUI hasn't started, plain print is ok, 
+            // But since TUI hasn't started, plain print is ok,
             // but we can make it cleaner.
         }
         println!("{}", format!("Agent Error: {}", e).red());
         std::process::exit(1);
     }
-    
+
     let _ = agent.load_history();
-    let _ = agent.initialize_mcp(config.mcp_servers.unwrap_or_default()).await;
+    let _ = agent
+        .initialize_mcp(config.mcp_servers.unwrap_or_default())
+        .await;
     let _ = agent.resume_session().await;
 
     // Explicitly set safe mode from CLI flag
@@ -524,11 +647,22 @@ async fn main() -> Result<()> {
     }
     if !cli.cli && !cli.web && !cli.mcp_server {
         let agent_init = agent.clone();
-        let backend_id = if cli.bridge { "bridge".to_string() } else if cli.lmstudio { "lmstudio".to_string() } else if cli.kalosm { "kalosm".to_string() } else if cli.mlx { "mlx".to_string() } else { "ollama".to_string() };
+        let backend_id = if cli.bridge {
+            "bridge".to_string()
+        } else if cli.lmstudio {
+            "lmstudio".to_string()
+        } else if cli.kalosm {
+            "kalosm".to_string()
+        } else if cli.mlx {
+            "mlx".to_string()
+        } else {
+            "ollama".to_string()
+        };
         let final_nexus_port = nexus_port;
         let agent_nexus = agent_init.clone();
         tokio::spawn(async move {
-            tempest_ai::nexus::run_nexus(agent_nexus, final_nexus_port, backend_id, None, None).await;
+            tempest_ai::nexus::run_nexus(agent_nexus, final_nexus_port, backend_id, None, None)
+                .await;
         });
         tokio::spawn(async move {
             let _ = agent_init.initialize_atlas(false).await;
@@ -547,9 +681,21 @@ async fn main() -> Result<()> {
 
     if cli.web {
         println!("{} Launching Tempest Nexus...", "🌐".green());
-        let backend_id = if cli.bridge { "bridge" } else if cli.lmstudio { "lmstudio" } else if cli.kalosm { "kalosm" } else if cli.mlx { "mlx" } else if cli.gemini { "gemini" } else { "ollama" };
+        let backend_id = if cli.bridge {
+            "bridge"
+        } else if cli.lmstudio {
+            "lmstudio"
+        } else if cli.kalosm {
+            "kalosm"
+        } else if cli.mlx {
+            "mlx"
+        } else if cli.gemini {
+            "gemini"
+        } else {
+            "ollama"
+        };
         let agent_clone = agent.clone();
-        
+
         tokio::select! {
             _ = tempest_ai::nexus::run_nexus(agent, nexus_port, backend_id.to_string(), event_rx, tool_tx_opt) => {}
             _ = tokio::signal::ctrl_c() => {
@@ -579,7 +725,7 @@ async fn main() -> Result<()> {
         agent.print_interaction_summary();
         return Ok(());
     }
-    
+
     // Default to TUI mode
     let (user_tx, user_rx) = tokio::sync::mpsc::channel(32);
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(10000);
@@ -588,210 +734,17 @@ async fn main() -> Result<()> {
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_flag_agent = stop_flag.clone();
 
-    let agent_tx_metrics = agent_tx.clone();
-    let shared_telemetry = agent.telemetry.clone();
-    tokio::spawn(async move {
-        use sysinfo::{System, Networks, Components};
-        let mut sys = System::new_all();
-        let mut networks = Networks::new_with_refreshed_list();
-        let mut components = Components::new_with_refreshed_list();
-        let vram_re = regex::Regex::new(r#""(?:Alloc|In use) system memory(?:\s*\(driver\))?"\s*=\s*(\d+)"#).unwrap();
-
-        loop {
-            sys.refresh_all();
-            networks.refresh(true);
-            components.refresh(true);
-            
-            let mut ollama_mem_bytes = 0;
-            let mut tempest_mem_bytes = 0;
-            let mut lmstudio_mem_bytes = 0;
-
-            for process in sys.processes().values() {
-                let name = process.name().to_string_lossy().to_lowercase();
-                let exe = process.exe().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
-                
-                if name.contains("tempest_ai") {
-                    tempest_mem_bytes += process.memory();
-                } else if name.contains("ollama") {
-                    ollama_mem_bytes += process.memory();
-                } else if name.contains("lm studio") || name.contains("lmstudio") || exe.contains(".lmstudio") {
-                    lmstudio_mem_bytes += process.memory();
-                }
-            }
-
-            #[cfg(target_os = "macos")]
-            let mac_gpu = tempest_monitor::macos_helper::get_macos_gpu_info(false);
-
-            // In MLX/Native mode, we need to capture the Metal/AGX memory.
-            // sysinfo process.memory() often misses private Metal heaps on macOS.
-            let ai_ram_mb = match mode {
-                tempest_ai::inference::AgentMode::MLX => {
-                    let vram_mb: u64 = {
-                        #[cfg(target_os = "macos")]
-                        {
-                            // get_macos_gpu_info returns usage, but we need the VRAM 'In Use' metric.
-                            // We'll peek at the PerformanceStatistics from AGX specifically.
-                            if let Ok(output) = std::process::Command::new("ioreg").args(["-r", "-d", "1", "-c", "AGXAccelerator"]).output() {
-                                let s = String::from_utf8_lossy(&output.stdout);
-                                // Greedy sum of all system memory keys (Alloc, In Use, Driver, etc.)
-                                vram_re.captures_iter(&s)
-                                    .filter_map(|caps| caps.get(1))
-                                    .map(|m| m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024)
-                                    .sum()
-                            } else {
-                                0
-                            }
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        0
-                    };
-                    (tempest_mem_bytes / 1024 / 1024) + vram_mb
-                }
-                tempest_ai::inference::AgentMode::Ollama => {
-                    (ollama_mem_bytes + tempest_mem_bytes) / 1024 / 1024
-                }
-                tempest_ai::inference::AgentMode::Bridge => {
-                    tempest_mem_bytes / 1024 / 1024 // External or local but not managed here
-                }
-                tempest_ai::inference::AgentMode::LMStudio => {
-                    (lmstudio_mem_bytes + tempest_mem_bytes) / 1024 / 1024
-                }
-                tempest_ai::inference::AgentMode::Gemini => {
-                    tempest_mem_bytes / 1024 / 1024
-                }
-                tempest_ai::inference::AgentMode::Kalosm => {
-                    tempest_mem_bytes / 1024 / 1024
-                }
-            };
-
-            let engine_label = match mode {
-                tempest_ai::inference::AgentMode::MLX => "(Native Engine)",
-                tempest_ai::inference::AgentMode::Ollama => "(Ollama)",
-                tempest_ai::inference::AgentMode::Bridge => "(Bridge)",
-                tempest_ai::inference::AgentMode::LMStudio => "(LM Studio)",
-                tempest_ai::inference::AgentMode::Gemini => "(Google Gemini)",
-                tempest_ai::inference::AgentMode::Kalosm => "(Kalosm Native)",
-            };
-
-            let gpu_load = {
-                #[cfg(target_os = "macos")]
-                {
-                    mac_gpu.usage_pct as i32
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    tempest_ai::hardware::get_linux_gpu_usage()
-                }
-                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                {
-                    0
-                }
-            };
-            
-            let cpus = sys.cpus();
-            let mut total_cpu = 0.0;
-            for cpu in cpus { total_cpu += cpu.cpu_usage(); }
-            let avg_cpu = if !cpus.is_empty() { total_cpu / cpus.len() as f32 } else { 0.0 };
-            
-            let used_mb = sys.used_memory() / 1024 / 1024;
-            let total_mb = sys.total_memory() / 1024 / 1024;
-            let mem_perc = if total_mb > 0 { (used_mb as f32 / total_mb as f32) * 100.0 } else { 0.0 };
-
-            let used_swap = sys.used_swap() / 1024 / 1024;
-            let total_swap = sys.total_swap() / 1024 / 1024;
-            let swap_perc = if total_swap > 0 { (used_swap as f32 / total_swap as f32) * 100.0 } else { 0.0 };
-            
-            let mut total_rx = 0;
-            let mut total_tx = 0;
-            for (interface_name, data) in &networks {
-                if interface_name == "en0" || interface_name.starts_with("eth") || interface_name.starts_with("wlan") {
-                    total_rx += data.received();
-                    total_tx += data.transmitted();
-                }
-            }
-            
-            let mut max_temp = 0.0;
-            let mut sum_temp = 0.0;
-            let mut count_temp = 0;
-            for comp in &components {
-                if let Some(mut temp) = comp.temperature().filter(|&t| t > 0.0) {
-                    // Some systems return milli-degrees Celsius (e.g. 45000)
-                    if temp > 500.0 { temp /= 1000.0; }
-                    
-                    // Safety cap for invalid sensors
-                    if temp > 150.0 { continue; }
-                    
-                    if temp > max_temp { max_temp = temp; }
-                    sum_temp += temp;
-                    count_temp += 1;
-                }
-            }
-            let avg_temp = if count_temp > 0 { sum_temp / count_temp as f32 } else { 0.0 };
-            
-            let uptime = System::uptime();
-            let hours = uptime / 3600;
-            let minutes = (uptime % 3600) / 60;
-            let secs = uptime % 60;
-            let proc_count = sys.processes().len();
-            
-            #[cfg(target_os = "macos")]
-            let gpu_freq_str = if let Some(f) = mac_gpu.gpu_freq_mhz { format!(" @ {:.0} MHz", f) } else { "".to_string() };
-            #[cfg(not(target_os = "macos"))]
-            let gpu_freq_str = "".to_string();
-
-            #[cfg(target_os = "macos")]
-            let ane_power_str = if let Some(p) = mac_gpu.ane_power_mw { format!("\n\n🧠 ANE POWER      : {:.0} mW (Neural Engine)", p) } else { "".to_string() };
-            #[cfg(not(target_os = "macos"))]
-            let ane_power_str = "".to_string();
-
-            let mut update_str = format!(
-"🔥 CPU LOAD       : {:.1}% ({} Cores)
-
-🚀 MEMORY ALLOC   : {}/{} MB ({:.1}%)
-
-🤖 AI RAM USE     : {} MB {}
-
-🎨 GPU LOAD       : {}% (Graphics){}{}
-
-💾 SWAP CACHE     : {}/{} MB ({:.1}%)
-
-----------------------------------
-
-🛰️ NETWORK [en0]    : {} B ▼ | {} B ▲
-
-🌡️ AVG THERMALS   : {:.1} °C (Max: {:.1} °C)
-
-⚙️ ACTIVE PROCS   : {}
-
-⏱️ CORE UPTIME    : {}h {}m {}s",
-                avg_cpu, cpus.len(), used_mb, total_mb, mem_perc, ai_ram_mb, engine_label, gpu_load, gpu_freq_str, ane_power_str, used_swap, total_swap, swap_perc,
-                total_rx, total_tx, avg_temp, max_temp, proc_count, hours, minutes, secs
-            );
-
-            #[cfg(target_os = "linux")]
-            if tempest_monitor::linux_helper::is_steamos() {
-                update_str.push_str("\n\n🩺 STEAMOS CHECK : MATCHED");
-            }
-            update_str.push_str("\n\n----------------------------------");
-            
-            let _ = agent_tx_metrics.send(tempest_ai::tui::AgentEvent::SystemUpdate(update_str.clone())).await;
-            
-            // --- 📊 SPARKLINE DATA EXTRACTION ---
-            // Send parsed values for Sparklines (Scaled x100 for ultra-high-resolution u64 representation)
-            let _ = agent_tx_metrics.send(tempest_ai::tui::AgentEvent::TelemetryMetrics { 
-                cpu: Some((avg_cpu * 100.0) as u64), 
-                gpu: Some(gpu_load as u64 * 100),
-                ram: None,
-                tps: None 
-            }).await;
-
-            {
-                let mut lock = shared_telemetry.lock();
-                *lock = update_str;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-    });
+    let (_telemetry_actor, _actor_handle) = ractor::Actor::spawn(
+        Some("telemetry_actor".to_string()),
+        tempest_ai::actors::TelemetryActor,
+        tempest_ai::actors::TelemetryArgs {
+            agent_tx: agent_tx.clone(),
+            shared_telemetry: agent.telemetry.clone(),
+            mode: agent.mode,
+        },
+    )
+    .await
+    .expect("Failed to spawn TelemetryActor");
 
     *agent.event_tx.lock() = Some(agent_tx.clone());
     *agent.tool_rx.lock().await = Some(tool_rx);
@@ -800,33 +753,53 @@ async fn main() -> Result<()> {
         let current_model = agent.get_model();
         let status_msg = match agent.mode {
             tempest_ai::inference::AgentMode::Gemini => format!("🟢 Connected: {}", current_model),
-            tempest_ai::inference::AgentMode::MLX => format!("🟢 MLX Engine Loaded: {}", current_model),
-            tempest_ai::inference::AgentMode::Kalosm => format!("🟢 Kalosm Loaded: {}", current_model),
-            tempest_ai::inference::AgentMode::LMStudio => format!("🟢 LM Studio Connected: {}", current_model),
+            tempest_ai::inference::AgentMode::MLX => {
+                format!("🟢 MLX Engine Loaded: {}", current_model)
+            }
+            tempest_ai::inference::AgentMode::Kalosm => {
+                format!("🟢 Kalosm Loaded: {}", current_model)
+            }
+            tempest_ai::inference::AgentMode::LMStudio => {
+                format!("🟢 LM Studio Connected: {}", current_model)
+            }
             tempest_ai::inference::AgentMode::Ollama => format!("🟢 Connected: {}", current_model),
             _ => format!("🟢 Connected: {}", current_model),
         };
-        let _ = agent_tx.send(tempest_ai::tui::AgentEvent::SubagentStatus(Some(status_msg))).await;
+        let _ = agent_tx
+            .send(tempest_ai::tui::AgentEvent::SubagentStatus(Some(
+                status_msg,
+            )))
+            .await;
     }
-    
+
     let agent_tui = agent.clone();
     tokio::spawn(async move {
         if let Err(e) = agent_tui.run_tui_mode(user_rx, stop_flag_agent).await {
-            let _ = agent_tx.send(tempest_ai::tui::AgentEvent::AgentError(format!("Agent crashed: {}", e))).await;
+            let _ = agent_tx
+                .send(tempest_ai::tui::AgentEvent::AgentError(format!(
+                    "Agent crashed: {}",
+                    e
+                )))
+                .await;
         }
     });
 
-    let initial_theme = config.tui_theme.clone().unwrap_or_else(|| "base16-ocean.dark".to_string());
+    let initial_theme = config
+        .tui_theme
+        .clone()
+        .unwrap_or_else(|| "base16-ocean.dark".to_string());
 
-    if let Err(e) = tempest_ai::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag, initial_theme).await {
+    if let Err(e) =
+        tempest_ai::tui::run_tui(agent_rx, user_tx, tool_tx, stop_flag, initial_theme).await
+    {
         println!("{}", format!("TUI Render Error: {}", e).red());
     }
-    
+
     // KILL SWITCH: Signal Ollama to unload the model from VRAM immediately on exit
     agent.shutdown().await;
-    
+
     agent.print_interaction_summary();
-    
+
     Ok(())
 }
 
@@ -834,7 +807,7 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
     use rustyline::DefaultEditor;
     let mut rl = DefaultEditor::new().into_diagnostic()?;
     let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    
+
     println!("{}", "=".repeat(60).blue());
     println!("{} {} Mode: ON", "🚀".green(), "Tempest Command".bold());
     println!("Type /help for internal commands or /quit to exit.");
@@ -845,10 +818,14 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
         match readline {
             Ok(line) => {
                 let p = line.trim();
-                if p.is_empty() { continue; }
+                if p.is_empty() {
+                    continue;
+                }
                 let _ = rl.add_history_entry(p);
-                
-                if p == "/quit" || p == "/exit" { break; }
+
+                if p == "/quit" || p == "/exit" {
+                    break;
+                }
                 if p == "/clear" {
                     agent.clear_history();
                     println!("{} History wiped.", "🧹".yellow());
@@ -874,7 +851,7 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                     println!("  /quit        — Exit Tempest");
                     continue;
                 }
-                
+
                 if p.starts_with("/tool ") {
                     let parts: Vec<&str> = p.splitn(3, ' ').collect();
                     if parts.len() >= 2 {
@@ -885,11 +862,17 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                                 if let Some(tool) = agent.get_tool_by_name(tool_name) {
                                     let ctx = agent.get_tool_context().await;
                                     match tool.execute(&json_args, ctx).await {
-                                        Ok(msg) => println!("{} {}", "🛠️ Tool Success:".green(), msg),
+                                        Ok(msg) => {
+                                            println!("{} {}", "🛠️ Tool Success:".green(), msg)
+                                        }
                                         Err(e) => println!("{} {}", "⚠️ Tool Error:".red(), e),
                                     }
                                 } else {
-                                    println!("{} Tool '{}' not found in registry.", "⚠️".yellow(), tool_name);
+                                    println!(
+                                        "{} Tool '{}' not found in registry.",
+                                        "⚠️".yellow(),
+                                        tool_name
+                                    );
                                 }
                             }
                             Err(e) => println!("{} Invalid JSON arguments: {}", "⚠️".red(), e),
@@ -899,12 +882,13 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                     }
                     continue;
                 }
-                
+
                 if let Err(e) = agent.run(p.to_string(), stop_flag.clone()).await {
                     println!("{} {}", "❌ Error:".red().bold(), e);
                 }
             }
-            Err(rustyline::error::ReadlineError::Interrupted) | Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(rustyline::error::ReadlineError::Interrupted)
+            | Err(rustyline::error::ReadlineError::Eof) => break,
             Err(err) => {
                 println!("Error: {:?}", err);
                 break;

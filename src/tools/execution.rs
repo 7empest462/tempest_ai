@@ -1,14 +1,14 @@
-use serde_json::{json, Value};
-use miette::{Result, IntoDiagnostic, miette};
-use std::process::Stdio;
-use tokio::process::Command;
-use tokio::time::{timeout, Duration};
-use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
+use crate::error::ExecutionError;
+use async_trait::async_trait;
+use miette::{IntoDiagnostic, Result, miette};
+use ollama_rs::generation::tools::{ToolFunctionInfo, ToolInfo, ToolType};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
-use crate::error::ExecutionError;
+use serde_json::{Value, json};
+use std::process::Stdio;
+use tokio::process::Command;
+use tokio::time::{Duration, timeout};
 
 #[derive(Deserialize, JsonSchema)]
 pub struct RunCommandArgs {
@@ -24,22 +24,28 @@ pub struct RunCommandTool;
 
 #[async_trait]
 impl AgentTool for RunCommandTool {
-    fn name(&self) -> &'static str { "run_command" }
-    fn description(&self) -> &'static str { "Executes a shell command. Features safety timeout and output capture." }
-    fn is_modifying(&self) -> bool { true } // Mark as modifying to ensure human-in-the-loop for shell execution
+    fn name(&self) -> &'static str {
+        "run_command"
+    }
+    fn description(&self) -> &'static str {
+        "Executes a shell command. Features safety timeout and output capture."
+    }
+    fn is_modifying(&self) -> bool {
+        true
+    } // Mark as modifying to ensure human-in-the-loop for shell execution
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
         let generator = settings.into_generator();
         let payload = generator.into_root_schema_for::<RunCommandArgs>();
-        
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
@@ -72,16 +78,19 @@ impl AgentTool for RunCommandTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true) // Automatically kill the process if we timeout and drop the handle
             .spawn()
-            .map_err(|e| ExecutionError::CommandFailed { command: final_cmd.clone(), message: e.to_string() })?;
+            .map_err(|e| ExecutionError::CommandFailed {
+                command: final_cmd.clone(),
+                message: e.to_string(),
+            })?;
 
         let res = timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
-        
+
         match res {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let status = output.status;
-                
+
                 let mut combined = String::new();
                 if !stdout.is_empty() {
                     combined.push_str(&format!("--- STDOUT ---\n{}\n", stdout));
@@ -89,20 +98,25 @@ impl AgentTool for RunCommandTool {
                 if !stderr.is_empty() {
                     combined.push_str(&format!("--- STDERR ---\n{}\n", stderr));
                 }
-                
+
                 let mut full_output = format!("Exit Status: {}\n{}", status, combined);
-                
+
                 if full_output.len() > 10000 {
                     let head = &full_output[..2000];
                     let tail = &full_output[full_output.len() - 8000..];
-                    full_output = format!("{}\n\n...[OUTPUT TRUNCATED - Showing first 2k and last 8k bytes]...\n\n{}", head, tail);
+                    full_output = format!(
+                        "{}\n\n...[OUTPUT TRUNCATED - Showing first 2k and last 8k bytes]...\n\n{}",
+                        head, tail
+                    );
                 }
                 Ok(full_output)
             }
-            Ok(Err(e)) => Err(ExecutionError::CommandFailed { command: cmd_str, message: e.to_string() }.into()),
-            Err(_) => {
-                Err(ExecutionError::Timeout { command: cmd_str }.into())
+            Ok(Err(e)) => Err(ExecutionError::CommandFailed {
+                command: cmd_str,
+                message: e.to_string(),
             }
+            .into()),
+            Err(_) => Err(ExecutionError::Timeout { command: cmd_str }.into()),
         }
     }
 }
@@ -117,34 +131,42 @@ pub struct RunTestsTool;
 
 #[async_trait]
 impl AgentTool for RunTestsTool {
-    fn name(&self) -> &'static str { "run_tests" }
-    fn description(&self) -> &'static str { "Runs project tests. Detects language and runs appropriate test command (e.g., cargo test, npm test)." }
-    fn is_modifying(&self) -> bool { false }
+    fn name(&self) -> &'static str {
+        "run_tests"
+    }
+    fn description(&self) -> &'static str {
+        "Runs project tests. Detects language and runs appropriate test command (e.g., cargo test, npm test)."
+    }
+    fn is_modifying(&self) -> bool {
+        false
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
         let generator = settings.into_generator();
         let payload = generator.into_root_schema_for::<RunTestsArgs>();
-        
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
         let typed_args: RunTestsArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
-        let filter = typed_args.filter.unwrap_or_else(String::new);
-        
+        let filter = typed_args.filter.unwrap_or_default();
+
         let cmd = if std::path::Path::new("Cargo.toml").exists() {
             format!("cargo test {} -- --nocapture", filter)
         } else if std::path::Path::new("package.json").exists() {
             format!("npm test -- {}", filter)
-        } else if std::path::Path::new("pytest.ini").exists() || std::path::Path::new("tests").exists() {
+        } else if std::path::Path::new("pytest.ini").exists()
+            || std::path::Path::new("tests").exists()
+        {
             format!("pytest {}", filter)
         } else {
             return Err(miette!("No supported test suite detected."));
@@ -162,22 +184,28 @@ pub struct BuildProjectTool;
 
 #[async_trait]
 impl AgentTool for BuildProjectTool {
-    fn name(&self) -> &'static str { "build_project" }
-    fn description(&self) -> &'static str { "Builds the current project using the detected build system." }
-    fn is_modifying(&self) -> bool { false }
+    fn name(&self) -> &'static str {
+        "build_project"
+    }
+    fn description(&self) -> &'static str {
+        "Builds the current project using the detected build system."
+    }
+    fn is_modifying(&self) -> bool {
+        false
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
         let generator = settings.into_generator();
         let payload = generator.into_root_schema_for::<BuildProjectArgs>();
-        
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 

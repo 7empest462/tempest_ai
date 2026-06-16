@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use skg_tool::{ToolDyn, ToolCallContext, ToolError};
-use serde_json::Value;
-use std::pin::Pin;
-use std::future::Future;
 use crate::tools::AgentTool;
+use serde_json::Value;
+use skg_tool::{ToolCallContext, ToolDyn, ToolError};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// A wrapper that makes any AgentTool implement ToolDyn.
 pub struct SkgToolAdapter {
@@ -31,12 +31,15 @@ impl ToolDyn for SkgToolAdapter {
         ctx: &ToolCallContext,
     ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + '_>> {
         // Extract ToolContext from deps
-        let context_res = ctx.deps::<Arc<crate::tools::ToolContext>>()
+        let context_res = ctx
+            .deps::<Arc<crate::tools::ToolContext>>()
             .cloned()
-            .ok_or_else(|| ToolError::ExecutionFailed("Missing Tempest ToolContext in deps".to_string()));
-            
+            .ok_or_else(|| {
+                ToolError::ExecutionFailed("Missing Tempest ToolContext in deps".to_string())
+            });
+
         let inner = self.inner.clone();
-        
+
         Box::pin(async move {
             let context = context_res?;
             match inner.execute(&input, (*context).clone()).await {
@@ -45,7 +48,7 @@ impl ToolDyn for SkgToolAdapter {
             }
         })
     }
-    
+
     fn requires_approval(&self) -> bool {
         self.inner.is_modifying()
     }

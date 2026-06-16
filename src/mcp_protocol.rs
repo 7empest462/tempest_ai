@@ -21,9 +21,7 @@ pub enum TempestRequest {
     Status,
 
     #[serde(rename = "tempest/switch_backend")]
-    SwitchBackend {
-        backend: String,
-    },
+    SwitchBackend { backend: String },
 
     #[serde(rename = "tempest/clear_history")]
     ClearHistory,
@@ -59,15 +57,10 @@ pub enum TempestResponse {
     },
 
     #[serde(rename = "tempest/switch_backend")]
-    SwitchBackendResponse {
-        success: bool,
-        message: String,
-    },
+    SwitchBackendResponse { success: bool, message: String },
 
     #[serde(rename = "tempest/clear_history")]
-    ClearHistoryResponse {
-        success: bool,
-    },
+    ClearHistoryResponse { success: bool },
 
     #[serde(rename = "tempest/get_state")]
     StateResponse {

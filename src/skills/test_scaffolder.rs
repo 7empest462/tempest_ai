@@ -1,5 +1,6 @@
 pub const NAME: &str = "test_scaffolder";
-pub const DESCRIPTION: &str = "Automatically generate unit and integration test suites for functions and modules";
+pub const DESCRIPTION: &str =
+    "Automatically generate unit and integration test suites for functions and modules";
 pub const INSTRUCTIONS: &str = r#"
 ## Steps
 1. **Analyze Target**: Read the source file with read_file to understand the inputs, outputs, and side-effects of the function or struct.

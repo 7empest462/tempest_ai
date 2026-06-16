@@ -1,9 +1,7 @@
-use tempest_ai::tools::{AgentTool, ToolContext};
-use tempest_ai::tool_rag::{ToolVectorIndex, cosine_similarity, categorize_tool, ALWAYS_ON_TOOLS};
-use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use miette::Result;
 use serde_json::Value;
 use std::sync::Arc;
-use miette::Result;
+use tempest_ai::tool_rag::{ALWAYS_ON_TOOLS, ToolVectorIndex, categorize_tool, cosine_similarity};
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct DummyArgs {}
@@ -13,33 +11,32 @@ struct MockTool {
     desc: &'static str,
 }
 
-#[async_trait::async_trait]
-impl AgentTool for MockTool {
-    fn name(&self) -> &'static str {
+impl skg_tool::ToolDyn for MockTool {
+    fn name(&self) -> &str {
         self.name
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         self.desc
     }
 
-    fn tool_info(&self) -> ToolInfo {
+    fn input_schema(&self) -> Value {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<DummyArgs>();
-        
-        ToolInfo {
-            tool_type: ToolType::Function,
-            function: ToolFunctionInfo {
-                name: self.name().to_string(),
-                description: self.description().to_string(),
-                parameters: payload.into(),
-            },
-        }
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<DummyArgs>();
+        serde_json::to_value(payload).unwrap_or(Value::Object(Default::default()))
     }
 
-    async fn execute(&self, _args: &Value, _context: ToolContext) -> Result<String> {
-        Ok("mocked".to_string())
+    fn call(
+        &self,
+        _input: Value,
+        _ctx: &skg_tool::ToolCallContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Value, skg_tool::ToolError>> + Send + '_>> {
+        Box::pin(async move {
+            Ok(Value::String("mocked".to_string()))
+        })
     }
 }
 
@@ -58,21 +55,33 @@ async fn main() -> Result<()> {
 
     // 2. Verify Cosine Similarity Mathematics
     println!("📐 Testing cosine similarity logic...");
-    
+
     // Identical vectors -> similarity of 1.0
     let v1 = vec![1.0, 0.0, 0.0];
     let sim_ident = cosine_similarity(&v1, &v1);
-    assert!((sim_ident - 1.0).abs() < 1e-5, "Identical vectors similarity should be 1.0, got {}", sim_ident);
+    assert!(
+        (sim_ident - 1.0).abs() < 1e-5,
+        "Identical vectors similarity should be 1.0, got {}",
+        sim_ident
+    );
 
     // Orthogonal vectors -> similarity of 0.0
     let v2 = vec![0.0, 1.0, 0.0];
     let sim_ortho = cosine_similarity(&v1, &v2);
-    assert!(sim_ortho.abs() < 1e-5, "Orthogonal vectors similarity should be 0.0, got {}", sim_ortho);
+    assert!(
+        sim_ortho.abs() < 1e-5,
+        "Orthogonal vectors similarity should be 0.0, got {}",
+        sim_ortho
+    );
 
     // Opposite vectors -> similarity of -1.0
     let v3 = vec![-1.0, 0.0, 0.0];
     let sim_opp = cosine_similarity(&v1, &v3);
-    assert!((sim_opp - (-1.0)).abs() < 1e-5, "Opposite vectors similarity should be -1.0, got {}", sim_opp);
+    assert!(
+        (sim_opp - (-1.0)).abs() < 1e-5,
+        "Opposite vectors similarity should be -1.0, got {}",
+        sim_opp
+    );
 
     // Non-trivial vectors
     let v4 = vec![1.0, 2.0, 3.0];
@@ -82,7 +91,11 @@ async fn main() -> Result<()> {
     // norm4 = sqrt(1 + 4 + 9) = sqrt(14) ≈ 3.741657
     // norm5 = sqrt(16 + 25 + 36) = sqrt(77) ≈ 8.774964
     // sim = 32 / (3.741657 * 8.774964) ≈ 32 / 32.83291 ≈ 0.97463
-    assert!((sim_val - 0.9746318).abs() < 1e-5, "Math similarity check failed, got {}", sim_val);
+    assert!(
+        (sim_val - 0.9746318).abs() < 1e-5,
+        "Math similarity check failed, got {}",
+        sim_val
+    );
 
     // Error/edge cases
     assert_eq!(cosine_similarity(&[], &[]), 0.0);
@@ -105,27 +118,58 @@ async fn main() -> Result<()> {
 
     // 4. Verify Fallback Index Build Behavior
     println!("🛡️ Testing ToolVectorIndex fallback initialization...");
-    let mock_tools: Vec<Arc<dyn AgentTool>> = vec![
-        Arc::new(MockTool { name: "read_file", desc: "Read file contents" }),
-        Arc::new(MockTool { name: "write_file", desc: "Write file contents" }),
-        Arc::new(MockTool { name: "git_status", desc: "Show git status" }),
-        Arc::new(MockTool { name: "search_web", desc: "Search the web" }),
+    let mock_tools: Vec<Arc<dyn skg_tool::ToolDyn>> = vec![
+        Arc::new(MockTool {
+            name: "read_file",
+            desc: "Read file contents",
+        }),
+        Arc::new(MockTool {
+            name: "write_file",
+            desc: "Write file contents",
+        }),
+        Arc::new(MockTool {
+            name: "git_status",
+            desc: "Show git status",
+        }),
+        Arc::new(MockTool {
+            name: "search_web",
+            desc: "Search the web",
+        }),
     ];
 
     let index = ToolVectorIndex::build_fallback(&mock_tools);
-    assert_eq!(index.len(), 0, "Fallback index should have 0 embedded entries");
-    assert_eq!(index.all_tools().len(), 4, "Should retain all 4 tools in all_tools metadata");
+    assert_eq!(
+        index.len(),
+        0,
+        "Fallback index should have 0 embedded entries"
+    );
+    assert_eq!(
+        index.all_tools().len(),
+        4,
+        "Should retain all 4 tools in all_tools metadata"
+    );
 
     // Verify resolve behavior (can be Ok if Ollama is online, or Err if offline/unavailable)
     let offline_backend = tempest_ai::inference::Backend::Ollama(ollama_rs::Ollama::default());
-    let resolve_res = index.resolve("Find some files", &offline_backend, None).await;
+    let resolve_res = index
+        .resolve("Find some files", &offline_backend, None)
+        .await;
     match resolve_res {
         Ok((selected_tools, _log)) => {
-            println!("ℹ️ Ollama is online/reachable. Resolved {} tools.", selected_tools.len());
-            assert!(!selected_tools.is_empty(), "Resolved tools list should not be empty");
+            println!(
+                "ℹ️ Ollama is online/reachable. Resolved {} tools.",
+                selected_tools.len()
+            );
+            assert!(
+                !selected_tools.is_empty(),
+                "Resolved tools list should not be empty"
+            );
         }
         Err(e) => {
-            println!("ℹ️ Ollama is offline/unavailable (expected on clean environments): {}", e);
+            println!(
+                "ℹ️ Ollama is offline/unavailable (expected on clean environments): {}",
+                e
+            );
         }
     }
     println!("✅ ToolVectorIndex fallback initialization & resolution checks passed!");

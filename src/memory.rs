@@ -1,8 +1,16 @@
+use crate::crypto::{decrypt_history, encrypt_history};
+use miette::{IntoDiagnostic, Result};
 use rusqlite::Connection;
-use miette::{Result, IntoDiagnostic};
-use std::path::PathBuf;
-use crate::crypto::{encrypt_history, decrypt_history};
 use std::fs;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub struct MemoryRecord {
+    pub topic: String,
+    pub content: String,
+    pub tags: Option<String>,
+    pub updated_at: String,
+}
 
 pub struct MemoryStore {
     conn: Connection,
@@ -15,7 +23,7 @@ impl MemoryStore {
         path.push("tempest_ai");
         fs::create_dir_all(&path).into_diagnostic()?;
         path.push("brain.db");
-        
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -23,17 +31,18 @@ impl MemoryStore {
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
+                    .truncate(true)
                     .mode(0o600)
                     .open(&path);
             }
         }
 
         let conn = Connection::open(&path).into_diagnostic()?;
-        
+
         // ⚡ Enable WAL mode for better concurrency
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| miette::miette!("Failed to enable WAL mode: {}", e))?;
-        
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memories (
                 topic TEXT PRIMARY KEY,
@@ -42,19 +51,20 @@ impl MemoryStore {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
             [],
-        ).into_diagnostic()?;
+        )
+        .into_diagnostic()?;
 
         // 🛡️ MIGRATION: Robustly check for 'tags' column using PRAGMA table_info
         let mut has_tags = false;
-        if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(memories)") {
-            if let Ok(mut rows) = stmt.query([]) {
-                while let Ok(Some(row)) = rows.next() {
-                    if let Ok(name) = row.get::<_, String>(1) {
-                        if name == "tags" {
-                            has_tags = true;
-                            break;
-                        }
-                    }
+        if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(memories)")
+            && let Ok(mut rows) = stmt.query([])
+        {
+            while let Ok(Some(row)) = rows.next() {
+                if let Ok(name) = row.get::<_, String>(1)
+                    && name == "tags"
+                {
+                    has_tags = true;
+                    break;
                 }
             }
         }
@@ -69,7 +79,7 @@ impl MemoryStore {
     pub fn store(&self, topic: &str, content: &str, tags: Option<Vec<String>>) -> Result<()> {
         let encrypted = encrypt_history(content.as_bytes(), &self.passphrase)?;
         let tag_str = tags.map(|t| t.join(", "));
-        
+
         self.conn.execute(
             "INSERT INTO memories (topic, data, tags, updated_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
              ON CONFLICT(topic) DO UPDATE SET data=excluded.data, tags=excluded.tags, updated_at=CURRENT_TIMESTAMP",
@@ -81,37 +91,73 @@ impl MemoryStore {
     pub fn recall(&self, keyword: &str) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare("SELECT topic, data FROM memories WHERE topic LIKE ?1 OR tags LIKE ?1 ORDER BY updated_at DESC").into_diagnostic()?;
         let search = format!("%{}%", keyword);
-        let rows = stmt.query_map(rusqlite::params![search], |row| {
-            let topic: String = row.get(0)?;
-            let data: Vec<u8> = row.get(1)?;
-            Ok((topic, data))
-        }).into_diagnostic()?;
+        let rows = stmt
+            .query_map(rusqlite::params![search], |row| {
+                let topic: String = row.get(0)?;
+                let data: Vec<u8> = row.get(1)?;
+                Ok((topic, data))
+            })
+            .into_diagnostic()?;
 
         let mut results = Vec::new();
         for r in rows {
             let (t, encrypted_data) = r.into_diagnostic()?;
-            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase) {
-                if let Ok(content_str) = String::from_utf8(decrypted) {
-                    results.push((t, content_str));
-                }
+            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase)
+                && let Ok(content_str) = String::from_utf8(decrypted)
+            {
+                results.push((t, content_str));
             }
         }
         Ok(results)
     }
 
     pub fn recall_latest(&self) -> Result<Option<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT topic, data FROM memories ORDER BY updated_at DESC LIMIT 1").into_diagnostic()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT topic, data FROM memories ORDER BY updated_at DESC LIMIT 1")
+            .into_diagnostic()?;
         let mut rows = stmt.query([]).into_diagnostic()?;
         if let Some(row) = rows.next().into_diagnostic()? {
             let topic: String = row.get(0).into_diagnostic()?;
             let encrypted_data: Vec<u8> = row.get(1).into_diagnostic()?;
-            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase) {
-                if let Ok(content_str) = String::from_utf8(decrypted) {
-                    return Ok(Some((topic, content_str)));
-                }
+            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase)
+                && let Ok(content_str) = String::from_utf8(decrypted)
+            {
+                return Ok(Some((topic, content_str)));
             }
         }
         Ok(None)
     }
 
+    pub fn list_all(&self) -> Result<Vec<MemoryRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT topic, data, tags, updated_at FROM memories ORDER BY updated_at DESC")
+            .into_diagnostic()?;
+        let rows = stmt
+            .query_map([], |row| {
+                let topic: String = row.get(0)?;
+                let data: Vec<u8> = row.get(1)?;
+                let tags: Option<String> = row.get(2)?;
+                let updated_at: String = row.get(3)?;
+                Ok((topic, data, tags, updated_at))
+            })
+            .into_diagnostic()?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            let (topic, encrypted_data, tags, updated_at) = r.into_diagnostic()?;
+            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase)
+                && let Ok(content_str) = String::from_utf8(decrypted)
+            {
+                results.push(MemoryRecord {
+                    topic,
+                    content: content_str,
+                    tags,
+                    updated_at,
+                });
+            }
+        }
+        Ok(results)
+    }
 }

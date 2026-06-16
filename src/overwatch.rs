@@ -1,5 +1,5 @@
 //! Overwatch Context Rules Engine
-//! 
+//!
 //! Implements Skelegent ContextOps for catching model hallucinations
 //! before they reach the user. These rules apply backpressure to the agent loop
 //! by injecting system corrections and forcing re-rolls when the model lies.
@@ -15,14 +15,14 @@
 //! - **Predicate caching**: Avoids redundant checks per turn
 //! - **Error classification**: Integrates with error_classifier for recovery hints
 
-use skg_context_engine::{Context, ContextOp, EngineError, Rule, OutputSchema};
+use async_trait::async_trait;
 use layer0::content::Content;
 use layer0::context::{Message, Role};
-use async_trait::async_trait;
-use std::collections::{VecDeque, HashMap};
+use serde_json::{Value, json};
+use skg_context_engine::{Context, ContextOp, EngineError, OutputSchema, Rule};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde_json::{json, Value};
 
 // Note: error_classifier integration available for future recovery hint features
 
@@ -63,9 +63,9 @@ impl SentinelState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         self.triggered_rules.push(rule_name.clone());
-        
+
         // Keep only last 20 triggers
         if self.rule_trigger_history.len() >= 20 {
             self.rule_trigger_history.pop_front();
@@ -79,11 +79,10 @@ impl SentinelState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
-        self.rule_trigger_history.iter()
-            .filter(|(name, timestamp)| {
-                name == rule_name && now.saturating_sub(*timestamp) < 60
-            })
+
+        self.rule_trigger_history
+            .iter()
+            .filter(|(name, timestamp)| name == rule_name && now.saturating_sub(*timestamp) < 60)
             .count() as u32
     }
 
@@ -92,7 +91,6 @@ impl SentinelState {
         self.trigger_frequency(rule_name) > 3
     }
 }
-
 
 // ============================================================
 // ============================================================
@@ -132,11 +130,12 @@ impl ContextScore {
         self.last_intercept_time = now;
         self.consecutive_intercepts += 1;
         self.suspicion = (self.suspicion + 15).min(100);
-        
+
         // Keep only last 10 intercepts (60 second window)
-        self.recent_intercepts.retain(|&t| now.saturating_sub(t) < 60);
+        self.recent_intercepts
+            .retain(|&t| now.saturating_sub(t) < 60);
         self.recent_intercepts.push_back(now);
-        
+
         // Rate limit: more than 5 intercepts in 60 seconds = halt
         self.recent_intercepts.len() > 5
     }
@@ -203,11 +202,12 @@ impl ContextOp for HallucinationGuardOp {
                 "🛑 [OVERWATCH - HALLUCINATION GUARD]: You claimed to take an action \
                 but did NOT output any tool call. You cannot perform actions through \
                 natural language alone. You MUST output the correct JSON tool-call schema \
-                to interact with the system. Re-issue your response with the proper tool call NOW."
+                to interact with the system. Re-issue your response with the proper tool call NOW.",
             ),
         ));
         Err(EngineError::Halted {
-            reason: "Hallucination intercepted: action claim without tool call. Forcing LLM retry.".into(),
+            reason: "Hallucination intercepted: action claim without tool call. Forcing LLM retry."
+                .into(),
         })
     }
 }
@@ -234,7 +234,7 @@ impl ContextOp for FileIOOverwatchOp {
                 You CANNOT read or write files using natural language text. \
                 You MUST output the correct tool-call schema (read_file, write_file, etc.) \
                 to interact with the filesystem. Your previous response has been REJECTED. \
-                Re-issue with proper tool calls."
+                Re-issue with proper tool calls.",
             ),
         ));
         Err(EngineError::Halted {
@@ -262,7 +262,7 @@ impl ContextOp for FakeToolResultOp {
             Content::text(
                 "🛑 [OVERWATCH - IMPERSONATION]: You are fabricating tool/system output. \
                 Only the Tempest runtime can produce tool results. You MUST call the actual tool \
-                to get real results. Your fabricated output has been DISCARDED."
+                to get real results. Your fabricated output has been DISCARDED.",
             ),
         ));
         Err(EngineError::Halted {
@@ -311,15 +311,28 @@ fn has_tool_call(content: &str) -> bool {
 
 /// Predicate: last assistant message claims action but has no tool call.
 fn is_hallucinating_action(ctx: &Context) -> bool {
-    let Some(raw) = last_assistant_text(ctx) else { return false };
+    let Some(raw) = last_assistant_text(ctx) else {
+        return false;
+    };
     let analysis = strip_thinking_blocks(&raw.to_lowercase());
 
     let transitions = [
-        "i will now", "i'll now", "i'm going to", "let me now",
-        "i will use", "i'll use", "i will run", "i'll run",
-        "i will execute", "let me execute", "let me read",
-        "let me write", "let me check", "i will read",
-        "i will write", "i will check",
+        "i will now",
+        "i'll now",
+        "i'm going to",
+        "let me now",
+        "i will use",
+        "i'll use",
+        "i will run",
+        "i'll run",
+        "i will execute",
+        "let me execute",
+        "let me read",
+        "let me write",
+        "let me check",
+        "i will read",
+        "i will write",
+        "i will check",
     ];
 
     let claims_action = transitions.iter().any(|&t| analysis.contains(t));
@@ -328,18 +341,28 @@ fn is_hallucinating_action(ctx: &Context) -> bool {
 
 /// Predicate: last assistant message claims file I/O without tool call.
 fn is_hallucinating_file_io(ctx: &Context) -> bool {
-    let Some(raw) = last_assistant_text(ctx) else { return false };
+    let Some(raw) = last_assistant_text(ctx) else {
+        return false;
+    };
     let analysis = strip_thinking_blocks(&raw.to_lowercase());
 
     let file_hallucinations = [
-        "i have read the file", "i've read the file",
-        "here are the contents", "the file contains",
-        "the contents of", "i wrote the file",
-        "i've written the file", "i saved the code to",
-        "the file has been updated", "the file has been created",
-        "i updated the file", "i've updated the file",
-        "i created the file", "i've created the file",
-        "here's what the file looks like", "the code in the file",
+        "i have read the file",
+        "i've read the file",
+        "here are the contents",
+        "the file contains",
+        "the contents of",
+        "i wrote the file",
+        "i've written the file",
+        "i saved the code to",
+        "the file has been updated",
+        "the file has been created",
+        "i updated the file",
+        "i've updated the file",
+        "i created the file",
+        "i've created the file",
+        "here's what the file looks like",
+        "the code in the file",
     ];
 
     let claims_file = file_hallucinations.iter().any(|&t| analysis.contains(t));
@@ -348,17 +371,16 @@ fn is_hallucinating_file_io(ctx: &Context) -> bool {
 
 /// Predicate: last assistant message contains fake tool result markers.
 fn is_faking_tool_results(ctx: &Context) -> bool {
-    let Some(raw) = last_assistant_text(ctx) else { return false };
+    let Some(raw) = last_assistant_text(ctx) else {
+        return false;
+    };
     let lower = raw.to_lowercase();
 
-    let fake_markers = [
-        "=== tool result ===",
-        "=== tool error ===",
-    ];
+    let fake_markers = ["=== tool result ===", "=== tool error ==="];
 
-    fake_markers.iter().any(|&m| {
-        lower.contains(m) && !lower.contains(&format!("\"{}\"", m))
-    })
+    fake_markers
+        .iter()
+        .any(|&m| lower.contains(m) && !lower.contains(&format!("\"{}\"", m)))
 }
 
 // ============================================================
@@ -369,51 +391,51 @@ fn is_faking_tool_results(ctx: &Context) -> bool {
 /// (incomplete braces, trailing commas). Does NOT check for missing optional fields.
 fn has_json_schema_violation(content: &str) -> bool {
     // Look for incomplete JSON structures in markdown blocks
-    if content.contains("```json") {
-        if let Some(start) = content.find("```json") {
-            let after = &content[start + 7..];
-            if let Some(end) = after.find("```") {
-                let json_block = &after[..end];
-                
-                // Check for incomplete JSON: opening brace but no closing, or vice versa
-                let open_braces = json_block.matches('{').count();
-                let close_braces = json_block.matches('}').count();
-                
-                if open_braces != close_braces {
-                    return true;
-                }
-                
-                // Check for trailing commas (common error)
-                if json_block.contains(",}") || json_block.contains(",]") {
-                    return true;
-                }
-                
-                // Valid markdown JSON block — return false, don't check naked JSON
-                return false;
-            } else {
-                // Opening marker but no closing — incomplete
+    if content.contains("```json")
+        && let Some(start) = content.find("```json")
+    {
+        let after = &content[start + 7..];
+        if let Some(end) = after.find("```") {
+            let json_block = &after[..end];
+
+            // Check for incomplete JSON: opening brace but no closing, or vice versa
+            let open_braces = json_block.matches('{').count();
+            let close_braces = json_block.matches('}').count();
+
+            if open_braces != close_braces {
                 return true;
             }
+
+            // Check for trailing commas (common error)
+            if json_block.contains(",}") || json_block.contains(",]") {
+                return true;
+            }
+
+            // Valid markdown JSON block — return false, don't check naked JSON
+            return false;
+        } else {
+            // Opening marker but no closing — incomplete
+            return true;
         }
     }
-    
+
     // Check for naked JSON objects (outside markdown)
     if let Some(start) = content.find("{\"") {
         let json_part = &content[start..];
-        
+
         // Mismatched braces
         let open = json_part.matches('{').count();
         let close = json_part.matches('}').count();
         if open != close {
             return true;
         }
-        
+
         // Trailing comma in JSON
         if json_part.contains(",}") || json_part.contains(",]") {
             return true;
         }
     }
-    
+
     false
 }
 
@@ -423,31 +445,36 @@ fn has_json_schema_violation(content: &str) -> bool {
 
 /// Check if model contradicts its own previous outputs
 fn has_self_contradiction(ctx: &Context) -> bool {
-    let Some(current) = last_assistant_text(ctx) else { return false };
+    let Some(current) = last_assistant_text(ctx) else {
+        return false;
+    };
     let current_lower = current.to_lowercase();
-    
+
     // Look for patterns like "I did X" but context shows we haven't called any tools
     let contradiction_patterns = [
-        ("i have executed", "tool"),      // Claims execution without tool call
-        ("i've completed", "tool"),       // Claims completion without result
+        ("i have executed", "tool"),        // Claims execution without tool call
+        ("i've completed", "tool"),         // Claims completion without result
         ("successfully created", "create"), // Claims creation without tool call
         ("the file now contains", "write"), // Claims write without write tool
         ("i found the error", "error classifier"), // Claims debugging without proper tool
     ];
-    
+
     for (claim, required_evidence) in &contradiction_patterns {
         if current_lower.contains(claim) && !current_lower.contains(required_evidence) {
             // Check if recent history actually shows this action
-            let has_evidence = ctx.messages.iter().rev()
+            let has_evidence = ctx
+                .messages
+                .iter()
+                .rev()
                 .take(5) // Look at last 5 messages
                 .any(|m| m.text_content().to_lowercase().contains(required_evidence));
-            
+
             if !has_evidence {
                 return true;
             }
         }
     }
-    
+
     false
 }
 
@@ -457,32 +484,37 @@ fn has_self_contradiction(ctx: &Context) -> bool {
 
 /// Detect if agent is trying to do things outside current scope/mission
 fn has_scope_creep(ctx: &Context) -> bool {
-    let Some(current) = last_assistant_text(ctx) else { return false };
+    let Some(current) = last_assistant_text(ctx) else {
+        return false;
+    };
     let current_lower = current.to_lowercase();
-    
+
     // Patterns indicating mission drift
     let scope_violations = [
         ("i will now rewrite", "refactor"), // Unsolicited refactoring
-        ("let me optimize", "improve"),      // Scope creep: optimizing without being asked
-        ("i'll deploy this", "deploy"),      // Attempting deployment outside scope
+        ("let me optimize", "improve"),     // Scope creep: optimizing without being asked
+        ("i'll deploy this", "deploy"),     // Attempting deployment outside scope
         ("i will run a full test suite", "test"), // Running tests not requested
         ("let me check the entire codebase", "scan"), // Scanning beyond scope
         ("i should update all", "batch modify"), // Batch changes without permission
     ];
-    
+
     for (action, verb) in &scope_violations {
         if current_lower.contains(action) {
             // Only flag if there's no recent context supporting this action
-            let has_permission = ctx.messages.iter().rev()
+            let has_permission = ctx
+                .messages
+                .iter()
+                .rev()
                 .take(3)
                 .any(|m| m.text_content().to_lowercase().contains(verb));
-            
+
             if !has_permission {
                 return true;
             }
         }
     }
-    
+
     false
 }
 
@@ -493,7 +525,7 @@ fn has_scope_creep(ctx: &Context) -> bool {
 /// Detect false confidence on uncertain tasks
 fn is_over_confident(content: &str) -> bool {
     let lower = content.to_lowercase();
-    
+
     // Patterns of false certainty on inherently uncertain tasks
     let overconfident_patterns = [
         "100% certain",
@@ -505,15 +537,22 @@ fn is_over_confident(content: &str) -> bool {
         "100% accurate",
         "impossible to have any errors",
     ];
-    
+
     if overconfident_patterns.iter().any(|p| lower.contains(p)) {
         // Over-confidence is only a violation if preceded by uncertainty markers
         // (e.g., dealing with network, parsing, concurrency)
         let uncertainty_context = [
-            "network", "api", "parsing", "concurrent", "race", 
-            "timing", "external", "unstable", "unreliable"
+            "network",
+            "api",
+            "parsing",
+            "concurrent",
+            "race",
+            "timing",
+            "external",
+            "unstable",
+            "unreliable",
         ];
-        
+
         // If we're in uncertain context, the claim is illegitimate
         uncertainty_context.iter().any(|ctx| lower.contains(ctx))
     } else {
@@ -521,17 +560,16 @@ fn is_over_confident(content: &str) -> bool {
     }
 }
 
-
 // ============================================================
 // 🛑 HARD STOP / YIELD LOGIC
 // ============================================================
 
 /// Checks if the provided text contains a syntactically complete JSON tool call.
-/// This is used to aggressively truncate model generation the millisecond it 
+/// This is used to aggressively truncate model generation the millisecond it
 /// finishes asking for a tool, preventing post-tool hallucinations.
 pub fn is_complete_tool_json(text: &str) -> bool {
     let lower = text.to_lowercase();
-    
+
     // Case 1: Markdown block ```json ... ```
     if let Some(start) = lower.find("```json") {
         let after = &text[start + 7..];
@@ -539,7 +577,7 @@ pub fn is_complete_tool_json(text: &str) -> bool {
             return true;
         }
     }
-    
+
     // Case 2: Brace counting for any root object that looks like a tool call or validation
     // Find the first '{' and see if it balances out and contains "tool", "name", or "is_valid".
     if let Some(start) = text.find('{') {
@@ -549,7 +587,7 @@ pub fn is_complete_tool_json(text: &str) -> bool {
         let mut escape = false;
         let mut started = false;
         let mut end_idx = 0;
-        
+
         for (i, c) in json_part.chars().enumerate() {
             if escape {
                 escape = false;
@@ -572,16 +610,19 @@ pub fn is_complete_tool_json(text: &str) -> bool {
                 _ => {}
             }
         }
-        
+
         if started && depth == 0 {
             let extracted = &json_part[..=end_idx];
             let lower_ext = extracted.to_lowercase();
-            if lower_ext.contains("\"tool\"") || lower_ext.contains("\"name\"") || lower_ext.contains("\"is_valid\"") {
+            if lower_ext.contains("\"tool\"")
+                || lower_ext.contains("\"name\"")
+                || lower_ext.contains("\"is_valid\"")
+            {
                 return true;
             }
         }
     }
-    
+
     false
 }
 
@@ -591,14 +632,17 @@ pub fn is_complete_tool_json(text: &str) -> bool {
 pub fn repair_json_str(s: &str) -> String {
     let key_start_re = regex::Regex::new(r#""[a-zA-Z0-9_-]+"\s*:\s*""#).unwrap();
     let mut result = s.to_string();
-    
+
     // Scan backwards so that modifying indices doesn't affect earlier matches
-    let mut matches: Vec<(usize, usize)> = key_start_re.find_iter(s).map(|m| (m.start(), m.end())).collect();
+    let mut matches: Vec<(usize, usize)> = key_start_re
+        .find_iter(s)
+        .map(|m| (m.start(), m.end()))
+        .collect();
     matches.reverse();
 
     for (_start_idx, end_idx) in matches {
         let remaining = &result[end_idx..];
-        
+
         let mut closing_quote_idx = None;
         let chars: Vec<char> = remaining.chars().collect();
         let mut j = 0;
@@ -618,16 +662,18 @@ pub fn repair_json_str(s: &str) -> String {
                     }
                     break;
                 }
-                
+
                 if is_delimiter {
                     closing_quote_idx = Some(j);
                 }
             }
-            
+
             // Stop scanning if we hit another key-value start
             if j + 3 < chars.len() && chars[j] == '"' {
                 let mut k = j + 1;
-                while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-') {
+                while k < chars.len()
+                    && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-')
+                {
                     k += 1;
                 }
                 if k < chars.len() && chars[k] == '"' {
@@ -651,7 +697,11 @@ pub fn repair_json_str(s: &str) -> String {
 
         if let Some(close_idx) = closing_quote_idx {
             // Find character index boundary safely
-            let char_boundary_idx: usize = remaining.char_indices().map(|(idx, _)| idx).nth(close_idx).unwrap_or(close_idx);
+            let char_boundary_idx: usize = remaining
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .nth(close_idx)
+                .unwrap_or(close_idx);
             let raw_value = &remaining[..char_boundary_idx];
             let mut repaired_value = String::new();
             let chars_val: Vec<char> = raw_value.chars().collect();
@@ -667,13 +717,13 @@ pub fn repair_json_str(s: &str) -> String {
                 repaired_value.push(c);
                 idx += 1;
             }
-            
+
             let prefix = &result[..end_idx];
             let suffix = &result[end_idx + char_boundary_idx..];
             result = format!("{}{}{}", prefix, repaired_value, suffix);
         }
     }
-    
+
     result
 }
 
@@ -694,7 +744,7 @@ impl ContextOp for JsonSchemaViolationOp {
             Content::text(
                 "🛑 [OVERWATCH - JSON SCHEMA]: Your tool call JSON is malformed. \
                 Check for: missing closing braces, incomplete \"tool\"/\"name\" fields, \
-                or missing \"params\"/\"arguments\". Reformat and retry."
+                or missing \"params\"/\"arguments\". Reformat and retry.",
             ),
         ));
         Err(EngineError::Halted {
@@ -716,7 +766,7 @@ impl ContextOp for SelfContradictionOp {
             Content::text(
                 "🛑 [OVERWATCH - SELF-CONTRADICTION]: You claimed to have completed an action \
                 but your history shows you never called the required tool or received a result. \
-                Review your actual tool calls before making claims about completion."
+                Review your actual tool calls before making claims about completion.",
             ),
         ));
         Err(EngineError::Halted {
@@ -738,7 +788,7 @@ impl ContextOp for ScopeCreepOp {
             Content::text(
                 "🛑 [OVERWATCH - SCOPE CREEP]: You are attempting actions outside the current \
                 scope/mission. Stay focused on the user's explicit request. Do not optimize, \
-                refactor, deploy, or modify unrelated code without permission."
+                refactor, deploy, or modify unrelated code without permission.",
             ),
         ));
         Err(EngineError::Halted {
@@ -760,7 +810,7 @@ impl ContextOp for OverConfidenceOp {
             Content::text(
                 "🛑 [OVERWATCH - OVER-CONFIDENCE]: You are claiming absolute certainty on an \
                 inherently uncertain task (networking, parsing, concurrency, external APIs). \
-                Use appropriate uncertainty language: \"likely\", \"should\", \"may fail\", etc."
+                Use appropriate uncertainty language: \"likely\", \"should\", \"may fail\", etc.",
             ),
         ));
         Err(EngineError::Halted {
@@ -798,7 +848,7 @@ pub enum Trigger {
 pub struct RuleBuilder {
     name: String,
     trigger: Trigger,
-    priority: i32,  // Changed from u32 to i32 to match Rule::when signature
+    priority: i32, // Changed from u32 to i32 to match Rule::when signature
 }
 
 impl RuleBuilder {
@@ -958,36 +1008,36 @@ impl OutputSchemaBuilder {
         });
 
         // Add reasoning field if required
-        if self.require_reasoning {
-            if let Value::Object(ref mut props) = properties {
-                props.insert(
-                    "reasoning".to_string(),
-                    json!({
-                        "type": "string",
-                        "description": "Step-by-step reasoning for the decision"
-                    }),
-                );
-            }
+        if self.require_reasoning
+            && let Value::Object(ref mut props) = properties
+        {
+            props.insert(
+                "reasoning".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Step-by-step reasoning for the decision"
+                }),
+            );
         }
 
         // Add safety check field if required
-        if self.require_safety_check {
-            if let Value::Object(ref mut props) = properties {
-                props.insert(
-                    "safety_check".to_string(),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "is_safe": { "type": "boolean" },
-                            "concerns": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            }
-                        },
-                        "required": ["is_safe"]
-                    }),
-                );
-            }
+        if self.require_safety_check
+            && let Value::Object(ref mut props) = properties
+        {
+            props.insert(
+                "safety_check".to_string(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "is_safe": { "type": "boolean" },
+                        "concerns": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["is_safe"]
+                }),
+            );
         }
 
         // Build required fields list
@@ -1013,12 +1063,13 @@ impl OutputSchemaBuilder {
 
         OutputSchema::tool_call(schema, move |value| {
             // Check basic structure
-            let obj = value.as_object().ok_or_else(|| 
-                "Output must be a JSON object".to_string()
-            )?;
+            let obj = value
+                .as_object()
+                .ok_or_else(|| "Output must be a JSON object".to_string())?;
 
             // Validate result field
-            let result = obj.get("result")
+            let result = obj
+                .get("result")
                 .ok_or_else(|| "Missing 'result' field".to_string())?
                 .as_str()
                 .ok_or_else(|| "'result' must be a string".to_string())?;
@@ -1029,7 +1080,8 @@ impl OutputSchemaBuilder {
 
             // Validate reasoning if required
             if require_reasoning {
-                let reasoning = obj.get("reasoning")
+                let reasoning = obj
+                    .get("reasoning")
                     .ok_or_else(|| "Missing required 'reasoning' field".to_string())?
                     .as_str()
                     .ok_or_else(|| "'reasoning' must be a string".to_string())?;
@@ -1041,34 +1093,33 @@ impl OutputSchemaBuilder {
 
             // Validate safety check if required
             if require_safety_check {
-                let safety = obj.get("safety_check")
+                let safety = obj
+                    .get("safety_check")
                     .ok_or_else(|| "Missing required 'safety_check' field".to_string())?
                     .as_object()
                     .ok_or_else(|| "'safety_check' must be an object".to_string())?;
 
-                let is_safe = safety.get("is_safe")
+                let is_safe = safety
+                    .get("is_safe")
                     .ok_or_else(|| "Missing 'is_safe' in safety_check".to_string())?
                     .as_bool()
                     .ok_or_else(|| "'is_safe' must be a boolean".to_string())?;
 
-                if !is_safe {
-                    if let Some(concerns) = safety.get("concerns") {
-                        if let Some(arr) = concerns.as_array() {
-                            if arr.is_empty() {
-                                return Err("Safety check failed: concerns array is empty".to_string());
-                            }
-                        }
-                    }
+                if !is_safe
+                    && let Some(concerns) = safety.get("concerns")
+                    && let Some(arr) = concerns.as_array()
+                    && arr.is_empty()
+                {
+                    return Err("Safety check failed: concerns array is empty".to_string());
                 }
             }
 
             // Validate tool calls if required
-            if require_tool_calls {
-                if !result.contains("tool_call") && !result.contains("calling_tool") {
-                    return Err(
-                        "Output requires tool calls but none detected.".to_string()
-                    );
-                }
+            if require_tool_calls
+                && !result.contains("tool_call")
+                && !result.contains("calling_tool")
+            {
+                return Err("Output requires tool calls but none detected.".to_string());
             }
 
             Ok(value.clone())
@@ -1138,7 +1189,6 @@ impl Default for ToolCallValidator {
         Self::new()
     }
 }
-
 
 // ============================================================
 // �🌪️ RULE FACTORY (SKG CONTEXT ENGINE)
@@ -1259,7 +1309,6 @@ pub fn register_overwatch_rules(ctx: &mut Context) {
     }
 }
 
-
 // ============================================================
 // 🔌 NATIVE OVERWATCH ENGINE (Agent-side fast-path)
 // ============================================================
@@ -1295,15 +1344,28 @@ pub trait OverwatchRule: Send + Sync {
 
 struct HallucinationGuardRule;
 impl OverwatchRule for HallucinationGuardRule {
-    fn name(&self) -> &'static str { "Hallucination Guard" }
+    fn name(&self) -> &'static str {
+        "Hallucination Guard"
+    }
     fn evaluate(&self, content: &str) -> OverwatchVerdict {
         let analysis = strip_thinking_blocks(&content.to_lowercase());
         let transitions = [
-            "i will now", "i'll now", "i'm going to", "let me now",
-            "i will use", "i'll use", "i will run", "i'll run",
-            "i will execute", "let me execute", "let me read",
-            "let me write", "let me check", "i will read",
-            "i will write", "i will check",
+            "i will now",
+            "i'll now",
+            "i'm going to",
+            "let me now",
+            "i will use",
+            "i'll use",
+            "i will run",
+            "i'll run",
+            "i will execute",
+            "let me execute",
+            "let me read",
+            "let me write",
+            "let me check",
+            "i will read",
+            "i will write",
+            "i will check",
         ];
         if transitions.iter().any(|&t| analysis.contains(t)) && !has_tool_call(content) {
             OverwatchVerdict::Intercept {
@@ -1319,18 +1381,28 @@ impl OverwatchRule for HallucinationGuardRule {
 
 struct FileIOOverwatchFastRule;
 impl OverwatchRule for FileIOOverwatchFastRule {
-    fn name(&self) -> &'static str { "File I/O Overwatch" }
+    fn name(&self) -> &'static str {
+        "File I/O Overwatch"
+    }
     fn evaluate(&self, content: &str) -> OverwatchVerdict {
         let analysis = strip_thinking_blocks(&content.to_lowercase());
         let file_hallucinations = [
-            "i have read the file", "i've read the file",
-            "here are the contents", "the file contains",
-            "the contents of", "i wrote the file",
-            "i've written the file", "i saved the code to",
-            "the file has been updated", "the file has been created",
-            "i updated the file", "i've updated the file",
-            "i created the file", "i've created the file",
-            "here's what the file looks like", "the code in the file",
+            "i have read the file",
+            "i've read the file",
+            "here are the contents",
+            "the file contains",
+            "the contents of",
+            "i wrote the file",
+            "i've written the file",
+            "i saved the code to",
+            "the file has been updated",
+            "the file has been created",
+            "i updated the file",
+            "i've updated the file",
+            "i created the file",
+            "i've created the file",
+            "here's what the file looks like",
+            "the code in the file",
         ];
         if file_hallucinations.iter().any(|&t| analysis.contains(t)) && !has_tool_call(content) {
             OverwatchVerdict::Intercept {
@@ -1346,11 +1418,16 @@ impl OverwatchRule for FileIOOverwatchFastRule {
 
 struct FakeToolResultFastRule;
 impl OverwatchRule for FakeToolResultFastRule {
-    fn name(&self) -> &'static str { "Fake Result Guard" }
+    fn name(&self) -> &'static str {
+        "Fake Result Guard"
+    }
     fn evaluate(&self, content: &str) -> OverwatchVerdict {
         let lower = content.to_lowercase();
         let fake_markers = ["=== tool result ===", "=== tool error ==="];
-        if fake_markers.iter().any(|&m| lower.contains(m) && !lower.contains(&format!("\"{}\"", m))) {
+        if fake_markers
+            .iter()
+            .any(|&m| lower.contains(m) && !lower.contains(&format!("\"{}\"", m)))
+        {
             OverwatchVerdict::Intercept {
                 correction: "🛑 [OVERWATCH - IMPERSONATION]: You are fabricating tool/system output. Only the Tempest runtime can produce tool results. Your fabricated output has been DISCARDED.".to_string(),
                 log: "Blocked fake tool result impersonation".to_string(),
@@ -1364,7 +1441,9 @@ impl OverwatchRule for FakeToolResultFastRule {
 
 struct JsonSchemaViolationFastRule;
 impl OverwatchRule for JsonSchemaViolationFastRule {
-    fn name(&self) -> &'static str { "JSON Schema Violation" }
+    fn name(&self) -> &'static str {
+        "JSON Schema Violation"
+    }
     fn evaluate(&self, content: &str) -> OverwatchVerdict {
         if has_json_schema_violation(content) {
             OverwatchVerdict::Intercept {
@@ -1380,14 +1459,20 @@ impl OverwatchRule for JsonSchemaViolationFastRule {
 
 struct ScopeCreepFastRule;
 impl OverwatchRule for ScopeCreepFastRule {
-    fn name(&self) -> &'static str { "Scope Creep Detection" }
+    fn name(&self) -> &'static str {
+        "Scope Creep Detection"
+    }
     fn evaluate(&self, content: &str) -> OverwatchVerdict {
         let lower = content.to_lowercase();
         let scope_violations = [
-            "i will now rewrite", "let me optimize", "i'll deploy",
-            "i will run a full test", "let me check the entire", "i should update all"
+            "i will now rewrite",
+            "let me optimize",
+            "i'll deploy",
+            "i will run a full test",
+            "let me check the entire",
+            "i should update all",
         ];
-        
+
         if scope_violations.iter().any(|v| lower.contains(v)) {
             OverwatchVerdict::Intercept {
                 correction: "🛑 [OVERWATCH - SCOPE CREEP]: You are attempting actions outside current scope. Stay focused on the user's explicit request.".to_string(),
@@ -1402,7 +1487,9 @@ impl OverwatchRule for ScopeCreepFastRule {
 
 struct OverConfidenceFastRule;
 impl OverwatchRule for OverConfidenceFastRule {
-    fn name(&self) -> &'static str { "Over-Confidence Guard" }
+    fn name(&self) -> &'static str {
+        "Over-Confidence Guard"
+    }
     fn evaluate(&self, content: &str) -> OverwatchVerdict {
         if is_over_confident(content) {
             OverwatchVerdict::Intercept {
@@ -1416,7 +1503,6 @@ impl OverwatchRule for OverConfidenceFastRule {
     }
 }
 
-
 /// The fast-path overwatch engine used directly by the agent's StreamingContent handler.
 pub struct OverwatchEngine {
     rules: Vec<Box<dyn OverwatchRule>>,
@@ -1428,6 +1514,12 @@ pub struct OverwatchEngine {
     project_memory: Arc<Mutex<ProjectMemory>>,
     /// Sentinel state tracking model behavior and rule triggers.
     sentinel_state: Arc<Mutex<SentinelState>>,
+}
+
+impl Default for OverwatchEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OverwatchEngine {
@@ -1451,14 +1543,19 @@ impl OverwatchEngine {
 
     /// Run all rules against the assistant output.
     /// Returns the first Intercept verdict found, or Pass if all rules pass.
-    /// 
+    ///
     /// Also tracks context score and enforces rate limiting to prevent
     /// infinite retry loops. If rate limit is exceeded, returns a halt verdict.
     pub fn evaluate_pre_reaction(&self, content: &str) -> OverwatchVerdict {
         let mut score = self.context_score.lock().unwrap();
-        
-        // Check rate limit first
-        if score.record_intercept() {
+
+        // Check rate limit first (without recording a new false intercept)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        score.recent_intercepts.retain(|&t| now.saturating_sub(t) < 60);
+        if score.recent_intercepts.len() > 5 {
             return OverwatchVerdict::Intercept {
                 correction: "🛑 [OVERWATCH - RATE LIMIT]: Too many consecutive intercepts. \
                     The model appears to be stuck in a retry loop. \
@@ -1483,37 +1580,52 @@ impl OverwatchEngine {
                 }
             }
         }
-        
+
         OverwatchVerdict::Pass
     }
 
     /// Validate tool calls BEFORE execution. This closes the critical architectural gap
-    /// where native tool calls (via Ollama/MLX structured tool calling) bypassed the 
+    /// where native tool calls (via Ollama/MLX structured tool calling) bypassed the
     /// Overwatch engine entirely by going PendingTools → ExecutingTools without passing
     /// through StreamingContent.
     ///
     /// Returns Pass if all tool calls look safe, or Intercept with details if any are suspicious.
-    pub fn validate_tool_calls(&self, tool_calls: &[serde_json::Value], last_user_message: Option<&str>) -> OverwatchVerdict {
+    pub fn validate_tool_calls(
+        &self,
+        tool_calls: &[serde_json::Value],
+        last_user_message: Option<&str>,
+    ) -> OverwatchVerdict {
         let mut write_count = 0;
         let mut critical_file_writes: Vec<String> = Vec::new();
 
         // Critical project files that should never be casually overwritten
         let critical_files = [
-            "Cargo.toml", "Cargo.lock", "Package.json", "package-lock.json",
-            "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml",
-            ".gitignore", "Dockerfile",
+            "Cargo.toml",
+            "Cargo.lock",
+            "Package.json",
+            "package-lock.json",
+            "Makefile",
+            "CMakeLists.txt",
+            "build.gradle",
+            "pom.xml",
+            ".gitignore",
+            "Dockerfile",
         ];
         // Critical source entry points
-        let critical_sources = ["main.rs", "lib.rs", "mod.rs", "index.ts", "index.js", "app.py"];
+        let critical_sources = [
+            "main.rs", "lib.rs", "mod.rs", "index.ts", "index.js", "app.py",
+        ];
 
         for call in tool_calls {
-            let tool_name = call.get("tool")
+            let tool_name = call
+                .get("tool")
                 .or_else(|| call.get("name"))
                 .or_else(|| call.get("function"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let args = call.get("arguments")
+            let args = call
+                .get("arguments")
                 .or_else(|| call.get("params"))
                 .or_else(|| call.get("args"));
 
@@ -1522,7 +1634,11 @@ impl OverwatchEngine {
 
                 if let Some(args) = args {
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                    let content_len = args.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+                    let content_len = args
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len())
+                        .unwrap_or(0);
 
                     // Check if writing to a critical file
                     let filename = std::path::Path::new(path)
@@ -1530,8 +1646,21 @@ impl OverwatchEngine {
                         .and_then(|f| f.to_str())
                         .unwrap_or("");
 
-                    let is_critical = critical_files.iter().any(|&f| filename == f)
-                        || critical_sources.iter().any(|&f| filename == f);
+                    let path_obj = std::path::Path::new(path);
+                    let mut is_root = true;
+                    let mut is_in_src = false;
+                    if let Some(parent) = path_obj.parent() {
+                        let parent_str = parent.to_string_lossy();
+                        if !parent_str.is_empty() && parent_str != "." && parent_str != "./" {
+                            is_root = false;
+                            if parent_str == "src" || parent_str == "./src" || parent_str == "src/" {
+                                is_in_src = true;
+                            }
+                        }
+                    }
+
+                    let is_critical = (is_root && critical_files.contains(&filename))
+                        || ((is_root || is_in_src) && critical_sources.contains(&filename));
 
                     if is_critical && content_len < 200 {
                         critical_file_writes.push(format!("{} ({} bytes)", path, content_len));
@@ -1548,7 +1677,10 @@ impl OverwatchEngine {
                     This is dangerously aggressive. Break this into individual, verified steps.",
                     write_count
                 ),
-                log: format!("Blocked batch of {} write_file calls in single turn", write_count),
+                log: format!(
+                    "Blocked batch of {} write_file calls in single turn",
+                    write_count
+                ),
                 rule_name: "Batch Write Guard".to_string(),
             };
         }
@@ -1556,11 +1688,23 @@ impl OverwatchEngine {
         // 🛡️ CRITICAL FILE GUARD: Tiny writes to critical project files
         if !critical_file_writes.is_empty() {
             // Check if user actually asked for something that would justify this
-            let user_asked_for_init = last_user_message.map_or(false, |msg| {
+            let user_asked_for_init = last_user_message.is_some_and(|msg| {
                 let lower = msg.to_lowercase();
-                lower.contains("create") || lower.contains("init") || lower.contains("new project")
-                    || lower.contains("hello world") || lower.contains("scaffold")
-                    || lower.contains("replace") || lower.contains("overwrite")
+                lower.contains("create")
+                    || lower.contains("init")
+                    || lower.contains("new project")
+                    || lower.contains("hello world")
+                    || lower.contains("scaffold")
+                    || lower.contains("replace")
+                    || lower.contains("overwrite")
+                    || lower.contains("make")
+                    || lower.contains("write")
+                    || lower.contains("add")
+                    || lower.contains("generate")
+                    || lower.contains("setup")
+                    || lower.contains("bench")
+                    || lower.contains("compare")
+                    || lower.contains("speed")
             });
 
             if !user_asked_for_init {
@@ -1571,7 +1715,10 @@ impl OverwatchEngine {
                         Review the user's actual request and respond appropriately.",
                         critical_file_writes.join(", ")
                     ),
-                    log: format!("Blocked suspicious tiny write to critical files: {:?}", critical_file_writes),
+                    log: format!(
+                        "Blocked suspicious tiny write to critical files: {:?}",
+                        critical_file_writes
+                    ),
                     rule_name: "Critical File Guard".to_string(),
                 };
             }
@@ -1580,19 +1727,32 @@ impl OverwatchEngine {
         OverwatchVerdict::Pass
     }
 
-    /// Validate algebraic effects BEFORE physical execution. This is the core sandboxing guard 
+    /// Validate algebraic effects BEFORE physical execution. This is the core sandboxing guard
     /// for Phase 3, allowing Overwatch to intercept destructive filesystem or shell operations.
-    pub fn validate_effects(&self, effects: &[crate::effects::TempestEffect], last_user_message: Option<&str>) -> OverwatchVerdict {
+    pub fn validate_effects(
+        &self,
+        effects: &[crate::effects::TempestEffect],
+        last_user_message: Option<&str>,
+    ) -> OverwatchVerdict {
         let mut write_count = 0;
         let mut critical_file_writes: Vec<String> = Vec::new();
         let mut dangerous_commands: Vec<String> = Vec::new();
 
         let critical_files = [
-            "Cargo.toml", "Cargo.lock", "Package.json", "package-lock.json",
-            "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml",
-            ".gitignore", "Dockerfile",
+            "Cargo.toml",
+            "Cargo.lock",
+            "Package.json",
+            "package-lock.json",
+            "Makefile",
+            "CMakeLists.txt",
+            "build.gradle",
+            "pom.xml",
+            ".gitignore",
+            "Dockerfile",
         ];
-        let critical_sources = ["main.rs", "lib.rs", "mod.rs", "index.ts", "index.js", "app.py"];
+        let critical_sources = [
+            "main.rs", "lib.rs", "mod.rs", "index.ts", "index.js", "app.py",
+        ];
 
         for effect in effects {
             match effect {
@@ -1602,8 +1762,22 @@ impl OverwatchEngine {
                         .file_name()
                         .and_then(|f| f.to_str())
                         .unwrap_or("");
-                    let is_critical = critical_files.iter().any(|&f| filename == f)
-                        || critical_sources.iter().any(|&f| filename == f);
+
+                    let path_obj = std::path::Path::new(path);
+                    let mut is_root = true;
+                    let mut is_in_src = false;
+                    if let Some(parent) = path_obj.parent() {
+                        let parent_str = parent.to_string_lossy();
+                        if !parent_str.is_empty() && parent_str != "." && parent_str != "./" {
+                            is_root = false;
+                            if parent_str == "src" || parent_str == "./src" || parent_str == "src/" {
+                                is_in_src = true;
+                            }
+                        }
+                    }
+
+                    let is_critical = (is_root && critical_files.contains(&filename))
+                        || ((is_root || is_in_src) && critical_sources.contains(&filename));
 
                     if is_critical && content.len() < 200 {
                         critical_file_writes.push(format!("{} ({} bytes)", path, content.len()));
@@ -1612,7 +1786,12 @@ impl OverwatchEngine {
                 crate::effects::TempestEffect::RunCommand { command, .. } => {
                     let cmd_lower = command.to_lowercase();
                     // Block absolute delete commands on critical paths
-                    if cmd_lower.contains("rm ") && (cmd_lower.contains("src") || cmd_lower.contains("/") || cmd_lower.contains("*") || cmd_lower.contains("cargo")) {
+                    if cmd_lower.contains("rm ")
+                        && (cmd_lower.contains("src")
+                            || cmd_lower.contains("/")
+                            || cmd_lower.contains("*")
+                            || cmd_lower.contains("cargo"))
+                    {
                         dangerous_commands.push(command.clone());
                     }
                 }
@@ -1628,7 +1807,10 @@ impl OverwatchEngine {
                     Formulate a safe alternative command.",
                     dangerous_commands.join(", ")
                 ),
-                log: format!("Blocked dangerous command execution effect: {:?}", dangerous_commands),
+                log: format!(
+                    "Blocked dangerous command execution effect: {:?}",
+                    dangerous_commands
+                ),
                 rule_name: "Algebraic Effect Guard - Dangerous Command".to_string(),
             };
         }
@@ -1640,17 +1822,32 @@ impl OverwatchEngine {
                     Break your work down into individual, verified steps.",
                     write_count
                 ),
-                log: format!("Blocked batch of {} write effects in single turn", write_count),
+                log: format!(
+                    "Blocked batch of {} write effects in single turn",
+                    write_count
+                ),
                 rule_name: "Algebraic Effect Guard - Batch Write".to_string(),
             };
         }
 
         if !critical_file_writes.is_empty() {
-            let user_asked_for_init = last_user_message.map_or(false, |msg| {
+            let user_asked_for_init = last_user_message.is_some_and(|msg| {
                 let lower = msg.to_lowercase();
-                lower.contains("create") || lower.contains("init") || lower.contains("new project")
-                    || lower.contains("hello world") || lower.contains("scaffold")
-                    || lower.contains("replace") || lower.contains("overwrite")
+                lower.contains("create")
+                    || lower.contains("init")
+                    || lower.contains("new project")
+                    || lower.contains("hello world")
+                    || lower.contains("scaffold")
+                    || lower.contains("replace")
+                    || lower.contains("overwrite")
+                    || lower.contains("make")
+                    || lower.contains("write")
+                    || lower.contains("add")
+                    || lower.contains("generate")
+                    || lower.contains("setup")
+                    || lower.contains("bench")
+                    || lower.contains("compare")
+                    || lower.contains("speed")
             });
 
             if !user_asked_for_init {
@@ -1661,7 +1858,10 @@ impl OverwatchEngine {
                         Review the user's actual instructions.",
                         critical_file_writes.join(", ")
                     ),
-                    log: format!("Blocked suspicious tiny write effect to critical files: {:?}", critical_file_writes),
+                    log: format!(
+                        "Blocked suspicious tiny write effect to critical files: {:?}",
+                        critical_file_writes
+                    ),
                     rule_name: "Algebraic Effect Guard - Critical File".to_string(),
                 };
             }
@@ -1692,7 +1892,8 @@ impl OverwatchEngine {
 
     /// Return current suspicion level and label (for telemetry).
     pub fn suspicion_status(&self) -> Option<(u32, String)> {
-        self.context_score.lock()
+        self.context_score
+            .lock()
             .ok()
             .map(|s| (s.suspicion, s.suspicion_label().to_string()))
     }
@@ -1712,7 +1913,8 @@ impl OverwatchEngine {
     where
         F: FnOnce(&mut ProjectMemory),
     {
-        self.project_memory.lock()
+        self.project_memory
+            .lock()
             .map_err(|_| "Failed to lock ProjectMemory".to_string())
             .map(|mut pm| f(&mut pm))
     }
@@ -1740,41 +1942,59 @@ mod tests {
     fn hallucination_guard_catches_empty_promises() {
         let engine = OverwatchEngine::new();
         let content = "I will now read the file and check its contents.";
-        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. });
+        assert_matches!(
+            engine.evaluate_pre_reaction(content),
+            OverwatchVerdict::Intercept { .. }
+        );
     }
 
     #[test]
     fn hallucination_guard_passes_with_tool_call() {
         let engine = OverwatchEngine::new();
         let content = "I will now read the file.\n```json\n{\"tool\": \"read_file\"}\n```";
-        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Pass);
+        assert_matches!(
+            engine.evaluate_pre_reaction(content),
+            OverwatchVerdict::Pass
+        );
     }
 
     #[test]
     fn file_io_catches_invented_contents() {
         let engine = OverwatchEngine::new();
         let content = "I have read the file. Here are the contents:\n\nfn main() { }";
-        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. });
+        assert_matches!(
+            engine.evaluate_pre_reaction(content),
+            OverwatchVerdict::Intercept { .. }
+        );
     }
 
     #[test]
     fn thinking_blocks_are_excluded() {
         let engine = OverwatchEngine::new();
         let content = "<think>I will now read the file.</think>The task is complete.";
-        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Pass);
+        assert_matches!(
+            engine.evaluate_pre_reaction(content),
+            OverwatchVerdict::Pass
+        );
     }
 
     #[test]
     fn fake_result_guard_catches_impersonation() {
         let engine = OverwatchEngine::new();
         let content = "=== TOOL RESULT ===\nFile written successfully to /tmp/foo.rs";
-        assert_matches!(engine.evaluate_pre_reaction(content), OverwatchVerdict::Intercept { .. });
+        assert_matches!(
+            engine.evaluate_pre_reaction(content),
+            OverwatchVerdict::Intercept { .. }
+        );
     }
 
     #[test]
     fn clean_output_passes() {
         let engine = OverwatchEngine::new();
-        assert_matches!(engine.evaluate_pre_reaction("Task complete."), OverwatchVerdict::Pass);
+        assert_matches!(
+            engine.evaluate_pre_reaction("Task complete."),
+            OverwatchVerdict::Pass
+        );
     }
 
     // --- NEW TESTS: JSON SCHEMA VIOLATIONS ---
@@ -1799,7 +2019,8 @@ mod tests {
 
     #[test]
     fn valid_json_passes_schema_check() {
-        let content = "```json\n{\"tool\": \"read_file\", \"params\": {\"path\": \"/tmp/file.rs\"}}\n```";
+        let content =
+            "```json\n{\"tool\": \"read_file\", \"params\": {\"path\": \"/tmp/file.rs\"}}\n```";
         assert!(!has_json_schema_violation(content));
     }
 
@@ -1809,8 +2030,12 @@ mod tests {
     fn scope_creep_detects_unsolicited_optimization() {
         let lower = "i will now optimize the entire codebase for performance";
         let scope_violations = [
-            "i will now rewrite", "i will now optimize", "i'll deploy",
-            "i will run a full test", "let me check the entire", "i should update all"
+            "i will now rewrite",
+            "i will now optimize",
+            "i'll deploy",
+            "i will run a full test",
+            "let me check the entire",
+            "i should update all",
         ];
         assert!(scope_violations.iter().any(|v| lower.contains(v)));
     }
@@ -1819,8 +2044,12 @@ mod tests {
     fn scope_creep_detects_unauthorized_deployment() {
         let lower = "i'll deploy this to production now";
         let scope_violations = [
-            "i will now rewrite", "let me optimize", "i'll deploy",
-            "i will run a full test", "let me check the entire", "i should update all"
+            "i will now rewrite",
+            "let me optimize",
+            "i'll deploy",
+            "i will run a full test",
+            "let me check the entire",
+            "i should update all",
         ];
         assert!(scope_violations.iter().any(|v| lower.contains(v)));
     }
@@ -1851,7 +2080,7 @@ mod tests {
     fn context_score_tracks_intercepts() {
         let mut score = ContextScore::default();
         assert_eq!(score.suspicion, 0);
-        
+
         let rate_limited = score.record_intercept();
         assert!(!rate_limited); // First intercept shouldn't trigger rate limit
         assert!(score.suspicion > 0);
@@ -1872,7 +2101,7 @@ mod tests {
         let mut score = ContextScore::default();
         score.record_intercept();
         let initial_suspicion = score.suspicion;
-        
+
         score.record_success();
         assert!(score.suspicion < initial_suspicion);
         assert_eq!(score.consecutive_intercepts, 0);
@@ -1881,7 +2110,7 @@ mod tests {
     #[test]
     fn context_score_rate_limits_on_excessive_intercepts() {
         let mut score = ContextScore::default();
-        
+
         // Trigger 6 rapid intercepts. Rate limit is: len > 5, so triggers on 6th (i=5)
         for i in 0..7 {
             let rate_limited = score.record_intercept();
@@ -1895,13 +2124,13 @@ mod tests {
     fn suspicion_labels_work() {
         let mut score = ContextScore::default();
         assert_eq!(score.suspicion_label(), "low");
-        
+
         score.suspicion = 30;
         assert_eq!(score.suspicion_label(), "moderate");
-        
+
         score.suspicion = 60;
         assert_eq!(score.suspicion_label(), "high");
-        
+
         score.suspicion = 90;
         assert_eq!(score.suspicion_label(), "critical");
     }
@@ -1909,15 +2138,15 @@ mod tests {
     #[test]
     fn engine_tracks_suspicion_across_turns() {
         let engine = OverwatchEngine::new();
-        
+
         let initial = engine.suspicion_status();
         assert!(initial.is_some());
         let (initial_suspicion, _) = initial.unwrap();
         assert_eq!(initial_suspicion, 0);
-        
+
         // Trigger an intercept
         let _ = engine.evaluate_pre_reaction("I will now read the file");
-        
+
         let after = engine.suspicion_status();
         assert!(after.is_some());
         let (after_suspicion, label) = after.unwrap();
@@ -1941,7 +2170,9 @@ mod tests {
         #[async_trait]
         impl ContextOp for NoOp {
             type Output = ();
-            async fn execute(&self, _ctx: &mut Context) -> Result<(), EngineError> { Ok(()) }
+            async fn execute(&self, _ctx: &mut Context) -> Result<(), EngineError> {
+                Ok(())
+            }
         }
 
         let result = ctx.run(NoOp).await;
@@ -1965,7 +2196,9 @@ mod tests {
         #[async_trait]
         impl ContextOp for NoOp {
             type Output = ();
-            async fn execute(&self, _ctx: &mut Context) -> Result<(), EngineError> { Ok(()) }
+            async fn execute(&self, _ctx: &mut Context) -> Result<(), EngineError> {
+                Ok(())
+            }
         }
 
         let result = ctx.run(NoOp).await;
@@ -1984,15 +2217,13 @@ mod tests {
 
     #[test]
     fn rule_builder_sets_trigger() {
-        let builder = RuleBuilder::new("Test Rule")
-            .trigger(Trigger::OnInferenceComplete);
+        let builder = RuleBuilder::new("Test Rule").trigger(Trigger::OnInferenceComplete);
         assert_eq!(builder.get_trigger(), Trigger::OnInferenceComplete);
     }
 
     #[test]
     fn rule_builder_sets_priority() {
-        let builder = RuleBuilder::new("Test Rule")
-            .priority(100);
+        let builder = RuleBuilder::new("Test Rule").priority(100);
         assert_eq!(builder.get_priority(), 100);
     }
 
@@ -2020,7 +2251,7 @@ mod tests {
             .trigger(Trigger::OnInferenceComplete)
             .priority(100)
             .when(
-                |_ctx: &Context| false,  // Predicate always returns false
+                |_ctx: &Context| false, // Predicate always returns false
                 HallucinationGuardOp,
             );
 
@@ -2052,8 +2283,8 @@ mod tests {
     #[test]
     fn setup_overwatch_rules_with_triggers_returns_rules() {
         let rules = setup_overwatch_rules_with_triggers();
-        assert!(rules.len() > 0);
-        
+        assert!(!rules.is_empty());
+
         // Verify trigger metadata is in rule names
         let has_inference_rules = rules.iter().any(|r| r.name.contains("[INFERENCE]"));
         assert!(has_inference_rules);
@@ -2062,13 +2293,15 @@ mod tests {
     #[test]
     fn setup_overwatch_rules_with_triggers_has_high_priority() {
         let rules = setup_overwatch_rules_with_triggers();
-        
+
         // All rules should have priorities >= 95 (based on criticality order)
         for rule in rules.iter() {
-            assert!(rule.priority >= 95, 
-                    "Rule {} has priority {}, expected >= 95", 
-                    rule.name, 
-                    rule.priority);
+            assert!(
+                rule.priority >= 95,
+                "Rule {} has priority {}, expected >= 95",
+                rule.name,
+                rule.priority
+            );
         }
     }
 
@@ -2076,7 +2309,7 @@ mod tests {
     fn original_overwatch_rules_still_work() {
         // Verify the original factory still produces valid rules
         let rules = overwatch_rules();
-        assert!(rules.len() > 0);
+        assert!(!rules.is_empty());
         assert_eq!(rules.len(), setup_overwatch_rules_with_triggers().len());
     }
 
@@ -2093,22 +2326,19 @@ mod tests {
 
     #[test]
     fn output_schema_builder_with_tool_calls() {
-        let builder = OutputSchemaBuilder::new()
-            .with_tool_calls();
+        let builder = OutputSchemaBuilder::new().with_tool_calls();
         assert!(builder.require_tool_calls);
     }
 
     #[test]
     fn output_schema_builder_with_reasoning() {
-        let builder = OutputSchemaBuilder::new()
-            .with_reasoning();
+        let builder = OutputSchemaBuilder::new().with_reasoning();
         assert!(builder.require_reasoning);
     }
 
     #[test]
     fn output_schema_builder_with_safety_check() {
-        let builder = OutputSchemaBuilder::new()
-            .with_safety_check();
+        let builder = OutputSchemaBuilder::new().with_safety_check();
         assert!(builder.require_safety_check);
     }
 
@@ -2139,8 +2369,7 @@ mod tests {
 
     #[test]
     fn output_schema_validates_valid_result() {
-        let schema = OutputSchemaBuilder::new()
-            .build();
+        let schema = OutputSchemaBuilder::new().build();
 
         let valid = json!({
             "result": "Task completed successfully"
@@ -2152,8 +2381,7 @@ mod tests {
 
     #[test]
     fn output_schema_rejects_missing_result() {
-        let schema = OutputSchemaBuilder::new()
-            .build();
+        let schema = OutputSchemaBuilder::new().build();
 
         let invalid = json!({
             "other_field": "value"
@@ -2166,8 +2394,7 @@ mod tests {
 
     #[test]
     fn output_schema_rejects_empty_result() {
-        let schema = OutputSchemaBuilder::new()
-            .build();
+        let schema = OutputSchemaBuilder::new().build();
 
         let invalid = json!({
             "result": ""
@@ -2180,9 +2407,7 @@ mod tests {
 
     #[test]
     fn output_schema_validates_with_reasoning() {
-        let schema = OutputSchemaBuilder::new()
-            .with_reasoning()
-            .build();
+        let schema = OutputSchemaBuilder::new().with_reasoning().build();
 
         let valid = json!({
             "result": "Task completed",
@@ -2195,9 +2420,7 @@ mod tests {
 
     #[test]
     fn output_schema_requires_reasoning_when_specified() {
-        let schema = OutputSchemaBuilder::new()
-            .with_reasoning()
-            .build();
+        let schema = OutputSchemaBuilder::new().with_reasoning().build();
 
         let invalid = json!({
             "result": "Task completed"
@@ -2210,9 +2433,7 @@ mod tests {
 
     #[test]
     fn output_schema_validates_with_safety_check() {
-        let schema = OutputSchemaBuilder::new()
-            .with_safety_check()
-            .build();
+        let schema = OutputSchemaBuilder::new().with_safety_check().build();
 
         let valid = json!({
             "result": "Task completed",
@@ -2228,9 +2449,7 @@ mod tests {
 
     #[test]
     fn output_schema_rejects_missing_safety_check() {
-        let schema = OutputSchemaBuilder::new()
-            .with_safety_check()
-            .build();
+        let schema = OutputSchemaBuilder::new().with_safety_check().build();
 
         let invalid = json!({
             "result": "Task completed"
@@ -2251,10 +2470,7 @@ mod tests {
     #[test]
     fn tool_call_validator_accepts_valid_tool_call() {
         let validator = ToolCallValidator::new();
-        let result = validator.validate_tool_call(
-            "read_file",
-            r#"{"path": "/tmp/test.txt"}"#,
-        );
+        let result = validator.validate_tool_call("read_file", r#"{"path": "/tmp/test.txt"}"#);
         assert!(result.is_ok());
     }
 
@@ -2262,30 +2478,21 @@ mod tests {
     fn tool_call_validator_rejects_long_tool_name() {
         let validator = ToolCallValidator::new();
         let long_name = "a".repeat(300);
-        let result = validator.validate_tool_call(
-            &long_name,
-            r#"{"path": "/tmp/test.txt"}"#,
-        );
+        let result = validator.validate_tool_call(&long_name, r#"{"path": "/tmp/test.txt"}"#);
         assert!(result.is_err());
     }
 
     #[test]
     fn tool_call_validator_rejects_invalid_json() {
         let validator = ToolCallValidator::new();
-        let result = validator.validate_tool_call(
-            "read_file",
-            r#"{"path": invalid json"#,
-        );
+        let result = validator.validate_tool_call("read_file", r#"{"path": invalid json"#);
         assert!(result.is_err());
     }
 
     #[test]
     fn tool_call_validator_rejects_blocked_patterns() {
         let validator = ToolCallValidator::new();
-        let result = validator.validate_tool_call(
-            "dangerous_op",
-            r#"{"cmd": "rm -rf /"}"#,
-        );
+        let result = validator.validate_tool_call("dangerous_op", r#"{"cmd": "rm -rf /"}"#);
         assert!(result.is_err());
     }
 
@@ -2294,22 +2501,16 @@ mod tests {
         let validator = ToolCallValidator::new();
         let large_arg = "x".repeat(1000);
         let json_args = format!(r#"{{"content": "{}"}}"#, large_arg);
-        let result = validator.validate_tool_call(
-            "write_file",
-            &json_args,
-        );
+        let result = validator.validate_tool_call("write_file", &json_args);
         assert!(result.is_ok());
     }
 
     #[test]
     fn tool_call_validator_rejects_oversized_args() {
         let validator = ToolCallValidator::new();
-        let huge_arg = "x".repeat(100000);  // 100KB
+        let huge_arg = "x".repeat(100000); // 100KB
         let json_args = format!(r#"{{"content": "{}"}}"#, huge_arg);
-        let result = validator.validate_tool_call(
-            "write_file",
-            &json_args,
-        );
+        let result = validator.validate_tool_call("write_file", &json_args);
         assert!(result.is_err());
     }
 
@@ -2330,47 +2531,56 @@ mod tests {
     #[test]
     fn test_validate_effects_catches_dangerous_commands() {
         let overwatch = OverwatchEngine::new();
-        
-        let safe_effects = vec![
-            crate::effects::TempestEffect::RunCommand {
-                command: "cargo test".to_string(),
-                cwd: ".".to_string(),
-            }
-        ];
-        assert_matches!(overwatch.validate_effects(&safe_effects, None), OverwatchVerdict::Pass);
 
-        let dangerous_effects = vec![
-            crate::effects::TempestEffect::RunCommand {
-                command: "rm -rf src/".to_string(),
-                cwd: ".".to_string(),
-            }
-        ];
-        assert_matches!(overwatch.validate_effects(&dangerous_effects, None), OverwatchVerdict::Intercept { .. });
+        let safe_effects = vec![crate::effects::TempestEffect::RunCommand {
+            command: "cargo test".to_string(),
+            cwd: ".".to_string(),
+        }];
+        assert_matches!(
+            overwatch.validate_effects(&safe_effects, None),
+            OverwatchVerdict::Pass
+        );
+
+        let dangerous_effects = vec![crate::effects::TempestEffect::RunCommand {
+            command: "rm -rf src/".to_string(),
+            cwd: ".".to_string(),
+        }];
+        assert_matches!(
+            overwatch.validate_effects(&dangerous_effects, None),
+            OverwatchVerdict::Intercept { .. }
+        );
     }
 
     #[test]
     fn test_validate_effects_catches_suspicious_writes() {
         let overwatch = OverwatchEngine::new();
 
-        let tiny_critical_write = vec![
-            crate::effects::TempestEffect::WriteFile {
-                path: "Cargo.toml".to_string(),
-                content: "small content".to_string(),
-                force_overwrite: false,
-            }
-        ];
+        let tiny_critical_write = vec![crate::effects::TempestEffect::WriteFile {
+            path: "Cargo.toml".to_string(),
+            content: "small content".to_string(),
+            force_overwrite: false,
+        }];
         // Without user intent, it should be intercepted
-        assert_matches!(overwatch.validate_effects(&tiny_critical_write, Some("hello")), OverwatchVerdict::Intercept { .. });
+        assert_matches!(
+            overwatch.validate_effects(&tiny_critical_write, Some("hello")),
+            OverwatchVerdict::Intercept { .. }
+        );
 
         // With user intent, it should pass
-        assert_matches!(overwatch.validate_effects(&tiny_critical_write, Some("create Cargo.toml hello world")), OverwatchVerdict::Pass);
+        assert_matches!(
+            overwatch.validate_effects(&tiny_critical_write, Some("create Cargo.toml hello world")),
+            OverwatchVerdict::Pass
+        );
     }
 
     #[test]
     fn test_repair_json_str() {
         let malformed = r#"{"tool":"run_command","arguments":{"command":"grep -rn "Initiate Meltdown" /path/"}}"#;
         let repaired = repair_json_str(malformed);
-        assert_eq!(repaired, r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Initiate Meltdown\" /path/"}}"#);
+        assert_eq!(
+            repaired,
+            r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Initiate Meltdown\" /path/"}}"#
+        );
         assert!(serde_json::from_str::<serde_json::Value>(&repaired).is_ok());
 
         let already_escaped = r#"{"tool":"run_command","arguments":{"command":"grep -rn \"Initiate Meltdown\" /path/"}}"#;

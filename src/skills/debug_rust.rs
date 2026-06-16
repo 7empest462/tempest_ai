@@ -1,5 +1,6 @@
 pub const NAME: &str = "debug_rust";
-pub const DESCRIPTION: &str = "Systematic approach to debugging Rust compilation and runtime errors";
+pub const DESCRIPTION: &str =
+    "Systematic approach to debugging Rust compilation and runtime errors";
 pub const INSTRUCTIONS: &str = r#"
 ## Compilation Errors
 1. Read the FULL error message — Rust's compiler messages are extremely helpful

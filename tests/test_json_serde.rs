@@ -3,13 +3,16 @@ use regex::Regex;
 pub fn repair_json_str(s: &str) -> String {
     let key_start_re = Regex::new(r#""[a-zA-Z0-9_-]+"\s*:\s*""#).unwrap();
     let mut result = s.to_string();
-    
-    let mut matches: Vec<(usize, usize)> = key_start_re.find_iter(s).map(|m| (m.start(), m.end())).collect();
+
+    let mut matches: Vec<(usize, usize)> = key_start_re
+        .find_iter(s)
+        .map(|m| (m.start(), m.end()))
+        .collect();
     matches.reverse();
 
-    for (start_idx, end_idx) in matches {
+    for (_start_idx, end_idx) in matches {
         let remaining = &result[end_idx..];
-        
+
         let mut closing_quote_idx = None;
         let chars: Vec<char> = remaining.chars().collect();
         let mut j = 0;
@@ -28,15 +31,17 @@ pub fn repair_json_str(s: &str) -> String {
                     }
                     break;
                 }
-                
+
                 if is_delimiter {
                     closing_quote_idx = Some(j);
                 }
             }
-            
+
             if j + 3 < chars.len() && chars[j] == '"' {
                 let mut k = j + 1;
-                while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-') {
+                while k < chars.len()
+                    && (chars[k].is_alphanumeric() || chars[k] == '_' || chars[k] == '-')
+                {
                     k += 1;
                 }
                 if k < chars.len() && chars[k] == '"' {
@@ -59,10 +64,14 @@ pub fn repair_json_str(s: &str) -> String {
         }
 
         if let Some(close_idx) = closing_quote_idx {
-            let char_boundary_idx: usize = remaining.char_indices().map(|(idx, _)| idx).nth(close_idx).unwrap_or(close_idx);
+            let char_boundary_idx: usize = remaining
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .nth(close_idx)
+                .unwrap_or(close_idx);
             let raw_value = &remaining[..char_boundary_idx];
             let mut repaired_value = String::new();
-            let mut chars_val: Vec<char> = raw_value.chars().collect();
+            let chars_val: Vec<char> = raw_value.chars().collect();
             let mut idx = 0;
             while idx < chars_val.len() {
                 let c = chars_val[idx];
@@ -75,13 +84,13 @@ pub fn repair_json_str(s: &str) -> String {
                 repaired_value.push(c);
                 idx += 1;
             }
-            
+
             let prefix = &result[..end_idx];
             let suffix = &result[end_idx + char_boundary_idx..];
             result = format!("{}{}{}", prefix, repaired_value, suffix);
         }
     }
-    
+
     result
 }
 

@@ -32,10 +32,10 @@ pub fn classify_error(_tool_name: &str, error_msg: &str) -> ErrorClass {
     }
 
     // 🔒 Privilege / Permission Failures
-    if msg.contains("permission denied") || 
-       msg.contains("eacces") || 
-       msg.contains("operation not permitted") ||
-       msg.contains("sudo: a password is required")
+    if msg.contains("permission denied")
+        || msg.contains("eacces")
+        || msg.contains("operation not permitted")
+        || msg.contains("sudo: a password is required")
     {
         return ErrorClass::Recoverable;
     }

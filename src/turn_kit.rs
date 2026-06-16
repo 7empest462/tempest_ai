@@ -11,6 +11,12 @@ pub struct TempestTurnDecomposer {
     pub current_phase: TurnPhase,
 }
 
+impl Default for TempestTurnDecomposer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TempestTurnDecomposer {
     pub fn new() -> Self {
         Self {

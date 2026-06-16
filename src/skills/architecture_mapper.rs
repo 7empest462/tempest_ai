@@ -1,5 +1,6 @@
 pub const NAME: &str = "architecture_mapper";
-pub const DESCRIPTION: &str = "Map out the structure of a repository and generate architectural diagrams";
+pub const DESCRIPTION: &str =
+    "Map out the structure of a repository and generate architectural diagrams";
 pub const INSTRUCTIONS: &str = r#"
 ## Steps
 1. Initial Sweep: Run ls -R or use the tree tool to understand the directory layout.

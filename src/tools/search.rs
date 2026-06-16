@@ -1,11 +1,10 @@
-use serde_json::{json, Value};
-use miette::{Result, IntoDiagnostic, miette};
-use async_trait::async_trait;
 use super::{AgentTool, ToolContext};
-use crate::tools::execution::RunCommandTool;
+use async_trait::async_trait;
+use miette::{IntoDiagnostic, Result, miette};
+use ollama_rs::generation::tools::{ToolFunctionInfo, ToolInfo, ToolType};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use ollama_rs::generation::tools::{ToolInfo, ToolFunctionInfo, ToolType};
+use serde_json::Value;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SemanticSearchArgs {
@@ -19,31 +18,38 @@ pub struct SemanticSearchTool;
 
 #[async_trait]
 impl AgentTool for SemanticSearchTool {
-    fn name(&self) -> &'static str { "semantic_search" }
-    fn description(&self) -> &'static str { "Searches the project's conceptual index. Best for finding 'how' things are done or locating logic by meaning rather than exact keywords." }
+    fn name(&self) -> &'static str {
+        "semantic_search"
+    }
+    fn description(&self) -> &'static str {
+        "Searches the project's conceptual index. Best for finding 'how' things are done or locating logic by meaning rather than exact keywords."
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<SemanticSearchArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<SemanticSearchArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: SemanticSearchArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let typed_args: SemanticSearchArgs =
+            serde_json::from_value(args.clone()).into_diagnostic()?;
         let query = typed_args.query;
         let top_k = typed_args.top_k.unwrap_or(5);
 
         let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
             "nomic-embed-text".to_string(),
-            query.clone().into()
+            query.clone().into(),
         );
 
         match context.ollama.generate_embeddings(req).await {
@@ -52,7 +58,12 @@ impl AgentTool for SemanticSearchTool {
                     let hits = context.vector_brain.lock().search(embedding, top_k);
                     let mut report = format!("Conceptual matches for '{}':\n\n", query);
                     for (entry, sim) in hits {
-                        report.push_str(&format!("[{:.1}%] {}: {}\n---\n", sim * 100.0, entry.source, entry.text));
+                        report.push_str(&format!(
+                            "[{:.1}%] {}: {}\n---\n",
+                            sim * 100.0,
+                            entry.source,
+                            entry.text
+                        ));
                     }
                     Ok(report)
                 } else {
@@ -76,62 +87,107 @@ pub struct GrepSearchTool;
 
 #[async_trait]
 impl AgentTool for GrepSearchTool {
-    fn name(&self) -> &'static str { "grep_search" }
-    fn description(&self) -> &'static str { "Performs a fast keyword search across the project. Use this for finding exact variable names, function calls, or error strings." }
+    fn name(&self) -> &'static str {
+        "grep_search"
+    }
+    fn description(&self) -> &'static str {
+        "Performs a fast keyword search across the project. Use this for finding exact variable names, function calls, or error strings."
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<GrepSearchArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<GrepSearchArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
-    async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: GrepSearchArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
-        let query = typed_args.query;
+        let query = typed_args.query.clone();
         let mut path = typed_args.path.unwrap_or_else(|| ".".to_string());
         if path.is_empty() {
             path = ".".to_string();
         }
-        
-        let cmd = format!("rg -n --no-heading --max-columns=200 \"{}\" {}", query, path);
-        let exec_args = json!({ "command": cmd });
-        
-        let raw_results = RunCommandTool.execute(&exec_args, context).await?;
-        
+
+        // Run the native IO-bound search in a blocking thread to avoid starving the async executor
+        let raw_results = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+            use grep::regex::RegexMatcher;
+            use grep::searcher::{Searcher, sinks::UTF8};
+            use ignore::WalkBuilder;
+
+            let matcher = RegexMatcher::new(&query).into_diagnostic()?;
+            let mut searcher = Searcher::new();
+            let mut results = Vec::new();
+
+            for result in WalkBuilder::new(&path).build() {
+                let entry = match result {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
+
+                let path_str = entry.path().to_string_lossy().to_string();
+
+                let _ = searcher.search_path(
+                    &matcher,
+                    entry.path(),
+                    UTF8(|lnum, line| {
+                        // Mimic rg -n format: file_path:line_num:line_content
+                        let mut content = line.trim_end().to_string();
+                        if content.len() > 200 {
+                            content.truncate(200);
+                            content.push_str("...");
+                        }
+                        results.push(format!("{}:{}:{}", path_str, lnum, content));
+                        Ok(true)
+                    }),
+                );
+            }
+            Ok(results)
+        })
+        .await
+        .into_diagnostic()??;
+
+        let query = typed_args.query; // Shadow for async use
+
         use fuzzy_matcher::FuzzyMatcher;
         use fuzzy_matcher::skim::SkimMatcherV2;
-        
         use rayon::prelude::*;
-        
-        let lines: Vec<&str> = raw_results.lines().collect();
-        let mut ranked: Vec<(i64, &str)> = lines.into_par_iter()
+
+        let mut ranked: Vec<(i64, String)> = raw_results
+            .into_par_iter()
             .map(|line| {
                 // SkimMatcherV2 is lightweight to clone or recreate if needed
                 let matcher = SkimMatcherV2::default();
-                if let Some(score) = matcher.fuzzy_match(line, &query) {
+                if let Some(score) = matcher.fuzzy_match(&line, &query) {
                     (score, line)
                 } else {
                     (0, line)
                 }
             })
             .collect();
-        
+
         ranked.par_sort_by(|a, b| b.0.cmp(&a.0));
-        
-        let report = ranked.into_iter()
+
+        let report = ranked
+            .into_iter()
             .take(100)
             .map(|(_, line)| line)
             .collect::<Vec<_>>()
             .join("\n");
-            
+
         Ok(report)
     }
 }
@@ -140,29 +196,36 @@ pub struct IndexFileSemanticallyTool;
 
 #[async_trait]
 impl AgentTool for IndexFileSemanticallyTool {
-    fn name(&self) -> &'static str { "index_file_semantically" }
-    fn description(&self) -> &'static str { "Manually parses and indexes a local file into your conceptual search index. Use this to 'train' yourself on new codebase logic." }
+    fn name(&self) -> &'static str {
+        "index_file_semantically"
+    }
+    fn description(&self) -> &'static str {
+        "Manually parses and indexes a local file into your conceptual search index. Use this to 'train' yourself on new codebase logic."
+    }
     fn tool_info(&self) -> ToolInfo {
         let mut settings = schemars::generate::SchemaSettings::draft07();
         settings.inline_subschemas = true;
-        let payload = settings.into_generator().into_root_schema_for::<IndexFileSemanticallyArgs>();
-        
+        let payload = settings
+            .into_generator()
+            .into_root_schema_for::<IndexFileSemanticallyArgs>();
+
         ToolInfo {
             tool_type: ToolType::Function,
             function: ToolFunctionInfo {
                 name: self.name().to_string(),
                 description: self.description().to_string(),
-                parameters: payload.into(),
-            }
+                parameters: payload,
+            },
         }
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: IndexFileSemanticallyArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
+        let typed_args: IndexFileSemanticallyArgs =
+            serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
 
         let content = std::fs::read_to_string(&path).into_diagnostic()?;
-        
+
         let chunk_size = 6000;
         let mut chunks = Vec::new();
         let mut current_chunk = String::new();
@@ -183,18 +246,23 @@ impl AgentTool for IndexFileSemanticallyTool {
             let mut brain = context.vector_brain.lock();
             brain.remove_entries_by_source_prefix(&path);
         }
-        
+
         for (i, chunk) in chunks.iter().enumerate() {
             let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
                 "nomic-embed-text".to_string(),
-                chunk.clone().into()
+                chunk.clone().into(),
             );
 
             match context.ollama.generate_embeddings(req).await {
                 Ok(res) => {
                     if let Some(embedding) = res.embeddings.first() {
                         let mut brain = context.vector_brain.lock();
-                        brain.add_entry(chunk.clone(), embedding.clone(), format!("{} (Chunk {})", path, i + 1), std::collections::HashMap::new());
+                        brain.add_entry(
+                            chunk.clone(),
+                            embedding.clone(),
+                            format!("{} (Chunk {})", path, i + 1),
+                            std::collections::HashMap::new(),
+                        );
                         success_count += 1;
                     }
                 }
@@ -203,11 +271,16 @@ impl AgentTool for IndexFileSemanticallyTool {
                 }
             }
         }
-        
+
         let brain = context.vector_brain.lock();
         let _ = brain.save_to_disk(context.brain_path);
-        
-        Ok(format!("✅ Successfully indexed file: {} ({} bytes across {} chunks)", path, content.len(), success_count))
+
+        Ok(format!(
+            "✅ Successfully indexed file: {} ({} bytes across {} chunks)",
+            path,
+            content.len(),
+            success_count
+        ))
     }
 }
 

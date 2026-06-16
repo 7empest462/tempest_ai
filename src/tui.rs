@@ -2,36 +2,39 @@
 // Licensed under the Tempest AI Source-Available License.
 // See the LICENSE file in the project root for full license text.
 
-use miette::{Result, IntoDiagnostic};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyModifiers},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style, Modifier},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
-    Frame, Terminal,
-};
-use rat_focus::HasFocus;
-use syntect::parsing::SyntaxSet;
-use syntect::highlighting::{ThemeSet, Style as SyntectStyle};
-use syntect::easy::HighlightLines;
-use syntect::util::LinesWithEndings;
-use unicode_width::UnicodeWidthStr;
-use std::io::stdout;
-use std::time::{Duration, Instant};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use std::path::PathBuf;
+use miette::{IntoDiagnostic, Result};
+use rat_focus::HasFocus;
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
+};
 use ratatui_textarea::TextArea;
+use std::io::stdout;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
+use unicode_width::UnicodeWidthStr;
+
+static THEME_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
 pub enum AgentEvent {
     SystemUpdate(String), // Telemetry
-    #[allow(dead_code)] Thinking(Option<String>),
+    #[allow(dead_code)]
+    Thinking(Option<String>),
     RequestInput(String, String), // (tool_name, question)
     RequestPrivileges {
         rationale: String,
@@ -40,18 +43,44 @@ pub enum AgentEvent {
     StreamToken(String),
     ReasoningToken(String),
     SubagentStatus(Option<String>),
-    ContextStatus { used: usize, total: u64 },
-    SentinelUpdate { active: Vec<String>, log: String },
-    TelemetryMetrics { cpu: Option<u64>, gpu: Option<u64>, ram: Option<u64>, tps: Option<u64> },
+    ContextStatus {
+        used: usize,
+        total: u64,
+    },
+    SentinelUpdate {
+        active: Vec<String>,
+        log: String,
+    },
+    TelemetryMetrics {
+        cpu: Option<u64>,
+        gpu: Option<u64>,
+        ram: Option<u64>,
+        tps: Option<u64>,
+    },
     CommandOutput(String),
-    EditorEdit { path: String, content: String },
+    EditorEdit {
+        path: String,
+        content: String,
+    },
     ShowManual(String),
     AgentError(String),
     AgentStateChange(String),
     ActiveTools(Vec<String>),
     TaskUpdate(String),
-    ToolSuccess { name: String },
-    ToolError { name: String, error: String },
+    ToolSuccess {
+        name: String,
+        args: Option<String>,
+        output: Option<String>,
+    },
+    ToolError {
+        name: String,
+        error: String,
+        args: Option<String>,
+    },
+    ToolStart {
+        name: String,
+        args: Option<String>,
+    },
 }
 
 pub enum ToolResponse {
@@ -65,7 +94,6 @@ enum TuiEvent {
     AudioChunk(String),
     AudioStatus(String),
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ExplorerEntry {
@@ -117,7 +145,7 @@ pub struct App {
     pub tps_history: Vec<u64>, // Tokens Per Second
     // --- ⌨️ COMMAND PALETTE STATE ---
     pub show_command_palette: bool,
-    
+
     pub command_palette_options: Vec<String>,
     pub command_palette_state: rat_menu::popup_menu::PopupMenuState,
 
@@ -160,7 +188,7 @@ impl App {
             pending_input: None,
             input_response_buffer: String::new(),
             pending_privilege_request: None,
-                context_used: 0,
+            context_used: 0,
             context_total: 0,
             active_sentinels: Vec::new(),
             sentinel_log: Vec::new(),
@@ -173,7 +201,8 @@ impl App {
             show_explorer: false,
             explorer_files: Vec::new(),
             explorer_state: ratatui::widgets::ListState::default(),
-            current_explorer_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            current_explorer_dir: std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
             command_output: Vec::new(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
@@ -182,7 +211,7 @@ impl App {
             ram_history: Vec::new(),
             tps_history: Vec::new(),
             show_command_palette: false,
-            
+
             command_palette_options: vec![
                 "Hot-Swap: DeepSeek R1 (Distill)".to_string(),
                 "Hot-Swap: Qwen 2.5 Coder".to_string(),
@@ -201,7 +230,8 @@ impl App {
             context_menu_options: Vec::new(),
             context_menu_state: rat_menu::popup_menu::PopupMenuState::default(),
             current_theme: initial_theme,
-            explorer_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            explorer_root: std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
             explorer_query: String::new(),
             matcher: SkimMatcherV2::default(),
             viewer_content: None,
@@ -216,7 +246,7 @@ impl App {
 
     pub fn refresh_explorer(&mut self) {
         let mut files = Vec::new();
-        
+
         // Add ".." if not at root
         if self.current_explorer_dir != self.explorer_root {
             files.push(ExplorerEntry {
@@ -233,19 +263,28 @@ impl App {
                 let metadata = entry.metadata().ok();
                 let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-                let modified = metadata.as_ref().and_then(|m| m.modified().ok())
-                    .map(|st| chrono::DateTime::<chrono::Local>::from(st));
-                
+                let modified = metadata
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .map(chrono::DateTime::<chrono::Local>::from);
+
                 // Filtering
-                if !self.explorer_query.is_empty() {
-                    if self.matcher.fuzzy_match(&name, &self.explorer_query).is_none() {
-                        continue;
-                    }
+                if !self.explorer_query.is_empty()
+                    && self
+                        .matcher
+                        .fuzzy_match(&name, &self.explorer_query)
+                        .is_none()
+                {
+                    continue;
                 }
-                
+
                 // Skip hidden and common ignores
-                if name.starts_with('.') && name != ".." { continue; }
-                if name == "target" || name == "node_modules" { continue; }
+                if name.starts_with('.') && name != ".." {
+                    continue;
+                }
+                if name == "target" || name == "node_modules" {
+                    continue;
+                }
 
                 files.push(ExplorerEntry {
                     name,
@@ -271,21 +310,21 @@ impl App {
     pub fn rebuild_focus(&mut self) {
         use rat_focus::FocusBuilder;
         let mut b = FocusBuilder::new(Some(self.focus.clone()));
-        
+
         b.widget(&self.input_buffer);
-        
+
         if self.show_explorer {
             b.widget(&self.explorer_focus);
         }
-        
+
         if self.viewer_content.is_some() {
             b.widget(&self.viewer_focus);
         }
-        
+
         if self.show_reasoning {
             b.widget(&self.reasoning_focus);
         }
-        
+
         if self.show_command_palette {
             b.widget(&self.command_palette_state);
         }
@@ -293,17 +332,17 @@ impl App {
         if self.show_context_menu {
             b.widget(&self.context_menu_state);
         }
-        
+
         self.focus = b.build();
-        
+
         // Ensure there is always a focused pane
-        if !self.input_buffer.is_focused() 
-            && !self.explorer_focus.get() 
-            && !self.viewer_focus.get() 
-            && !self.reasoning_focus.get() 
+        if !self.input_buffer.is_focused()
+            && !self.explorer_focus.get()
+            && !self.viewer_focus.get()
+            && !self.reasoning_focus.get()
             && !self.command_palette_state.is_focused()
-            && !self.context_menu_state.is_focused() {
-            
+            && !self.context_menu_state.is_focused()
+        {
             self.focus.focus(&self.input_buffer);
         }
     }
@@ -315,7 +354,8 @@ impl App {
         }
         // Ensure scroll follows new messages if focused
         if self.input_buffer.is_focused() {
-            self.list_state.select(Some(self.messages.len().saturating_sub(1)));
+            self.list_state
+                .select(Some(self.messages.len().saturating_sub(1)));
         }
     }
 
@@ -347,7 +387,7 @@ impl App {
                 "Explain this file".to_string(),
                 "Improve this code".to_string(),
                 "Add documentation".to_string(),
-            ]
+            ],
         }
     }
 
@@ -369,21 +409,23 @@ pub enum AudioCommand {
 }
 
 pub async fn run_tui(
-    mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>, 
-    user_tx: tokio::sync::mpsc::Sender<String>, 
+    mut agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    user_tx: tokio::sync::mpsc::Sender<String>,
     tool_tx: tokio::sync::mpsc::Sender<ToolResponse>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     initial_theme: String,
 ) -> Result<()> {
     enable_raw_mode().into_diagnostic()?;
     stdout().execute(EnterAlternateScreen).into_diagnostic()?;
-    stdout().execute(crossterm::event::EnableMouseCapture).into_diagnostic()?;
+    stdout()
+        .execute(crossterm::event::EnableMouseCapture)
+        .into_diagnostic()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).into_diagnostic()?;
 
     let mut app = App::new(initial_theme);
     app.rebuild_focus();
     let (tui_event_tx, mut tui_event_rx) = tokio::sync::mpsc::channel::<TuiEvent>(100);
-    
+
     let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel::<AudioCommand>(10);
     app.audio_cmd_tx = Some(audio_cmd_tx);
 
@@ -440,9 +482,9 @@ pub async fn run_tui(
                                      return;
                                  }
                              };
-                            
+
                              let _ = tui_event_tx.send(TuiEvent::AudioStatus("🎙️ Speak now! [Ctrl+G to stop]".to_string())).await;
-                             
+
                              use futures::StreamExt;
                              let mut text_stream = stream.transcribe(model_init.clone());
                               #[cfg(target_os = "macos")]
@@ -475,7 +517,7 @@ pub async fn run_tui(
                                       }
                                   } => {}
                               }
-                              
+
                               let _ = tui_event_tx.send(TuiEvent::AudioStatus("".to_string())).await;
                         });
                     }
@@ -492,6 +534,8 @@ pub async fn run_tui(
     let tick_rate = Duration::from_millis(50);
     let mut last_tick = Instant::now();
 
+    let _ = THEME_REGEX.get_or_init(|| regex::Regex::new(r#"(?m)^tui_theme\s*=\s*".*""#).unwrap());
+
     loop {
         terminal.draw(|f| ui(f, &mut app)).into_diagnostic()?;
 
@@ -501,13 +545,13 @@ pub async fn run_tui(
 
         if event::poll(timeout).into_diagnostic()? {
             let ev = event::read().into_diagnostic()?;
-            
-            use rat_event::{HandleEvent, Regular, Outcome};
+
+            use rat_event::{HandleEvent, Outcome, Regular};
             let focus_outcome = app.focus.handle(&ev, Regular);
             if focus_outcome == Outcome::Changed {
                 continue;
             }
-            
+
             // --- COMMAND PALETTE POPUP EVENTS ---
             if app.show_command_palette {
                 use rat_event::{HandleEvent, Popup};
@@ -517,7 +561,7 @@ pub async fn run_tui(
                         if let Some(opt) = app.command_palette_options.get(idx) {
                             let option = opt.clone();
                             app.push_message(format!("⚡ [PALETTE]: Executing '{}'", option));
-                            
+
                             if option.starts_with("Theme: ") {
                                 let theme_name = match option.as_str() {
                                     "Theme: Base16 Ocean (Dark)" => "base16-ocean.dark",
@@ -529,29 +573,49 @@ pub async fn run_tui(
                                 };
                                 app.current_theme = theme_name.to_string();
                                 app.push_message(format!("🎨 Aesthetic updated to {}", theme_name));
-                                
+
                                 // --- 💾 PERSIST TO CONFIG.TOML ---
                                 if let Ok(mut content) = std::fs::read_to_string("config.toml") {
-                                    let re = regex::Regex::new(r#"(?m)^tui_theme\s*=\s*".*""#).unwrap();
+                                    let re = THEME_REGEX.get().unwrap();
                                     if re.is_match(&content) {
-                                        content = re.replace(&content, &format!(r#"tui_theme = "{}""#, theme_name)).into_owned();
+                                        content = re
+                                            .replace(
+                                                &content,
+                                                &format!(r#"tui_theme = "{}""#, theme_name),
+                                            )
+                                            .into_owned();
                                     } else {
                                         if content.contains("[🧹 BASE SETTINGS]") {
-                                            content = content.replace("[🧹 BASE SETTINGS]", &format!("[🧹 BASE SETTINGS]\ntui_theme = \"{}\"", theme_name));
+                                            content = content.replace(
+                                                "[🧹 BASE SETTINGS]",
+                                                &format!(
+                                                    "[🧹 BASE SETTINGS]\ntui_theme = \"{}\"",
+                                                    theme_name
+                                                ),
+                                            );
                                         } else {
-                                            content.push_str(&format!("\ntui_theme = \"{}\"\n", theme_name));
+                                            content.push_str(&format!(
+                                                "\ntui_theme = \"{}\"\n",
+                                                theme_name
+                                            ));
                                         }
                                     }
                                     let _ = std::fs::write("config.toml", content);
                                 }
                             } else {
                                 let cmd = match option.as_str() {
-                                    "Hot-Swap: DeepSeek R1 (Distill)" => "/switch deepseek-r1:8b".to_string(),
-                                    "Hot-Swap: Qwen 2.5 Coder" => "/switch qwen2.5-coder:7b".to_string(),
+                                    "Hot-Swap: DeepSeek R1 (Distill)" => {
+                                        "/switch deepseek-r1:8b".to_string()
+                                    }
+                                    "Hot-Swap: Qwen 2.5 Coder" => {
+                                        "/switch qwen2.5-coder:7b".to_string()
+                                    }
                                     "Toggle Safe Mode: ON/OFF" => "/safemode".to_string(),
                                     "Recall: Latest Memory Item" => "/recall".to_string(),
                                     "System: Compact Context" => "/compact".to_string(),
-                                    "Sentinel: Toggle Hardcore Mode" => "/toggle_hardcore".to_string(),
+                                    "Sentinel: Toggle Hardcore Mode" => {
+                                        "/toggle_hardcore".to_string()
+                                    }
                                     other => format!("/{}", other.to_lowercase().replace(' ', "_")),
                                 };
                                 let _ = user_tx.send(cmd).await;
@@ -561,36 +625,36 @@ pub async fn run_tui(
                         app.rebuild_focus();
                         app.focus.focus(&app.input_buffer);
                         continue;
-                    },
+                    }
                     MenuOutcome::Selected(_) => {
                         continue;
-                    },
+                    }
                     MenuOutcome::Hide => {
                         app.show_command_palette = false;
-                                app.rebuild_focus();
+                        app.rebuild_focus();
                         app.focus.focus(&app.input_buffer);
                         continue;
-                    },
+                    }
                     MenuOutcome::Changed | MenuOutcome::Unchanged => {
-                        if let Event::Key(key) = ev {
-                            if key.code == KeyCode::Esc {
-                                app.show_command_palette = false;
-                                app.rebuild_focus();
-                                app.focus.focus(&app.input_buffer);
-                            }
+                        if let Event::Key(key) = ev
+                            && key.code == KeyCode::Esc
+                        {
+                            app.show_command_palette = false;
+                            app.rebuild_focus();
+                            app.focus.focus(&app.input_buffer);
                         }
                         continue;
-                    },
+                    }
                     MenuOutcome::Continue => {
-                        if let Event::Key(key) = ev {
-                            if key.code == KeyCode::Esc {
-                                app.show_command_palette = false;
-                                app.rebuild_focus();
-                                app.focus.focus(&app.input_buffer);
-                                continue;
-                            }
+                        if let Event::Key(key) = ev
+                            && key.code == KeyCode::Esc
+                        {
+                            app.show_command_palette = false;
+                            app.rebuild_focus();
+                            app.focus.focus(&app.input_buffer);
+                            continue;
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -603,56 +667,71 @@ pub async fn run_tui(
                     MenuOutcome::Activated(idx) => {
                         if let Some(opt) = app.context_menu_options.get(idx) {
                             let option = opt.clone();
-                            if let Some(explorer_idx) = app.explorer_state.selected() {
-                                if let Some((entry_name, _entry_is_dir)) = app.explorer_files.get(explorer_idx).map(|e| (e.name.clone(), e.is_dir)) {
-                                    let full_path = app.current_explorer_dir.join(&entry_name);
-                                    let full_path_str = full_path.to_string_lossy().into_owned();
-                                    
-                                    app.push_message(format!("⚡ [MENU]: Executing '{}' on {}", option, entry_name));
-                                    
-                                    let cmd = match option.as_str() {
-                                        "View / Edit File" => {
-                                            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                                app.viewer_content = Some((full_path_str.clone(), content.clone()));
-                                                app.rebuild_focus();
-                                                app.viewer_scroll = 0;
-                                                let mut textarea = TextArea::from(content.lines().map(String::from));
-                                                textarea.set_block(Block::default().borders(Borders::ALL).title(format!(" 📝 EDITING: {} ", full_path_str)));
-                                                app.viewer_editor = Some(textarea);
-                                                app.is_editing = false;
-                                                app.focus.focus(&app.viewer_focus);
-                                            }
-                                            None
-                                        },
-                                        "Analyze Code with Tempest" => {
-                                            Some(format!("Explain this code and check for issues in: {}", full_path_str))
-                                        },
-                                        "Stage changes (Git Add)" => {
-                                            Some(format!("Stage this file to git: {}", full_path_str))
-                                        },
-                                        "Delete File safely" | "Delete Directory" => {
-                                            Some(format!("Delete this file safely: {}", full_path_str))
-                                        },
-                                        "Open Directory" => {
-                                            app.current_explorer_dir.push(&entry_name);
-                                            app.refresh_explorer();
-                                            app.explorer_state.select(Some(0));
-                                            None
-                                        },
-                                        "List Files with Tempest" => {
-                                            Some(format!("List files in this directory using Tempest: {}", full_path_str))
-                                        },
-                                        "Create Subdirectory" => {
-                                            Some(format!("Create a new subdirectory inside: {}", full_path_str))
-                                        },
-                                        _ => None,
-                                    };
-                                    
-                                    if let Some(cmd_str) = cmd {
-                                        app.push_message(format!("You: {}", cmd_str));
-                                        let _ = user_tx.send(cmd_str).await;
-                                        app.focus.focus(&app.input_buffer);
+                            if let Some(explorer_idx) = app.explorer_state.selected()
+                                && let Some((entry_name, _entry_is_dir)) = app
+                                    .explorer_files
+                                    .get(explorer_idx)
+                                    .map(|e| (e.name.clone(), e.is_dir))
+                            {
+                                let full_path = app.current_explorer_dir.join(&entry_name);
+                                let full_path_str = full_path.to_string_lossy().into_owned();
+
+                                app.push_message(format!(
+                                    "⚡ [MENU]: Executing '{}' on {}",
+                                    option, entry_name
+                                ));
+
+                                let cmd = match option.as_str() {
+                                    "View / Edit File" => {
+                                        if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                            app.viewer_content =
+                                                Some((full_path_str.clone(), content.clone()));
+                                            app.rebuild_focus();
+                                            app.viewer_scroll = 0;
+                                            let mut textarea =
+                                                TextArea::from(content.lines().map(String::from));
+                                            textarea.set_block(
+                                                Block::default().borders(Borders::ALL).title(
+                                                    format!(" 📝 EDITING: {} ", full_path_str),
+                                                ),
+                                            );
+                                            app.viewer_editor = Some(textarea);
+                                            app.is_editing = false;
+                                            app.focus.focus(&app.viewer_focus);
+                                        }
+                                        None
                                     }
+                                    "Analyze Code with Tempest" => Some(format!(
+                                        "Explain this code and check for issues in: {}",
+                                        full_path_str
+                                    )),
+                                    "Stage changes (Git Add)" => {
+                                        Some(format!("Stage this file to git: {}", full_path_str))
+                                    }
+                                    "Delete File safely" | "Delete Directory" => {
+                                        Some(format!("Delete this file safely: {}", full_path_str))
+                                    }
+                                    "Open Directory" => {
+                                        app.current_explorer_dir.push(&entry_name);
+                                        app.refresh_explorer();
+                                        app.explorer_state.select(Some(0));
+                                        None
+                                    }
+                                    "List Files with Tempest" => Some(format!(
+                                        "List files in this directory using Tempest: {}",
+                                        full_path_str
+                                    )),
+                                    "Create Subdirectory" => Some(format!(
+                                        "Create a new subdirectory inside: {}",
+                                        full_path_str
+                                    )),
+                                    _ => None,
+                                };
+
+                                if let Some(cmd_str) = cmd {
+                                    app.push_message(format!("You: {}", cmd_str));
+                                    let _ = user_tx.send(cmd_str).await;
+                                    app.focus.focus(&app.input_buffer);
                                 }
                             }
                         }
@@ -662,45 +741,47 @@ pub async fn run_tui(
                             app.focus.focus(&app.explorer_focus);
                         }
                         continue;
-                    },
+                    }
                     MenuOutcome::Selected(_) => {
                         continue;
-                    },
+                    }
                     MenuOutcome::Hide => {
                         app.show_context_menu = false;
                         app.rebuild_focus();
                         app.focus.focus(&app.explorer_focus);
                         continue;
-                    },
+                    }
                     MenuOutcome::Changed | MenuOutcome::Unchanged => {
-                        if let Event::Key(key) = ev {
-                            if key.code == KeyCode::Esc {
-                                app.show_context_menu = false;
-                                app.rebuild_focus();
-                                app.focus.focus(&app.explorer_focus);
-                            }
+                        if let Event::Key(key) = ev
+                            && key.code == KeyCode::Esc
+                        {
+                            app.show_context_menu = false;
+                            app.rebuild_focus();
+                            app.focus.focus(&app.explorer_focus);
                         }
                         continue;
-                    },
+                    }
                     MenuOutcome::Continue => {
-                        if let Event::Key(key) = ev {
-                            if key.code == KeyCode::Esc {
-                                app.show_context_menu = false;
-                                app.rebuild_focus();
-                                app.focus.focus(&app.explorer_focus);
-                                continue;
-                            }
+                        if let Event::Key(key) = ev
+                            && key.code == KeyCode::Esc
+                        {
+                            app.show_context_menu = false;
+                            app.rebuild_focus();
+                            app.focus.focus(&app.explorer_focus);
+                            continue;
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
 
             // --- 🖱️ MOUSE HIT-TESTING ---
             if let Event::Mouse(mev) = &ev {
-                if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = mev.kind {
+                if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
+                    mev.kind
+                {
                     let size = terminal.size().into_diagnostic()?;
-                    
+
                     // Re-calculate main_chunks to match UI logic
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
@@ -715,12 +796,18 @@ pub async fn run_tui(
                     let explorer_width = if app.show_explorer { 18 } else { 0 };
                     let reasoning_width = if app.show_reasoning { 35 } else { 0 };
                     let viewer_width = if app.viewer_content.is_some() { 35 } else { 0 };
-                    
-                    if app.show_explorer { main_constraints.push(Constraint::Percentage(explorer_width)); }
+
+                    if app.show_explorer {
+                        main_constraints.push(Constraint::Percentage(explorer_width));
+                    }
                     let chat_width = 100 - explorer_width - reasoning_width - viewer_width;
                     main_constraints.push(Constraint::Percentage(chat_width));
-                    if app.show_reasoning { main_constraints.push(Constraint::Percentage(reasoning_width)); }
-                    if app.viewer_content.is_some() { main_constraints.push(Constraint::Percentage(viewer_width)); }
+                    if app.show_reasoning {
+                        main_constraints.push(Constraint::Percentage(reasoning_width));
+                    }
+                    if app.viewer_content.is_some() {
+                        main_constraints.push(Constraint::Percentage(viewer_width));
+                    }
 
                     let main_chunks = Layout::default()
                         .direction(Direction::Horizontal)
@@ -729,31 +816,43 @@ pub async fn run_tui(
 
                     let mut current_idx = 0;
                     if app.show_explorer {
-                        if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                        if main_chunks[current_idx].contains(ratatui::layout::Position {
+                            x: mev.column,
+                            y: mev.row,
+                        }) {
                             app.focus.focus(&app.explorer_focus);
                         }
                         current_idx += 1;
                     }
-                    
-                    if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+
+                    if main_chunks[current_idx].contains(ratatui::layout::Position {
+                        x: mev.column,
+                        y: mev.row,
+                    }) {
                         app.focus.focus(&app.input_buffer);
                     }
                     current_idx += 1;
 
                     if app.show_reasoning {
-                        if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
+                        if main_chunks[current_idx].contains(ratatui::layout::Position {
+                            x: mev.column,
+                            y: mev.row,
+                        }) {
                             app.focus.focus(&app.reasoning_focus);
                         }
                         current_idx += 1;
                     }
 
-                    if app.viewer_content.is_some() {
-                        if main_chunks[current_idx].contains(ratatui::layout::Position { x: mev.column, y: mev.row }) {
-                            app.focus.focus(&app.viewer_focus);
-                        }
+                    if app.viewer_content.is_some()
+                        && main_chunks[current_idx].contains(ratatui::layout::Position {
+                            x: mev.column,
+                            y: mev.row,
+                        })
+                    {
+                        app.focus.focus(&app.viewer_focus);
                     }
                 }
-                
+
                 // MOUSE WHEEL SCROLLING
                 if app.input_buffer.is_focused() {
                     match mev.kind {
@@ -804,9 +903,11 @@ pub async fn run_tui(
                             app.input_response_buffer.clear();
                         }
                         KeyCode::Char(c) => app.input_response_buffer.push(c),
-                        KeyCode::Backspace => { app.input_response_buffer.pop(); }
-                        KeyCode::Esc => { 
-                            let _ = tool_tx.send(ToolResponse::Text("n".to_string())).await; 
+                        KeyCode::Backspace => {
+                            app.input_response_buffer.pop();
+                        }
+                        KeyCode::Esc => {
+                            let _ = tool_tx.send(ToolResponse::Text("n".to_string())).await;
                             app.pending_input = None;
                             app.input_response_buffer.clear();
                         }
@@ -815,18 +916,18 @@ pub async fn run_tui(
                 } else if let Some((_rationale, resp_tx)) = &app.pending_privilege_request {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
-                             let tx = resp_tx.clone();
-                             tokio::spawn(async move {
-                                 let _ = tx.send(ToolResponse::Confirmed(true)).await;
-                             });
-                             app.pending_privilege_request = None;
+                            let tx = resp_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = tx.send(ToolResponse::Confirmed(true)).await;
+                            });
+                            app.pending_privilege_request = None;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                             let tx = resp_tx.clone();
-                             tokio::spawn(async move {
-                                 let _ = tx.send(ToolResponse::Confirmed(false)).await;
-                             });
-                             app.pending_privilege_request = None;
+                            let tx = resp_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = tx.send(ToolResponse::Confirmed(false)).await;
+                            });
+                            app.pending_privilege_request = None;
                         }
                         _ => {}
                     }
@@ -835,9 +936,9 @@ pub async fn run_tui(
                     if app.viewer_focus.get() && app.is_editing {
                         match key.code {
                             KeyCode::Esc => { /* Fall through to handle exit logic */ }
-                            KeyCode::Char('s') | KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                /* Fall through to handle save logic */
-                            }
+                            KeyCode::Char('s') | KeyCode::Char('S')
+                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            { /* Fall through to handle save logic */ }
                             _ => {
                                 if let Some(textarea) = &mut app.viewer_editor {
                                     textarea.input(ev);
@@ -849,24 +950,39 @@ pub async fn run_tui(
 
                     // --- 🦾 MISSION CONTROL INPUT BUFFER ROUTING ---
                     if app.input_buffer.is_focused() {
-                        let is_ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                        let is_ctrl = key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL);
                         let is_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
-                        
+                        let is_shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+
                         match key.code {
                             // Ctrl+C to quit
-                            crossterm::event::KeyCode::Char('c') | crossterm::event::KeyCode::Char('C') if is_ctrl => {
+                            crossterm::event::KeyCode::Char('c')
+                            | crossterm::event::KeyCode::Char('C')
+                                if is_ctrl =>
+                            {
                                 // Fall through to global handler
                             }
                             // Ctrl+E to toggle explorer
-                            crossterm::event::KeyCode::Char('e') | crossterm::event::KeyCode::Char('E') if is_ctrl => {
+                            crossterm::event::KeyCode::Char('e')
+                            | crossterm::event::KeyCode::Char('E')
+                                if is_ctrl =>
+                            {
                                 // Fall through to global handler
                             }
                             // Ctrl+P to toggle command palette
-                            crossterm::event::KeyCode::Char('p') | crossterm::event::KeyCode::Char('P') if is_ctrl => {
+                            crossterm::event::KeyCode::Char('p')
+                            | crossterm::event::KeyCode::Char('P')
+                                if is_ctrl =>
+                            {
                                 // Fall through to global handler
                             }
                             // Ctrl+G to toggle voice transcription (cpal/Whisper)
-                            crossterm::event::KeyCode::Char('g') | crossterm::event::KeyCode::Char('G') if is_ctrl => {
+                            crossterm::event::KeyCode::Char('g')
+                            | crossterm::event::KeyCode::Char('G')
+                                if is_ctrl =>
+                            {
                                 if app.is_recording {
                                     if let Some(ref cmd_tx) = app.audio_cmd_tx {
                                         let _ = cmd_tx.try_send(AudioCommand::Stop);
@@ -879,13 +995,16 @@ pub async fn run_tui(
                                         let _ = cmd_tx.try_send(AudioCommand::Start);
                                     }
                                     app.is_recording = true;
-                                    app.recording_status = Some("🎙️ Loading Whisper...".to_string());
-                                    app.push_message("🎙️ [MIC]: Initializing Whisper audio...".to_string());
+                                    app.recording_status =
+                                        Some("🎙️ Loading Whisper...".to_string());
+                                    app.push_message(
+                                        "🎙️ [MIC]: Initializing Whisper audio...".to_string(),
+                                    );
                                 }
                                 continue;
                             }
-                            // Ctrl+Enter or Alt+Enter to submit message
-                            crossterm::event::KeyCode::Enter if is_ctrl || is_alt => {
+                            // Ctrl+Enter, Alt/Option+Enter, or Shift+Enter to submit message
+                            crossterm::event::KeyCode::Enter if is_ctrl || is_alt || is_shift => {
                                 if !app.input_buffer.text().is_empty() {
                                     let msg = app.input_buffer.text().to_string();
                                     if msg.trim() == "/quit" {
@@ -901,7 +1020,10 @@ pub async fn run_tui(
                                 continue;
                             }
                             // Many Unix terminals send Ctrl+Enter as Ctrl+J (Line Feed)
-                            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Char('J') if is_ctrl => {
+                            crossterm::event::KeyCode::Char('j')
+                            | crossterm::event::KeyCode::Char('J')
+                                if is_ctrl =>
+                            {
                                 if !app.input_buffer.text().is_empty() {
                                     let msg = app.input_buffer.text().to_string();
                                     if msg.trim() == "/quit" {
@@ -954,12 +1076,16 @@ pub async fn run_tui(
 
                     match key.code {
                         KeyCode::Char(c) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'c' || c == 'C') {
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && (c == 'c' || c == 'C')
+                            {
                                 app.should_quit = true;
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                            } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'e' || c == 'E') {
+                            } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && (c == 'e' || c == 'E')
+                            {
                                 app.show_explorer = !app.show_explorer;
-                                        app.rebuild_focus();
+                                app.rebuild_focus();
                                 if app.show_explorer {
                                     app.refresh_explorer();
                                     app.focus.focus(&app.explorer_focus);
@@ -967,7 +1093,9 @@ pub async fn run_tui(
                                 } else if app.explorer_focus.get() {
                                     app.focus.focus(&app.input_buffer);
                                 }
-                            } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 'p' || c == 'P') {
+                            } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && (c == 'p' || c == 'P')
+                            {
                                 app.show_command_palette = !app.show_command_palette;
                                 if app.show_command_palette {
                                     app.focus.focus(&app.command_palette_state);
@@ -979,44 +1107,57 @@ pub async fn run_tui(
                                         app.focus.focus(&app.input_buffer);
                                     }
                                 }
-                            } else if key.modifiers.contains(KeyModifiers::CONTROL) && (c == 's' || c == 'S') {
+                            } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && (c == 's' || c == 'S')
+                            {
                                 // --- 💾 SAVE PROTOCOL ---
-                                if let (Some((path, _)), Some(textarea)) = (&app.viewer_content, &app.viewer_editor) {
+                                if let (Some((path, _)), Some(textarea)) =
+                                    (&app.viewer_content, &app.viewer_editor)
+                                {
                                     let path = path.clone();
                                     let new_content = textarea.lines().join("\n");
                                     if std::fs::write(&path, &new_content).is_ok() {
                                         app.push_message(format!("💾 [SAVED]: {}", path));
                                         app.viewer_content = Some((path, new_content));
-                                                app.rebuild_focus();
+                                        app.rebuild_focus();
                                     }
                                 }
                                 continue;
                             } else if app.command_palette_state.is_focused() {
-                                
                             } else if app.explorer_focus.get() {
                                 match c {
                                     '1'..='5' => {
                                         if app.messages.is_empty() {
-                                            let suggestions = if let Some(idx) = app.explorer_state.selected() {
+                                            let suggestions = if let Some(idx) =
+                                                app.explorer_state.selected()
+                                            {
                                                 if let Some(entry) = app.explorer_files.get(idx) {
-                                                    let full_path = app.current_explorer_dir.join(&entry.name);
-                                                    app.generate_file_suggestions(&full_path.to_string_lossy())
+                                                    let full_path =
+                                                        app.current_explorer_dir.join(&entry.name);
+                                                    app.generate_file_suggestions(
+                                                        &full_path.to_string_lossy(),
+                                                    )
                                                 } else {
                                                     app.get_general_suggestions()
                                                 }
                                             } else {
                                                 app.get_general_suggestions()
                                             };
-                                            
+
                                             let num = c.to_digit(10).unwrap() as usize;
                                             if num <= suggestions.len() {
                                                 let suggestion = &suggestions[num - 1];
                                                 let mut cmd = suggestion.clone();
-                                                if let Some(idx) = app.explorer_state.selected() {
-                                                    if let Some(entry) = app.explorer_files.get(idx) {
-                                                        let full_path = app.current_explorer_dir.join(&entry.name);
-                                                        cmd = format!("{}: {}", suggestion, full_path.to_string_lossy());
-                                                    }
+                                                if let Some(idx) = app.explorer_state.selected()
+                                                    && let Some(entry) = app.explorer_files.get(idx)
+                                                {
+                                                    let full_path =
+                                                        app.current_explorer_dir.join(&entry.name);
+                                                    cmd = format!(
+                                                        "{}: {}",
+                                                        suggestion,
+                                                        full_path.to_string_lossy()
+                                                    );
                                                 }
                                                 app.push_message(format!("You: {}", cmd));
                                                 let _ = user_tx.send(cmd).await;
@@ -1038,107 +1179,132 @@ pub async fn run_tui(
                                         app.explorer_state.select(Some(0));
                                     }
                                     'l' => {
-                                        if let Some(idx) = app.explorer_state.selected() {
-                                            if let Some(entry) = app.explorer_files.get(idx).cloned() {
-                                                if entry.is_dir {
-                                                    if entry.name == ".." {
-                                                        app.current_explorer_dir.pop();
-                                                    } else {
-                                                        app.current_explorer_dir.push(entry.name);
-                                                    }
-                                                    app.refresh_explorer();
-                                                    app.explorer_state.select(Some(0));
+                                        if let Some(idx) = app.explorer_state.selected()
+                                            && let Some(entry) =
+                                                app.explorer_files.get(idx).cloned()
+                                        {
+                                            if entry.is_dir {
+                                                if entry.name == ".." {
+                                                    app.current_explorer_dir.pop();
                                                 } else {
-                                                    // Open in VIEWER
-                                                    let full_path = app.current_explorer_dir.join(&entry.name);
-                                                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                                        let path_str = full_path.to_string_lossy().into_owned();
-                                                        app.viewer_content = Some((path_str.clone(), content.clone()));
-                                                app.rebuild_focus();
-                                                        app.viewer_scroll = 0;
-                                                        
-                                                        // Initialize editor
-                                                        let mut textarea = TextArea::from(content.lines().map(String::from));
-                                                        textarea.set_block(Block::default().borders(Borders::ALL).title(format!(" 📝 EDITING: {} ", path_str)));
-                                                        app.viewer_editor = Some(textarea);
-                                                        app.is_editing = false;
-                                                        
-                                                        app.focus.focus(&app.viewer_focus);
-                                                    }
+                                                    app.current_explorer_dir.push(entry.name);
+                                                }
+                                                app.refresh_explorer();
+                                                app.explorer_state.select(Some(0));
+                                            } else {
+                                                // Open in VIEWER
+                                                let full_path =
+                                                    app.current_explorer_dir.join(&entry.name);
+                                                if let Ok(content) =
+                                                    std::fs::read_to_string(&full_path)
+                                                {
+                                                    let path_str =
+                                                        full_path.to_string_lossy().into_owned();
+                                                    app.viewer_content =
+                                                        Some((path_str.clone(), content.clone()));
+                                                    app.rebuild_focus();
+                                                    app.viewer_scroll = 0;
+
+                                                    // Initialize editor
+                                                    let mut textarea = TextArea::from(
+                                                        content.lines().map(String::from),
+                                                    );
+                                                    textarea.set_block(
+                                                        Block::default()
+                                                            .borders(Borders::ALL)
+                                                            .title(format!(
+                                                                " 📝 EDITING: {} ",
+                                                                path_str
+                                                            )),
+                                                    );
+                                                    app.viewer_editor = Some(textarea);
+                                                    app.is_editing = false;
+
+                                                    app.focus.focus(&app.viewer_focus);
                                                 }
                                             }
                                         }
                                     }
                                     'c' => {
-                                        if let Some(idx) = app.explorer_state.selected() {
-                                            if let Some(entry) = app.explorer_files.get(idx) {
-                                                let full_path = app.current_explorer_dir.join(&entry.name);
-                                                let path_str = full_path.to_string_lossy().into_owned();
-                                                app.push_message(format!("📋 [COPIED]: {}", path_str));
-                                            }
+                                        if let Some(idx) = app.explorer_state.selected()
+                                            && let Some(entry) = app.explorer_files.get(idx)
+                                        {
+                                            let full_path =
+                                                app.current_explorer_dir.join(&entry.name);
+                                            let path_str = full_path.to_string_lossy().into_owned();
+                                            app.push_message(format!("📋 [COPIED]: {}", path_str));
                                         }
                                     }
                                     'f' => {
-                                        if let Some(idx) = app.explorer_state.selected() {
-                                            if let Some(entry) = app.explorer_files.get(idx) {
-                                                if !entry.is_dir {
-                                                    let full_path = app.current_explorer_dir.join(&entry.name);
-                                                    let cmd = format!("Fix this file: {}", full_path.to_string_lossy());
-                                                    app.push_message(format!("You: {}", cmd));
-                                                    let _ = user_tx.send(cmd).await;
-                                                    app.focus.focus(&app.input_buffer);
-                                                }
-                                            }
+                                        if let Some(idx) = app.explorer_state.selected()
+                                            && let Some(entry) = app.explorer_files.get(idx)
+                                            && !entry.is_dir
+                                        {
+                                            let full_path =
+                                                app.current_explorer_dir.join(&entry.name);
+                                            let cmd = format!(
+                                                "Fix this file: {}",
+                                                full_path.to_string_lossy()
+                                            );
+                                            app.push_message(format!("You: {}", cmd));
+                                            let _ = user_tx.send(cmd).await;
+                                            app.focus.focus(&app.input_buffer);
                                         }
                                     }
                                     'r' => {
-                                        if let Some(idx) = app.explorer_state.selected() {
-                                            if let Some(entry) = app.explorer_files.get(idx) {
-                                                if !entry.is_dir {
-                                                    let full_path = app.current_explorer_dir.join(&entry.name);
-                                                    let cmd = format!("Refactor this file: {}", full_path.to_string_lossy());
-                                                    app.push_message(format!("You: {}", cmd));
-                                                    let _ = user_tx.send(cmd).await;
-                                                    app.focus.focus(&app.input_buffer);
-                                                }
-                                            }
+                                        if let Some(idx) = app.explorer_state.selected()
+                                            && let Some(entry) = app.explorer_files.get(idx)
+                                            && !entry.is_dir
+                                        {
+                                            let full_path =
+                                                app.current_explorer_dir.join(&entry.name);
+                                            let cmd = format!(
+                                                "Refactor this file: {}",
+                                                full_path.to_string_lossy()
+                                            );
+                                            app.push_message(format!("You: {}", cmd));
+                                            let _ = user_tx.send(cmd).await;
+                                            app.focus.focus(&app.input_buffer);
                                         }
                                     }
                                     'e' => {
-                                        if let Some(idx) = app.explorer_state.selected() {
-                                            if let Some(entry) = app.explorer_files.get(idx) {
-                                                if !entry.is_dir {
-                                                    let full_path = app.current_explorer_dir.join(&entry.name);
-                                                    app.input_buffer.insert_str(format!(" [CONTEXT: {}] ", full_path.to_string_lossy()));
-                                                    app.focus.focus(&app.input_buffer);
-                                                }
-                                            }
+                                        if let Some(idx) = app.explorer_state.selected()
+                                            && let Some(entry) = app.explorer_files.get(idx)
+                                            && !entry.is_dir
+                                        {
+                                            let full_path =
+                                                app.current_explorer_dir.join(&entry.name);
+                                            app.input_buffer.insert_str(format!(
+                                                " [CONTEXT: {}] ",
+                                                full_path.to_string_lossy()
+                                            ));
+                                            app.focus.focus(&app.input_buffer);
                                         }
                                     }
                                     'm' => {
-                                        if let Some(idx) = app.explorer_state.selected() {
-                                            if let Some(entry) = app.explorer_files.get(idx) {
-                                                app.context_menu_options = if entry.is_dir {
-                                                    vec![
-                                                        "Open Directory".to_string(),
-                                                        "List Files with Tempest".to_string(),
-                                                        "Create Subdirectory".to_string(),
-                                                        "Delete Directory".to_string(),
-                                                    ]
-                                                } else {
-                                                    vec![
-                                                        "View / Edit File".to_string(),
-                                                        "Analyze Code with Tempest".to_string(),
-                                                        "Stage changes (Git Add)".to_string(),
-                                                        "Delete File safely".to_string(),
-                                                    ]
-                                                };
-                                                app.show_context_menu = true;
-                                                app.rebuild_focus();
-                                                app.focus.focus(&app.context_menu_state);
-                                                app.context_menu_state.set_active(true);
-                                                app.context_menu_state.select(Some(0));
-                                            }
+                                        if let Some(idx) = app.explorer_state.selected()
+                                            && let Some(entry) = app.explorer_files.get(idx)
+                                        {
+                                            app.context_menu_options = if entry.is_dir {
+                                                vec![
+                                                    "Open Directory".to_string(),
+                                                    "List Files with Tempest".to_string(),
+                                                    "Create Subdirectory".to_string(),
+                                                    "Delete Directory".to_string(),
+                                                ]
+                                            } else {
+                                                vec![
+                                                    "View / Edit File".to_string(),
+                                                    "Analyze Code with Tempest".to_string(),
+                                                    "Stage changes (Git Add)".to_string(),
+                                                    "Delete File safely".to_string(),
+                                                ]
+                                            };
+                                            app.show_context_menu = true;
+                                            app.rebuild_focus();
+                                            app.focus.focus(&app.context_menu_state);
+                                            app.context_menu_state.set_active(true);
+                                            app.context_menu_state.select(Some(0));
                                         }
                                     }
                                     _ => {
@@ -1149,10 +1315,14 @@ pub async fn run_tui(
                             } else if app.viewer_focus.get() {
                                 if c == 'q' || c == 'Q' || c == 'x' || c == 'X' {
                                     app.viewer_content = None;
-                                                app.rebuild_focus();
+                                    app.rebuild_focus();
                                     app.viewer_editor = None;
                                     app.is_editing = false;
-                                    if app.show_explorer { app.focus.focus(&app.explorer_focus); } else { app.focus.focus(&app.input_buffer); }
+                                    if app.show_explorer {
+                                        app.focus.focus(&app.explorer_focus);
+                                    } else {
+                                        app.focus.focus(&app.input_buffer);
+                                    }
                                 } else if c == 'i' || c == 'I' {
                                     app.is_editing = true;
                                     app.push_message("📝 [EDITOR]: Entered EDIT mode. Press Esc to exit, Ctrl+S to save.".to_string());
@@ -1166,7 +1336,6 @@ pub async fn run_tui(
                         }
                         KeyCode::Backspace => {
                             if app.command_palette_state.is_focused() {
-                                
                             } else if app.explorer_focus.get() {
                                 if !app.explorer_query.is_empty() {
                                     app.explorer_query.pop();
@@ -1187,8 +1356,11 @@ pub async fn run_tui(
                             if app.command_palette_state.is_focused() {
                                 if let Some(idx) = app.command_palette_state.selected() {
                                     let option = app.command_palette_options[idx].clone();
-                                    app.push_message(format!("⚡ [PALETTE]: Executing '{}'", option));
-                                    
+                                    app.push_message(format!(
+                                        "⚡ [PALETTE]: Executing '{}'",
+                                        option
+                                    ));
+
                                     if option.starts_with("Theme: ") {
                                         let theme_name = match option.as_str() {
                                             "Theme: Base16 Ocean (Dark)" => "base16-ocean.dark",
@@ -1199,31 +1371,53 @@ pub async fn run_tui(
                                             _ => "base16-ocean.dark",
                                         };
                                         app.current_theme = theme_name.to_string();
-                                        app.push_message(format!("🎨 Aesthetic updated to {}", theme_name));
-                                        
+                                        app.push_message(format!(
+                                            "🎨 Aesthetic updated to {}",
+                                            theme_name
+                                        ));
+
                                         // --- 💾 PERSIST TO CONFIG.TOML ---
-                                        if let Ok(mut content) = std::fs::read_to_string("config.toml") {
-                                            let re = regex::Regex::new(r#"(?m)^tui_theme\s*=\s*".*""#).unwrap();
+                                        if let Ok(mut content) =
+                                            std::fs::read_to_string("config.toml")
+                                        {
+                                            let re = THEME_REGEX.get().unwrap();
                                             if re.is_match(&content) {
-                                                content = re.replace(&content, &format!(r#"tui_theme = "{}""#, theme_name)).into_owned();
+                                                content = re
+                                                    .replace(
+                                                        &content,
+                                                        &format!(r#"tui_theme = "{}""#, theme_name),
+                                                    )
+                                                    .into_owned();
                                             } else {
                                                 if content.contains("[🧹 BASE SETTINGS]") {
                                                     content = content.replace("[🧹 BASE SETTINGS]", &format!("[🧹 BASE SETTINGS]\ntui_theme = \"{}\"", theme_name));
                                                 } else {
-                                                    content.push_str(&format!("\ntui_theme = \"{}\"\n", theme_name));
+                                                    content.push_str(&format!(
+                                                        "\ntui_theme = \"{}\"\n",
+                                                        theme_name
+                                                    ));
                                                 }
                                             }
                                             let _ = std::fs::write("config.toml", content);
                                         }
                                     } else {
                                         let cmd = match option.as_str() {
-                                            "Hot-Swap: DeepSeek R1 (Distill)" => "/switch deepseek-r1:8b".to_string(),
-                                            "Hot-Swap: Qwen 2.5 Coder" => "/switch qwen2.5-coder:7b".to_string(),
+                                            "Hot-Swap: DeepSeek R1 (Distill)" => {
+                                                "/switch deepseek-r1:8b".to_string()
+                                            }
+                                            "Hot-Swap: Qwen 2.5 Coder" => {
+                                                "/switch qwen2.5-coder:7b".to_string()
+                                            }
                                             "Toggle Safe Mode: ON/OFF" => "/safemode".to_string(),
                                             "Recall: Latest Memory Item" => "/recall".to_string(),
                                             "System: Compact Context" => "/compact".to_string(),
-                                            "Sentinel: Toggle Hardcore Mode" => "/toggle_hardcore".to_string(),
-                                            other => format!("/{}", other.to_lowercase().replace(' ', "_")),
+                                            "Sentinel: Toggle Hardcore Mode" => {
+                                                "/toggle_hardcore".to_string()
+                                            }
+                                            other => format!(
+                                                "/{}",
+                                                other.to_lowercase().replace(' ', "_")
+                                            ),
                                         };
                                         let _ = user_tx.send(cmd).await;
                                     }
@@ -1233,29 +1427,34 @@ pub async fn run_tui(
                                     app.focus.focus(&app.input_buffer);
                                 }
                             } else if app.explorer_focus.get() {
-                                if let Some(idx) = app.explorer_state.selected() {
-                                    if let Some(entry) = app.explorer_files.get(idx).cloned() {
-                                        if entry.is_dir {
-                                            if entry.name == ".." {
-                                                app.current_explorer_dir.pop();
-                                            } else {
-                                                app.current_explorer_dir.push(entry.name);
-                                            }
-                                            app.refresh_explorer();
-                                            app.explorer_state.select(Some(0));
+                                if let Some(idx) = app.explorer_state.selected()
+                                    && let Some(entry) = app.explorer_files.get(idx).cloned()
+                                {
+                                    if entry.is_dir {
+                                        if entry.name == ".." {
+                                            app.current_explorer_dir.pop();
                                         } else {
-                                            // Default Enter action: Open in Viewer
-                                            let full_path = app.current_explorer_dir.join(entry.name);
-                                            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                                                app.viewer_content = Some((full_path.to_string_lossy().into_owned(), content));
-                                                app.rebuild_focus();
-                                                app.viewer_scroll = 0;
-                                                app.focus.focus(&app.viewer_focus);
-                                            }
+                                            app.current_explorer_dir.push(entry.name);
+                                        }
+                                        app.refresh_explorer();
+                                        app.explorer_state.select(Some(0));
+                                    } else {
+                                        // Default Enter action: Open in Viewer
+                                        let full_path = app.current_explorer_dir.join(entry.name);
+                                        if let Ok(content) = std::fs::read_to_string(&full_path) {
+                                            app.viewer_content = Some((
+                                                full_path.to_string_lossy().into_owned(),
+                                                content,
+                                            ));
+                                            app.rebuild_focus();
+                                            app.viewer_scroll = 0;
+                                            app.focus.focus(&app.viewer_focus);
                                         }
                                     }
                                 }
-                            } else if app.input_buffer.is_focused() && !app.input_buffer.text().is_empty() {
+                            } else if app.input_buffer.is_focused()
+                                && !app.input_buffer.text().is_empty()
+                            {
                                 let msg = app.input_buffer.text().to_string();
                                 if msg.trim() == "/quit" {
                                     app.should_quit = true;
@@ -1279,7 +1478,8 @@ pub async fn run_tui(
                                 app.explorer_state.select(Some(cur.saturating_sub(1)));
                             } else if app.command_palette_state.is_focused() {
                                 let cur = app.command_palette_state.selected().unwrap_or(0);
-                                app.command_palette_state.select(Some(cur.saturating_sub(1)));
+                                app.command_palette_state
+                                    .select(Some(cur.saturating_sub(1)));
                             } else if app.viewer_focus.get() {
                                 app.viewer_scroll = app.viewer_scroll.saturating_sub(1);
                             } else {
@@ -1337,24 +1537,27 @@ pub async fn run_tui(
                                     app.push_message("📝 [EDITOR]: Exited EDIT mode.".to_string());
                                 } else {
                                     app.viewer_content = None;
-                                                app.rebuild_focus();
+                                    app.rebuild_focus();
                                     app.viewer_editor = None;
                                     app.focus.focus(&app.input_buffer);
                                 }
-                            } else if app.agent_mode == "PLANNING" || app.agent_mode == "EXECUTING" || app.thinking_msg.is_some() {
+                            } else if app.agent_mode == "PLANNING"
+                                || app.agent_mode == "EXECUTING"
+                                || app.thinking_msg.is_some()
+                            {
                                 stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                                 app.push_message("⚠️ [INTERRUPTED]: Stopping agent...".to_string());
                             } else {
-                                // In IDLE mode, Esc can clear input or do nothing. 
+                                // In IDLE mode, Esc can clear input or do nothing.
                                 // Let's have it clear input for better UX.
                                 app.input_buffer.clear();
                             }
                         }
                         _ => {}
-                        }
                     }
                 }
             }
+        }
 
         while let Ok(tui_event) = tui_event_rx.try_recv() {
             match tui_event {
@@ -1392,9 +1595,15 @@ pub async fn run_tui(
                     app.pending_input = Some((tool.clone(), question.clone()));
                     app.input_response_buffer.clear();
                     // High-visibility alert in chat pane too
-                    app.push_message(format!("⚠️ [ACTION REQUIRED]: Approval needed for {} in the input bar below.", tool.to_uppercase()));
+                    app.push_message(format!(
+                        "⚠️ [ACTION REQUIRED]: Approval needed for {} in the input bar below.",
+                        tool.to_uppercase()
+                    ));
                 }
-                AgentEvent::RequestPrivileges { rationale, response_tx } => {
+                AgentEvent::RequestPrivileges {
+                    rationale,
+                    response_tx,
+                } => {
                     app.pending_privilege_request = Some((rationale, response_tx));
                 }
                 AgentEvent::StreamToken(token) => {
@@ -1416,7 +1625,9 @@ pub async fn run_tui(
                 }
                 AgentEvent::ReasoningToken(token) => {
                     app.show_reasoning = true;
-                    if token.is_empty() { continue; } // Marker for reasoning start
+                    if token.is_empty() {
+                        continue;
+                    } // Marker for reasoning start
                     app.reasoning_buffer.push_str(&token);
                     app.reasoning_lines = app.reasoning_buffer.lines().count();
                     if app.auto_scroll {
@@ -1441,19 +1652,27 @@ pub async fn run_tui(
                 AgentEvent::TelemetryMetrics { cpu, gpu, ram, tps } => {
                     if let Some(c) = cpu {
                         app.cpu_history.push(c);
-                        if app.cpu_history.len() > 100 { app.cpu_history.remove(0); }
+                        if app.cpu_history.len() > 100 {
+                            app.cpu_history.remove(0);
+                        }
                     }
                     if let Some(g) = gpu {
                         app.gpu_history.push(g);
-                        if app.gpu_history.len() > 100 { app.gpu_history.remove(0); }
+                        if app.gpu_history.len() > 100 {
+                            app.gpu_history.remove(0);
+                        }
                     }
                     if let Some(r) = ram {
                         app.ram_history.push(r);
-                        if app.ram_history.len() > 100 { app.ram_history.remove(0); }
+                        if app.ram_history.len() > 100 {
+                            app.ram_history.remove(0);
+                        }
                     }
                     if let Some(t) = tps {
                         app.tps_history.push(t);
-                        if app.tps_history.len() > 100 { app.tps_history.remove(0); }
+                        if app.tps_history.len() > 100 {
+                            app.tps_history.remove(0);
+                        }
                     }
                 }
                 AgentEvent::SubagentStatus(msg) => {
@@ -1468,7 +1687,7 @@ pub async fn run_tui(
                 }
                 AgentEvent::ShowManual(content) => {
                     app.viewer_content = Some(("OPERATIONAL MANUAL".to_string(), content));
-                                                app.rebuild_focus();
+                    app.rebuild_focus();
                     app.viewer_scroll = 0;
                     app.focus.focus(&app.viewer_focus);
                 }
@@ -1483,11 +1702,29 @@ pub async fn run_tui(
                     }
                 }
                 AgentEvent::ActiveTools(_) | AgentEvent::TaskUpdate(_) => {}
-                AgentEvent::ToolSuccess { name } => {
-                    app.push_message(format!("✅ [TOOL]: {} completed successfully.", name.to_uppercase()));
+                AgentEvent::ToolSuccess {
+                    name,
+                    args: _,
+                    output: _,
+                } => {
+                    app.push_message(format!(
+                        "✅ [TOOL]: {} completed successfully.",
+                        name.to_uppercase()
+                    ));
                 }
-                AgentEvent::ToolError { name, error } => {
-                    app.push_message(format!("❌ [TOOL]: {} failed: {}", name.to_uppercase(), error));
+                AgentEvent::ToolError {
+                    name,
+                    error,
+                    args: _,
+                } => {
+                    app.push_message(format!(
+                        "❌ [TOOL]: {} failed: {}",
+                        name.to_uppercase(),
+                        error
+                    ));
+                }
+                AgentEvent::ToolStart { name, args: _ } => {
+                    app.push_message(format!("⚙️ [TOOL]: {} started...", name.to_uppercase()));
                 }
             }
         }
@@ -1495,7 +1732,7 @@ pub async fn run_tui(
         if app.should_quit {
             break;
         }
-        
+
         if last_tick.elapsed() >= tick_rate {
             app.animation_tick = app.animation_tick.wrapping_add(1);
             last_tick = Instant::now();
@@ -1504,7 +1741,9 @@ pub async fn run_tui(
 
     disable_raw_mode().into_diagnostic()?;
     stdout().execute(LeaveAlternateScreen).into_diagnostic()?;
-    stdout().execute(crossterm::event::DisableMouseCapture).into_diagnostic()?;
+    stdout()
+        .execute(crossterm::event::DisableMouseCapture)
+        .into_diagnostic()?;
     Ok(())
 }
 
@@ -1522,7 +1761,7 @@ fn split_markdown_and_code(text: &str) -> Vec<ChatBlock> {
 
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
+        if let Some(stripped) = trimmed.strip_prefix("```") {
             if in_code {
                 blocks.push(ChatBlock {
                     is_code: true,
@@ -1541,8 +1780,8 @@ fn split_markdown_and_code(text: &str) -> Vec<ChatBlock> {
                     });
                     current_block = String::new();
                 }
-                
-                let lang_id = trimmed["```".len()..].trim();
+
+                let lang_id = stripped.trim();
                 current_lang = match lang_id {
                     "rust" | "rs" => "rs".to_string(),
                     "python" | "py" => "py".to_string(),
@@ -1593,12 +1832,21 @@ fn make_line_static(line: Line<'_>) -> Line<'static> {
     }
 }
 
-fn highlight_text(text: &str, extension: &str, syntax_set: &SyntaxSet, theme_set: &ThemeSet, theme_name: &str) -> Vec<Line<'static>> {
-    let syntax = syntax_set.find_syntax_by_extension(extension)
+fn highlight_text(
+    text: &str,
+    extension: &str,
+    syntax_set: &SyntaxSet,
+    theme_set: &ThemeSet,
+    theme_name: &str,
+) -> Vec<Line<'static>> {
+    let syntax = syntax_set
+        .find_syntax_by_extension(extension)
         .or_else(|| syntax_set.find_syntax_by_extension("txt"))
         .unwrap();
-    
-    let theme = theme_set.themes.get(theme_name)
+
+    let theme = theme_set
+        .themes
+        .get(theme_name)
         .or_else(|| theme_set.themes.get("base16-ocean.dark"))
         .or_else(|| theme_set.themes.values().next())
         .expect("No themes available in ThemeSet");
@@ -1611,7 +1859,10 @@ fn highlight_text(text: &str, extension: &str, syntax_set: &SyntaxSet, theme_set
         let mut spans = Vec::new();
         for (style, content) in ranges {
             let color = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-            spans.push(Span::styled(content.to_string(), Style::default().fg(color)));
+            spans.push(Span::styled(
+                content.to_string(),
+                Style::default().fg(color),
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -1619,28 +1870,27 @@ fn highlight_text(text: &str, extension: &str, syntax_set: &SyntaxSet, theme_set
 }
 
 fn wrap_ratatui_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
-    if max_width == 0 { return vec![line]; }
-    
+    if max_width == 0 {
+        return vec![line];
+    }
+
     let mut wrapped_lines = Vec::new();
     let mut current_spans = Vec::new();
     let mut current_width = 0;
-    
+
     for span in line.spans {
         let content = span.content.as_ref();
         let style = span.style;
-        
+
         let mut word_start = 0;
-        let mut char_indices = content.char_indices().peekable();
-        
-        while let Some((i, c)) = char_indices.next() {
+        let char_indices = content.char_indices().peekable();
+
+        for (i, c) in char_indices {
             let c_width = UnicodeWidthStr::width(c.to_string().as_str());
-            
+
             if current_width + c_width > max_width {
                 if i > word_start {
-                    current_spans.push(Span::styled(
-                        content[word_start..i].to_string(),
-                        style
-                    ));
+                    current_spans.push(Span::styled(content[word_start..i].to_string(), style));
                 }
                 wrapped_lines.push(Line::from(current_spans));
                 current_spans = Vec::new();
@@ -1649,27 +1899,24 @@ fn wrap_ratatui_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>
             }
             current_width += c_width;
         }
-        
+
         if word_start < content.len() {
-            current_spans.push(Span::styled(
-                content[word_start..].to_string(),
-                style
-            ));
+            current_spans.push(Span::styled(content[word_start..].to_string(), style));
         }
     }
-    
+
     if !current_spans.is_empty() {
         wrapped_lines.push(Line::from(current_spans));
     } else if wrapped_lines.is_empty() {
         wrapped_lines.push(Line::default());
     }
-    
+
     wrapped_lines
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
     let input_lines = if app.input_buffer.is_focused() {
-        app.input_buffer.text().lines().count().max(1).min(8) as u16
+        app.input_buffer.text().lines().count().clamp(1, 8) as u16
     } else {
         1
     };
@@ -1677,11 +1924,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8), // Header/Logo area
-            Constraint::Min(3),    // Main Content Area
-            Constraint::Length(input_height), // Input Box (Dynamic)
-        ].as_ref())
+        .constraints(
+            [
+                Constraint::Length(8),            // Header/Logo area
+                Constraint::Min(3),               // Main Content Area
+                Constraint::Length(input_height), // Input Box (Dynamic)
+            ]
+            .as_ref(),
+        )
         .split(f.area());
 
     // Main Content Area Layout Logic - Strictly Balanced to 100%
@@ -1689,15 +1939,15 @@ fn ui(f: &mut Frame, app: &mut App) {
     let explorer_width = if app.show_explorer { 18 } else { 0 };
     let reasoning_width = if app.show_reasoning { 35 } else { 0 };
     let viewer_width = if app.viewer_content.is_some() { 35 } else { 0 };
-    
+
     if app.show_explorer {
         main_constraints.push(Constraint::Percentage(explorer_width));
     }
-    
+
     // The remaining space is for the Chat pane
     let chat_width = 100 - explorer_width - reasoning_width - viewer_width;
     main_constraints.push(Constraint::Percentage(chat_width));
-    
+
     if app.show_reasoning {
         main_constraints.push(Constraint::Percentage(reasoning_width));
     }
@@ -1716,16 +1966,31 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.show_explorer {
         let explorer_area = main_chunks[pane_idx];
         pane_idx += 1;
-        
-        let explorer_border_color = if app.explorer_focus.get() { Color::Yellow } else { Color::DarkGray };
-        let explorer_title = format!(" 📂 EXPLORER: {} {} ", 
-            app.current_explorer_dir.file_name().unwrap_or_default().to_string_lossy(),
-            if app.explorer_query.is_empty() { "".to_string() } else { format!("(🔍 {})", app.explorer_query) }
+
+        let explorer_border_color = if app.explorer_focus.get() {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        let explorer_title = format!(
+            " 📂 EXPLORER: {} {} ",
+            app.current_explorer_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            if app.explorer_query.is_empty() {
+                "".to_string()
+            } else {
+                format!("(🔍 {})", app.explorer_query)
+            }
         );
 
         let mut items = Vec::new();
         for entry in &app.explorer_files {
-            let extension = std::path::Path::new(&entry.name).extension().and_then(|s| s.to_str()).unwrap_or("");
+            let extension = std::path::Path::new(&entry.name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
             let icon = if entry.is_dir {
                 if entry.name == ".." { "🔙 " } else { "📁 " }
             } else {
@@ -1740,17 +2005,25 @@ fn ui(f: &mut Frame, app: &mut App) {
                     "sh" | "zsh" | "bash" => "🐚 ",
                     "lock" => "🔒 ",
                     _ => {
-                        if entry.name.to_uppercase().contains("LICENSE") { "⚖️  " }
-                        else if entry.name.to_lowercase().contains("makefile") || entry.name.to_lowercase().contains("dockerfile") { "🔨 " }
-                        else { "📄 " }
+                        if entry.name.to_uppercase().contains("LICENSE") {
+                            "⚖️  "
+                        } else if entry.name.to_lowercase().contains("makefile")
+                            || entry.name.to_lowercase().contains("dockerfile")
+                        {
+                            "🔨 "
+                        } else {
+                            "📄 "
+                        }
                     }
                 }
             };
-            
-            let name_style = if entry.is_dir { 
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) 
-            } else { 
-                Style::default().fg(Color::White) 
+
+            let name_style = if entry.is_dir {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
             };
 
             let mut line_spans = vec![
@@ -1767,12 +2040,23 @@ fn ui(f: &mut Frame, app: &mut App) {
                 } else {
                     format!(" {:.1}M", entry.size as f64 / (1024.0 * 1024.0))
                 };
-                line_spans.push(Span::styled(size_str, Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)));
+                line_spans.push(Span::styled(
+                    size_str,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ));
             }
 
             if let Some(mod_time) = entry.modified {
                 let time_str = format!(" [{}]", mod_time.format("%H:%M"));
-                line_spans.push(Span::styled(time_str, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC).add_modifier(Modifier::DIM)));
+                line_spans.push(Span::styled(
+                    time_str,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC)
+                        .add_modifier(Modifier::DIM),
+                ));
             }
 
             items.push(ListItem::new(Line::from(line_spans)));
@@ -1780,38 +2064,75 @@ fn ui(f: &mut Frame, app: &mut App) {
 
         let explorer_highlight_color = Color::Rgb(40, 50, 100); // Tempest Deep Indigo
         let explorer = List::new(items)
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(explorer_title, Style::default().fg(explorer_border_color).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(explorer_border_color)))
-            .highlight_style(Style::default().bg(explorer_highlight_color).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled(
+                        explorer_title,
+                        Style::default()
+                            .fg(explorer_border_color)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .border_style(Style::default().fg(explorer_border_color)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(explorer_highlight_color)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
-        
+
         f.render_stateful_widget(explorer, explorer_area, &mut app.explorer_state);
 
         // Help text at bottom of explorer
         if app.explorer_focus.get() {
-             let help_area = ratatui::layout::Rect {
-                 x: explorer_area.x + 1,
-                 y: explorer_area.y + explorer_area.height.saturating_sub(2),
-                 width: explorer_area.width.saturating_sub(2),
-                 height: 1,
-             };
-             let help_text = Paragraph::new(" [h]:Up [l]:In [f]:Fix [r]:Ref ")
-                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
-             f.render_widget(help_text, help_area);
+            let help_area = ratatui::layout::Rect {
+                x: explorer_area.x + 1,
+                y: explorer_area.y + explorer_area.height.saturating_sub(2),
+                width: explorer_area.width.saturating_sub(2),
+                height: 1,
+            };
+            let help_text = Paragraph::new(" [h]:Up [l]:In [f]:Fix [r]:Ref ").style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            );
+            f.render_widget(help_text, help_area);
         }
     }
 
     // Header area for Logo
     let logo = vec![
-        Line::from(Span::styled("  _______ ______ __  __ _____  ______  _____ _______ ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled(" |__   __|  ____|  \\/  |  __ \\|  ____|/ ____|__   __|", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("    | |  | |__  | \\  / | |__) | |__  | (___    | |   ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("    | |  |  __| | |\\/| |  ___/|  __|  \\___ \\   | |   ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("    | |  | |____| |  | | |    | |____ ____) |  | |   ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("    |_|  |______|_|  |_|_|    |______|_____/   |_|   ", Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled(" 🌪️    AUTONOMOUS SYSTEMS ENGINEERING    🌪️ ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "  _______ ______ __  __ _____  ______  _____ _______ ",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            " |__   __|  ____|  \\/  |  __ \\|  ____|/ ____|__   __|",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            "    | |  | |__  | \\  / | |__) | |__  | (___    | |   ",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            "    | |  |  __| | |\\/| |  ___/|  __|  \\___ \\   | |   ",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            "    | |  | |____| |  | | |    | |____ ____) |  | |   ",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            "    |_|  |______|_|  |_|_|    |______|_____/   |_|   ",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            " 🌪️    AUTONOMOUS SYSTEMS ENGINEERING    🌪️ ",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )),
     ];
     let header_block = Paragraph::new(logo)
         .alignment(ratatui::layout::Alignment::Center)
@@ -1823,21 +2144,31 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(70),
-            Constraint::Percentage(30),
-        ].as_ref())
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
         .split(chat_area);
 
     // --- 🦾 CHAT ZONE: Smart Panel vs History ---
     if app.messages.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(if app.input_buffer.is_focused() { " 🦾 MISSION CONTROL [FOCUS] " } else { " 🦾 MISSION CONTROL " })
-            .border_style(Style::default().fg(if app.input_buffer.is_focused() { Color::Yellow } else { Color::DarkGray }));
+            .title(if app.input_buffer.is_focused() {
+                " 🦾 MISSION CONTROL [FOCUS] "
+            } else {
+                " 🦾 MISSION CONTROL "
+            })
+            .border_style(Style::default().fg(if app.input_buffer.is_focused() {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            }));
 
         let selected_file = if let Some(idx) = app.explorer_state.selected() {
-            app.explorer_files.get(idx).map(|e| app.current_explorer_dir.join(&e.name).to_string_lossy().into_owned())
+            app.explorer_files.get(idx).map(|e| {
+                app.current_explorer_dir
+                    .join(&e.name)
+                    .to_string_lossy()
+                    .into_owned()
+            })
         } else {
             None
         };
@@ -1850,33 +2181,64 @@ fn ui(f: &mut Frame, app: &mut App) {
 
         let mut content = vec![
             Line::from(vec![
-                Span::styled("🌪️  TEMPEST AI ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled("v0.3.5 \"Cyber-Orchestrator\"", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "🌪️  TEMPEST AI ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "v0.3.5 \"Cyber-Orchestrator\"",
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("Status: "),
-                Span::styled("STANDBY", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "STANDBY",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("SELECTED: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "SELECTED: ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(selected_file.unwrap_or_else(|| "Project Root".to_string())),
             ]),
             Line::from(""),
-            Line::from(Span::styled("🎯 SUGGESTED ACTIONS (Press 1-5 in Explorer):", Style::default().add_modifier(Modifier::UNDERLINED))),
+            Line::from(Span::styled(
+                "🎯 SUGGESTED ACTIONS (Press 1-5 in Explorer):",
+                Style::default().add_modifier(Modifier::UNDERLINED),
+            )),
             Line::from(""),
         ];
 
         for (i, suggestion) in suggestions.iter().enumerate() {
             content.push(Line::from(vec![
-                Span::styled(format!(" [{}] ", i + 1), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" [{}] ", i + 1),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(suggestion.clone()),
             ]));
         }
 
         content.push(Line::from(""));
-        content.push(Line::from(Span::styled("Type a command below to begin session...", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))));
+        content.push(Line::from(Span::styled(
+            "Type a command below to begin session...",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
 
         let welcome = Paragraph::new(content)
             .block(block)
@@ -1887,26 +2249,52 @@ fn ui(f: &mut Frame, app: &mut App) {
         let mut list_items = Vec::new();
         let chat_width = top_chunks[0].width.saturating_sub(2) as usize;
 
-        let push_wrapped = |text: &str, items: &mut Vec<ListItem>, is_user: bool, show_header: bool, is_streaming: bool| {
-            if chat_width == 0 { return; }
-            let (prefix, color) = if is_user { ("You: ", Color::Blue) } else { ("Tempest: ", Color::Cyan) };
-            
+        let push_wrapped = |text: &str,
+                            items: &mut Vec<ListItem>,
+                            is_user: bool,
+                            show_header: bool,
+                            is_streaming: bool| {
+            if chat_width == 0 {
+                return;
+            }
+            let (prefix, color) = if is_user {
+                ("You: ", Color::Blue)
+            } else {
+                ("Tempest: ", Color::Cyan)
+            };
+
             let has_prefix = text.starts_with(prefix);
-            let content_to_wrap = if has_prefix { &text[prefix.len()..] } else { text };
-            
+            let content_to_wrap = if has_prefix {
+                &text[prefix.len()..]
+            } else {
+                text
+            };
+
             // --- 🌊 HYBRID RENDERING: MARKDOWN + SYNTECT CODE BLOCKS ---
             if !is_user && !is_streaming {
                 let blocks = split_markdown_and_code(content_to_wrap);
                 let mut first_line = true;
-                
+
                 for block in blocks {
                     if block.is_code {
                         let ext = &block.language;
-                        let highlighted = highlight_text(&block.content, ext, &app.syntax_set, &app.theme_set, &app.current_theme);
-                        
+                        let highlighted = highlight_text(
+                            &block.content,
+                            ext,
+                            &app.syntax_set,
+                            &app.theme_set,
+                            &app.current_theme,
+                        );
+
                         for mut line in highlighted {
                             if first_line && show_header && has_prefix {
-                                line.spans.insert(0, Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                                line.spans.insert(
+                                    0,
+                                    Span::styled(
+                                        prefix,
+                                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                                    ),
+                                );
                                 first_line = false;
                             }
                             let wrapped_lines = wrap_ratatui_line(line, chat_width);
@@ -1919,7 +2307,13 @@ fn ui(f: &mut Frame, app: &mut App) {
                         for line in parsed.lines {
                             let mut line_static = make_line_static(line);
                             if first_line && show_header && has_prefix {
-                                line_static.spans.insert(0, Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                                line_static.spans.insert(
+                                    0,
+                                    Span::styled(
+                                        prefix,
+                                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                                    ),
+                                );
                                 first_line = false;
                             }
                             let wrapped_lines = wrap_ratatui_line(line_static, chat_width);
@@ -1934,18 +2328,34 @@ fn ui(f: &mut Frame, app: &mut App) {
 
             // Fallback for streaming and user messages (plain text wrapping, except streaming code blocks use full highlighting if they contain "```")
             if !is_user && content_to_wrap.contains("```") {
-                 let ext = if content_to_wrap.contains("```rust") || content_to_wrap.contains("```rs") { "rs" }
-                           else if content_to_wrap.contains("```python") || content_to_wrap.contains("```py") { "py" }
-                           else if content_to_wrap.contains("```json") { "json" }
-                           else if content_to_wrap.contains("```toml") { "toml" }
-                           else if content_to_wrap.contains("```bash") || content_to_wrap.contains("```sh") { "sh" }
-                           else { "rs" };
-                 
-                 let highlighted = highlight_text(content_to_wrap, ext, &app.syntax_set, &app.theme_set, &app.current_theme);
-                 for line in highlighted {
-                     items.push(ListItem::new(line));
-                 }
-                 return;
+                let ext = if content_to_wrap.contains("```rust")
+                    || content_to_wrap.contains("```rs")
+                {
+                    "rs"
+                } else if content_to_wrap.contains("```python") || content_to_wrap.contains("```py")
+                {
+                    "py"
+                } else if content_to_wrap.contains("```json") {
+                    "json"
+                } else if content_to_wrap.contains("```toml") {
+                    "toml"
+                } else if content_to_wrap.contains("```bash") || content_to_wrap.contains("```sh") {
+                    "sh"
+                } else {
+                    "rs"
+                };
+
+                let highlighted = highlight_text(
+                    content_to_wrap,
+                    ext,
+                    &app.syntax_set,
+                    &app.theme_set,
+                    &app.current_theme,
+                );
+                for line in highlighted {
+                    items.push(ListItem::new(line));
+                }
+                return;
             }
 
             let mut first_line = true;
@@ -1961,7 +2371,8 @@ fn ui(f: &mut Frame, app: &mut App) {
                 while !current.is_empty() || (first_line && first_chunk) {
                     let mut width = 0;
                     let mut split_idx = 0;
-                    let available_width = if first_line && first_chunk && show_header && has_prefix {
+                    let available_width = if first_line && first_chunk && show_header && has_prefix
+                    {
                         chat_width.saturating_sub(UnicodeWidthStr::width(prefix))
                     } else {
                         chat_width
@@ -1981,20 +2392,25 @@ fn ui(f: &mut Frame, app: &mut App) {
                     }
 
                     let (chunk, rest) = current.split_at(split_idx);
-                    
+
                     let line_content = if first_line && first_chunk && show_header && has_prefix {
                         Line::from(vec![
-                            Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                prefix,
+                                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                            ),
                             Span::raw(chunk.to_string()),
                         ])
                     } else {
                         Line::from(chunk.to_string())
                     };
-                    
+
                     items.push(ListItem::new(line_content));
                     current = rest;
                     first_chunk = false;
-                    if current.is_empty() { break; }
+                    if current.is_empty() {
+                        break;
+                    }
                 }
                 first_line = false;
             }
@@ -2006,39 +2422,60 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
 
         if !app.current_stream.is_empty() {
-            push_wrapped(&format!("Tempest: {}", app.current_stream), &mut list_items, false, true, true);
+            push_wrapped(
+                &format!("Tempest: {}", app.current_stream),
+                &mut list_items,
+                false,
+                true,
+                true,
+            );
         }
 
-        let core_border_color = if app.input_buffer.is_focused() { Color::Yellow } else { Color::DarkGray };
-        let core_title = if app.input_buffer.is_focused() { " 🦾 CORE SESSION [FOCUS] " } else { " 🦾 CORE SESSION " };
-        
+        let core_border_color = if app.input_buffer.is_focused() {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        let core_title = if app.input_buffer.is_focused() {
+            " 🦾 CORE SESSION [FOCUS] "
+        } else {
+            " 🦾 CORE SESSION "
+        };
+
         let item_count = list_items.len();
         let list = List::new(list_items)
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(core_title)
-                .border_style(Style::default().fg(core_border_color)))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(core_title)
+                    .border_style(Style::default().fg(core_border_color)),
+            )
             .style(Style::default().fg(Color::White));
 
         if app.auto_scroll && item_count > 0 {
             app.list_state.select(Some(item_count.saturating_sub(1)));
         }
-        
+
         f.render_stateful_widget(list, top_chunks[0], &mut app.list_state);
     }
 
     // --- ⚙️ STATUS / TELEMETRY ZONE (Always Visible) ---
     let status_title = format!(" ⚙️ STATUS [{}] ", app.agent_mode);
     let mut status_lines = Vec::new();
-    
+
     if let Some(status) = &app.engine_status {
         status_lines.push(Line::from(vec![
-            Span::styled("🤖 ENGINE STATUS: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "🤖 ENGINE STATUS: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(status, Style::default().fg(Color::Green)),
         ]));
         status_lines.push(Line::from(""));
     }
-    
+
     let spinner = if app.thinking_msg.is_some() {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         frames[(app.animation_tick as usize) % frames.len()]
@@ -2047,13 +2484,23 @@ fn ui(f: &mut Frame, app: &mut App) {
     };
 
     for line_text in app.telemetry_text.split('\n') {
-        if line_text.trim().is_empty() { continue; }
+        if line_text.trim().is_empty() {
+            continue;
+        }
         let mut spans = Vec::new();
         if let Some((label, value)) = line_text.split_once(':') {
-             spans.push(Span::styled(format!("{}:", label), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-             spans.push(Span::styled(value.to_string(), Style::default().fg(Color::Green)));
+            spans.push(Span::styled(
+                format!("{}:", label),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                value.to_string(),
+                Style::default().fg(Color::Green),
+            ));
         } else {
-             spans.push(Span::raw(line_text.to_string()));
+            spans.push(Span::raw(line_text.to_string()));
         }
         status_lines.push(Line::from(spans));
     }
@@ -2061,23 +2508,41 @@ fn ui(f: &mut Frame, app: &mut App) {
     if let Some(tool) = &app.active_tool {
         status_lines.push(Line::from(vec![
             Span::raw("🔧 Executing: "),
-            Span::styled(tool, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                tool,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
     }
 
     if let Some(thinking) = &app.thinking_msg {
         status_lines.push(Line::from(vec![
             Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
-            Span::styled(thinking, Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                thinking,
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ]));
     }
 
     // --- 🛡️ SENTINEL FLEET HUD ---
     status_lines.push(Line::from(""));
     if !app.active_sentinels.is_empty() {
-        let mut spans = vec![Span::styled("🛡️ FLEET: ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))];
+        let mut spans = vec![Span::styled(
+            "🛡️ FLEET: ",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )];
         for s in &app.active_sentinels {
-            spans.push(Span::styled(format!("{} ", s.chars().next().unwrap_or('S')), Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(
+                format!("{} ", s.chars().next().unwrap_or('S')),
+                Style::default().fg(Color::Cyan),
+            ));
         }
         status_lines.push(Line::from(spans));
     }
@@ -2085,24 +2550,47 @@ fn ui(f: &mut Frame, app: &mut App) {
     for log in &app.sentinel_log {
         status_lines.push(Line::from(vec![
             Span::styled(" ⤷ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(log, Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                log,
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ]));
     }
 
     // --- CONTEXT WINDOW TRACKER ---
     if app.context_total > 0 {
         status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled("🧠 CONTEXT", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
+        status_lines.push(Line::from(Span::styled(
+            "🧠 CONTEXT",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )));
         let pct = (app.context_used as f64 / app.context_total as f64).min(1.0);
         let bar_width = 12;
         let filled = (pct * bar_width as f64) as usize;
-        let bar_color = if pct > 0.9 { Color::Red } else if pct > 0.75 { Color::Yellow } else { Color::Green };
+        let bar_color = if pct > 0.9 {
+            Color::Red
+        } else if pct > 0.75 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
         status_lines.push(Line::from(vec![
             Span::styled("[", Style::default().fg(Color::Gray)),
             Span::styled("|".repeat(filled), Style::default().fg(bar_color)),
-            Span::styled(".".repeat(bar_width - filled), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                ".".repeat(bar_width - filled),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled("]", Style::default().fg(Color::Gray)),
-            Span::raw(format!(" {}k / {}k", app.context_used / 1024, app.context_total / 1024)),
+            Span::raw(format!(
+                " {}k / {}k",
+                app.context_used / 1024,
+                app.context_total / 1024
+            )),
         ]));
     }
 
@@ -2110,7 +2598,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let status_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1), // Text metrics
+            Constraint::Min(1),     // Text metrics
             Constraint::Length(14), // Sparklines area
         ])
         .split(top_chunks[1]);
@@ -2123,10 +2611,15 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // --- 📊 REAL-TIME TELEMETRY SPARKLINES (Boxed) ---
     let pulse_block = Block::default()
-        .title(Span::styled(" 📊 TELEMETRY PULSE ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " 📊 TELEMETRY PULSE ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    
+
     let pulse_inner = pulse_block.inner(status_chunks[1]);
     f.render_widget(pulse_block, status_chunks[1]);
 
@@ -2141,36 +2634,48 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(pulse_inner);
 
     let width = pulse_chunks[0].width.saturating_sub(2) as usize; // Subtracting borders
-    
+
     let cpu_data = if app.cpu_history.len() > width {
         &app.cpu_history[app.cpu_history.len() - width..]
     } else {
         &app.cpu_history
     };
     let cpu_spark = Sparkline::default()
-        .block(Block::default().title(" CPU ").style(Style::default().fg(Color::Green)))
+        .block(
+            Block::default()
+                .title(" CPU ")
+                .style(Style::default().fg(Color::Green)),
+        )
         .data(cpu_data)
         .max(10000);
     f.render_widget(cpu_spark, pulse_chunks[0]);
-    
+
     let gpu_data = if app.gpu_history.len() > width {
         &app.gpu_history[app.gpu_history.len() - width..]
     } else {
         &app.gpu_history
     };
     let gpu_spark = Sparkline::default()
-        .block(Block::default().title(" GPU ").style(Style::default().fg(Color::Blue)))
+        .block(
+            Block::default()
+                .title(" GPU ")
+                .style(Style::default().fg(Color::Blue)),
+        )
         .data(gpu_data)
         .max(10000);
     f.render_widget(gpu_spark, pulse_chunks[1]);
-    
+
     let ram_data = if app.ram_history.len() > width {
         &app.ram_history[app.ram_history.len() - width..]
     } else {
         &app.ram_history
     };
     let ram_spark = Sparkline::default()
-        .block(Block::default().title(" RAM ").style(Style::default().fg(Color::Yellow)))
+        .block(
+            Block::default()
+                .title(" RAM ")
+                .style(Style::default().fg(Color::Yellow)),
+        )
         .data(ram_data)
         .max(100);
     f.render_widget(ram_spark, pulse_chunks[2]);
@@ -2181,7 +2686,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         &app.tps_history
     };
     let tps_spark = Sparkline::default()
-        .block(Block::default().title(" TPS ").style(Style::default().fg(Color::Magenta)))
+        .block(
+            Block::default()
+                .title(" TPS ")
+                .style(Style::default().fg(Color::Magenta)),
+        )
         .data(tps_data)
         .max(100);
     f.render_widget(tps_spark, pulse_chunks[3]);
@@ -2189,16 +2698,37 @@ fn ui(f: &mut Frame, app: &mut App) {
     // --- REASONING TRACE PANE (With Syntax Highlighting) ---
     if app.show_reasoning {
         let reasoning_area = main_chunks[pane_idx];
-        let reasoning_border_color = if app.reasoning_focus.get() { Color::Yellow } else { Color::Magenta };
-        let reasoning_title = if app.reasoning_focus.get() { " 🧠 REASONING [FOCUS] " } else { " 🧠 REASONING " };
+        let reasoning_border_color = if app.reasoning_focus.get() {
+            Color::Yellow
+        } else {
+            Color::Magenta
+        };
+        let reasoning_title = if app.reasoning_focus.get() {
+            " 🧠 REASONING [FOCUS] "
+        } else {
+            " 🧠 REASONING "
+        };
 
-        let highlighted_lines = highlight_text(&app.reasoning_buffer, "md", &app.syntax_set, &app.theme_set, &app.current_theme);
+        let highlighted_lines = highlight_text(
+            &app.reasoning_buffer,
+            "md",
+            &app.syntax_set,
+            &app.theme_set,
+            &app.current_theme,
+        );
 
         let reasoning_para = Paragraph::new(highlighted_lines)
-            .block(Block::default()
-                .title(Span::styled(reasoning_title, Style::default().fg(reasoning_border_color).add_modifier(Modifier::BOLD)))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(reasoning_border_color)))
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        reasoning_title,
+                        Style::default()
+                            .fg(reasoning_border_color)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(reasoning_border_color)),
+            )
             .wrap(ratatui::widgets::Wrap { trim: false })
             .scroll((app.reasoning_scroll, 0));
         f.render_widget(reasoning_para, reasoning_area);
@@ -2208,33 +2738,61 @@ fn ui(f: &mut Frame, app: &mut App) {
     // --- 📄 CYBER-VIEWER PANE (Syntax Highlighted / Editable) ---
     if let Some((path, content)) = &app.viewer_content {
         let viewer_area = main_chunks[pane_idx];
-        let viewer_border_color = if app.viewer_focus.get() { Color::Yellow } else { Color::Green };
-        
+        let viewer_border_color = if app.viewer_focus.get() {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
         if app.is_editing {
             // --- 🩹 SELF-HEALING: Initialize editor if missing ---
             if app.viewer_editor.is_none() {
                 let textarea = TextArea::from(content.lines().map(String::from));
                 app.viewer_editor = Some(textarea);
             }
-            
+
             let textarea = app.viewer_editor.as_mut().unwrap();
             let cursor = textarea.cursor();
-            
+
             // --- 🎯 HYPER-VISIBILITY CURSOR ---
-            textarea.set_cursor_style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::REVERSED));
+            textarea.set_cursor_style(
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::REVERSED),
+            );
             textarea.set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
-            
-            let viewer_title = format!(" 📝 EDITING: {} [L:{}, C:{}] ", path, cursor.0 + 1, cursor.1 + 1);
+
+            let viewer_title = format!(
+                " 📝 EDITING: {} [L:{}, C:{}] ",
+                path,
+                cursor.0 + 1,
+                cursor.1 + 1
+            );
             let block = Block::default()
-                .title(Span::styled(viewer_title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(
+                    viewer_title,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow));
 
             // --- 🌈 LIVE SYNTAX OVERLAY ---
             let text_content = textarea.lines().join("\n");
-            let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("rs");
-            let highlighted_lines = highlight_text(&text_content, extension, &app.syntax_set, &app.theme_set, &app.current_theme);
-            
+            let extension = std::path::Path::new(path)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("rs");
+            let highlighted_lines = highlight_text(
+                &text_content,
+                extension,
+                &app.syntax_set,
+                &app.theme_set,
+                &app.current_theme,
+            );
+
             // Adjust scroll based on cursor to keep it in view
             let scroll_y = if cursor.0 >= viewer_area.height as usize / 2 {
                 (cursor.0 - viewer_area.height as usize / 2) as u16
@@ -2246,33 +2804,54 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(block)
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .scroll((scroll_y, 0));
-            
+
             f.render_widget(editor_para, viewer_area);
-            
+
             // --- ⌨️ HARDWARE ANCHOR ---
             if app.viewer_focus.get() {
                 let display_cursor_y = cursor.0.saturating_sub(scroll_y as usize);
                 if display_cursor_y < viewer_area.height as usize {
                     f.set_cursor_position((
                         viewer_area.x + 1 + cursor.1 as u16,
-                        viewer_area.y + 1 + display_cursor_y as u16
+                        viewer_area.y + 1 + display_cursor_y as u16,
                     ));
                 }
             }
         } else {
-            let viewer_title = format!(" 📄 VIEWER: {} {} ", 
-                path, 
-                if app.viewer_focus.get() { "[FOCUS] - Press 'i' to Edit" } else { "" }
+            let viewer_title = format!(
+                " 📄 VIEWER: {} {} ",
+                path,
+                if app.viewer_focus.get() {
+                    "[FOCUS] - Press 'i' to Edit"
+                } else {
+                    ""
+                }
             );
 
-            let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("rs");
-            let highlighted_lines = highlight_text(content, extension, &app.syntax_set, &app.theme_set, &app.current_theme);
+            let extension = std::path::Path::new(path)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("rs");
+            let highlighted_lines = highlight_text(
+                content,
+                extension,
+                &app.syntax_set,
+                &app.theme_set,
+                &app.current_theme,
+            );
 
             let viewer_para = Paragraph::new(highlighted_lines)
-                .block(Block::default()
-                    .title(Span::styled(viewer_title, Style::default().fg(viewer_border_color).add_modifier(Modifier::BOLD)))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(viewer_border_color)))
+                .block(
+                    Block::default()
+                        .title(Span::styled(
+                            viewer_title,
+                            Style::default()
+                                .fg(viewer_border_color)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(viewer_border_color)),
+                )
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .scroll((app.viewer_scroll, 0));
             f.render_widget(viewer_para, viewer_area);
@@ -2282,7 +2861,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     if let Some((tool, question)) = &app.pending_input {
         let input_title = format!(" ⚠️  APPROVAL REQUIRED for {} ", tool);
         let input_text = format!("{} >> {}", question, app.input_response_buffer);
-        let input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let input_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         let input = Paragraph::new(input_text.clone())
             .style(input_style)
             .block(Block::default().borders(Borders::ALL).title(input_title));
@@ -2294,7 +2875,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             ));
         }
     } else if let Some((rationale, _resp_tx)) = &app.pending_privilege_request {
-        let input_title = format!(" 🔒 PRIVILEGE ESCALATION ");
+        let input_title = " 🔒 PRIVILEGE ESCALATION ".to_string();
         let input_text = format!("Rationale: {} | Accept root? (y/n)", rationale);
         let input_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
         let input = Paragraph::new(input_text.clone())
@@ -2311,17 +2892,28 @@ fn ui(f: &mut Frame, app: &mut App) {
         use rat_text::text_area::TextArea;
         let (title, border_color) = if app.is_recording {
             let status = app.recording_status.as_deref().unwrap_or("🎙️ Recording...");
-            (format!(" 🎙️ VOICE RECORDING ACTIVE: {} ", status), Color::Red)
+            (
+                format!(" 🎙️ VOICE RECORDING ACTIVE: {} ", status),
+                Color::Red,
+            )
         } else if app.input_buffer.is_focused() {
-            (" 🦾 MISSION CONTROL (Ctrl+Enter to Submit) ".to_string(), Color::Yellow)
+            (
+                " 🦾 MISSION CONTROL (Ctrl/Option/Shift+Enter to Submit) ".to_string(),
+                Color::Yellow,
+            )
         } else {
             (" 🗨️ MISSION CONTROL ".to_string(), Color::DarkGray)
         };
         let widget = TextArea::new().block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(border_color).add_modifier(Modifier::BOLD)))
-                .border_style(Style::default().fg(border_color))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(border_color)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(border_color)),
         );
         f.render_stateful_widget(widget, chunks[2], &mut app.input_buffer);
         use rat_text::HasScreenCursor;
@@ -2335,22 +2927,31 @@ fn ui(f: &mut Frame, app: &mut App) {
         let area = centered_rect(60, 40, f.area());
         f.render_widget(ratatui::widgets::Clear, area); // Clear background
 
-        use rat_menu::popup_menu::{PopupMenu, PopupConstraint};
+        use rat_menu::popup_menu::{PopupConstraint, PopupMenu};
 
         let mut menu = PopupMenu::new();
         for opt in &app.command_palette_options {
             menu = menu.item_string(opt.clone());
         }
-        
+
         let block = Block::default()
             .title(" ⚡ Command Palette ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
 
-        menu = menu.block(block)
+        menu = menu
+            .block(block)
             .constraint(PopupConstraint::None)
             .style(Style::default().bg(Color::DarkGray))
-            .focus_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+            .focus_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         f.render_stateful_widget(menu, area, &mut app.command_palette_state);
     }
@@ -2360,7 +2961,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let area = centered_rect(30, 25, f.area());
         f.render_widget(ratatui::widgets::Clear, area); // Clear background
 
-        use rat_menu::popup_menu::{PopupMenu, PopupConstraint};
+        use rat_menu::popup_menu::{PopupConstraint, PopupMenu};
 
         let mut menu = PopupMenu::new();
         for opt in &app.context_menu_options {
@@ -2370,34 +2971,53 @@ fn ui(f: &mut Frame, app: &mut App) {
         let block = Block::default()
             .title(" 📂 Explorer Menu ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
 
-        menu = menu.block(block)
+        menu = menu
+            .block(block)
             .constraint(PopupConstraint::None)
             .style(Style::default().bg(Color::DarkGray))
-            .focus_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+            .focus_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         f.render_stateful_widget(menu, area, &mut app.context_menu_state);
     }
 }
 
 // Helper for centering the command palette
-fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ].as_ref())
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
         .split(r);
 
     Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ].as_ref())
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
         .split(popup_layout[1])[1]
 }
