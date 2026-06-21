@@ -24,7 +24,7 @@ use tempest_ai::agent::Agent;
     name = "tempest_ai",
     version,
     about = "🌪️ Tempest AI: The Hardware-Aware, Local-Inference Autonomous Engineer.",
-    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --web    Launch Standalone Web Command Center\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.5 Operational Manual, launch the TUI and type '/help'."
+    after_help = "LAUNCH MODES:\n  ./tempest_ai          Launch high-fidelity TUI (Ollama)\n  ./tempest_ai --mlx    Launch high-fidelity TUI (Native Apple Silicon)\n  ./tempest_ai --web    Launch Standalone Web Command Center\n  ./tempest_ai --cli    Launch standard command-line interface\n\nFor the full v0.3.7 Operational Manual, launch the TUI and type '/help'."
 )]
 struct Cli {
     /// Ollama model to use (overrides config and OLLAMA_MODEL env var)
@@ -393,7 +393,7 @@ async fn main() -> Result<()> {
         let core_memories = [
             (
                 "tempest_identity",
-                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.5` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a multi-model architecture: a Native MLX 'Smarter' Engine (Local GPU) or AI Bridge for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization, semantic indexing, and search.",
+                "CORE INSTRUCTION (Identity): Your name is Tempest AI `v0.3.7` — \"Cyber-Orchestrator\". You are a high-performance, autonomous engineering assistant. You operate using a multi-model architecture: a Native MLX 'Smarter' Engine (Local GPU) or AI Bridge for reasoning/coding, and a Condensed Ollama Sub-Agent (llama3.2:1b) for administrative tasks like context summarization, semantic indexing, and search.",
                 vec!["identity", "branding", "instructions", "architecture"],
             ),
             (
@@ -452,6 +452,10 @@ async fn main() -> Result<()> {
     let sub_agent_model = config
         .sub_agent_model
         .unwrap_or_else(|| "llama3.2:1b".to_string());
+
+    let embedding_model = config
+        .embedding_model
+        .unwrap_or_else(|| "mxbai-embed-large".to_string());
 
     let mode = if cli.bridge {
         tempest_ai::inference::AgentMode::Bridge
@@ -574,6 +578,7 @@ async fn main() -> Result<()> {
         session_id,
         memory_store.clone(),
         sub_agent_model,
+        embedding_model,
         event_tx.clone(),
         tempest_ai::agent::AgentConfig {
             planner_model: config.planner_model.clone(),
@@ -616,7 +621,10 @@ async fn main() -> Result<()> {
                     None
                 }
             },
-            tool_engine: config.tool_engine.clone().unwrap_or_else(|| "legacy".to_string()),
+            tool_engine: config
+                .tool_engine
+                .clone()
+                .unwrap_or_else(|| "legacy".to_string()),
         },
     )
     .await?;
@@ -700,10 +708,12 @@ async fn main() -> Result<()> {
             _ = tempest_ai::nexus::run_nexus(agent, nexus_port, backend_id.to_string(), event_rx, tool_tx_opt) => {}
             _ = tokio::signal::ctrl_c() => {
                 println!("\n{} Shutting down Nexus...", "🛑".red());
+                agent_clone.shutdown().await;
                 agent_clone.print_interaction_summary();
+                std::process::exit(0);
             }
         }
-        return Ok(());
+        std::process::exit(0);
     }
 
     if cli.mcp_server {
@@ -721,9 +731,14 @@ async fn main() -> Result<()> {
     }
 
     if cli.cli {
-        run_cli_mode(agent.clone()).await?;
+        let res = run_cli_mode(agent.clone()).await;
+        agent.shutdown().await;
         agent.print_interaction_summary();
-        return Ok(());
+        if let Err(e) = res {
+            eprintln!("CLI Mode error: {}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 
     // Default to TUI mode
@@ -800,7 +815,7 @@ async fn main() -> Result<()> {
 
     agent.print_interaction_summary();
 
-    Ok(())
+    std::process::exit(0);
 }
 
 async fn run_cli_mode(agent: Agent) -> Result<()> {
@@ -842,11 +857,20 @@ async fn run_cli_mode(agent: Agent) -> Result<()> {
                     println!("{}", agent.checkpoint_mgr.lock().list_checkpoints());
                     continue;
                 }
+                if p == "/dream" {
+                    println!("💤 Entering memory consolidation phase (dreaming)...");
+                    match agent.consolidate_memories().await {
+                        Ok(summary) => println!("✨ {}", summary),
+                        Err(e) => println!("{} Memory consolidation failed: {}", "⚠️".yellow(), e),
+                    }
+                    continue;
+                }
                 if p == "/help" {
                     println!("{}", "Commands:".bold());
                     println!("  /clear       — Wipe conversation history");
                     println!("  /undo        — Revert the last file modification");
                     println!("  /checkpoints — List available undo checkpoints");
+                    println!("  /dream       — Consolidate long-term memory records");
                     println!("  /tool        — Test a tool directly (usage: /tool <name> <json>)");
                     println!("  /quit        — Exit Tempest");
                     continue;

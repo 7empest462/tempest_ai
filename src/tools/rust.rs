@@ -90,7 +90,11 @@ impl AgentTool for CargoAddTool {
         let output = match tokio::time::timeout(timeout_duration, output_future).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => return Err(miette::miette!("Failed to execute cargo add: {}", e)),
-            Err(_) => return Err(miette::miette!("Cargo add timed out after 15 seconds. This can happen if another cargo process holds the index/package lock.")),
+            Err(_) => {
+                return Err(miette::miette!(
+                    "Cargo add timed out after 15 seconds. This can happen if another cargo process holds the index/package lock."
+                ));
+            }
         };
 
         if output.status.success() {
@@ -175,7 +179,11 @@ impl AgentTool for CrateSearchTool {
         let output = match tokio::time::timeout(timeout_duration, output_future).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => return Err(miette::miette!("Failed to execute cargo search: {}", e)),
-            Err(_) => return Err(miette::miette!("Cargo search timed out after 15 seconds. This can happen if another cargo process holds the index lock or there is no network connection.")),
+            Err(_) => {
+                return Err(miette::miette!(
+                    "Cargo search timed out after 15 seconds. This can happen if another cargo process holds the index lock or there is no network connection."
+                ));
+            }
         };
 
         if output.status.success() {

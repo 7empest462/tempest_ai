@@ -7,12 +7,12 @@ use tempfile::NamedTempFile;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
+use skg_tool::ToolDyn;
 use tempest_ai::checkpoint::CheckpointManager;
 use tempest_ai::inference::Backend;
 use tempest_ai::tools::editing::MultiEditTool;
 use tempest_ai::tools::{AgentTool, ToolContext};
 use tempest_ai::vector_brain::VectorBrain;
-use skg_tool::ToolDyn;
 
 fn make_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
     let (tx, _) = mpsc::channel(10);
@@ -21,9 +21,13 @@ fn make_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
 
     let context = ToolContext {
         ollama: Ollama::default(),
-        backend: Arc::new(RwLock::new(Backend::Ollama(Ollama::default()))),
+        backend: Arc::new(RwLock::new(Backend::Ollama(
+            Ollama::default(),
+            "mxbai-embed-large".to_string(),
+        ))),
         model: "test".to_string(),
         sub_agent_model: "test".to_string(),
+        embedding_model: "mxbai-embed-large".to_string(),
         history: Arc::new(Mutex::new(vec![])),
         task_context: Arc::new(Mutex::new("test".to_string())),
         vector_brain: Arc::new(Mutex::new(VectorBrain::new())),
@@ -35,7 +39,9 @@ fn make_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
         is_root: Arc::new(AtomicBool::new(false)),
         all_tools: vec![],
         checkpoint_mgr: Arc::new(Mutex::new(CheckpointManager::new(10))),
-        memory_store: Arc::new(Mutex::new(tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap())),
+        memory_store: Arc::new(Mutex::new(
+            tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap(),
+        )),
     };
 
     let skg_ctx = skg_tool::ToolCallContext::with_deps(
@@ -163,7 +169,11 @@ async fn test_multi_edit_ambiguous_target() {
 
     let res = tool.execute(&args, context.clone()).await;
     assert!(res.is_err());
-    assert!(res.unwrap_err().to_string().contains("Multiple occurrences"));
+    assert!(
+        res.unwrap_err()
+            .to_string()
+            .contains("Multiple occurrences")
+    );
 
     // Narrowed down to a single line -> should succeed!
     let args_narrowed = json!({
@@ -211,7 +221,11 @@ async fn test_multi_edit_overlapping_rejection() {
 
     let res = tool.execute(&args, context).await;
     assert!(res.is_err());
-    assert!(res.unwrap_err().to_string().contains("Overlapping edits detected"));
+    assert!(
+        res.unwrap_err()
+            .to_string()
+            .contains("Overlapping edits detected")
+    );
 }
 
 #[tokio::test]

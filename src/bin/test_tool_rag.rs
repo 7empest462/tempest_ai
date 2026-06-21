@@ -33,10 +33,14 @@ impl skg_tool::ToolDyn for MockTool {
         &self,
         _input: Value,
         _ctx: &skg_tool::ToolCallContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Value, skg_tool::ToolError>> + Send + '_>> {
-        Box::pin(async move {
-            Ok(Value::String("mocked".to_string()))
-        })
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Value, skg_tool::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { Ok(Value::String("mocked".to_string())) })
     }
 }
 
@@ -150,7 +154,10 @@ async fn main() -> Result<()> {
     );
 
     // Verify resolve behavior (can be Ok if Ollama is online, or Err if offline/unavailable)
-    let offline_backend = tempest_ai::inference::Backend::Ollama(ollama_rs::Ollama::default());
+    let offline_backend = tempest_ai::inference::Backend::Ollama(
+        ollama_rs::Ollama::default(),
+        "mxbai-embed-large".to_string(),
+    );
     let resolve_res = index
         .resolve("Find some files", &offline_backend, None)
         .await;

@@ -65,7 +65,12 @@ pub async fn search_web(
                 current_url = format!("https://lite.duckduckgo.com{}", current_url);
             }
         } else if let Some(snippet) = tr.select(&snippet_selector).next() {
-            let snip = snippet.text().collect::<Vec<_>>().join(" ").trim().to_string();
+            let snip = snippet
+                .text()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string();
             if !current_title.is_empty() && !current_url.is_empty() {
                 results.push_str(&format!(
                     "Title: {}\nURL: {}\nSnippet: {}\n\n",
@@ -78,7 +83,10 @@ pub async fn search_web(
     }
 
     if results.is_empty() {
-        Ok(serde_json::Value::String(format!("No results found for query: {}", query)))
+        Ok(serde_json::Value::String(format!(
+            "No results found for query: {}",
+            query
+        )))
     } else {
         Ok(serde_json::Value::String(results))
     }
@@ -90,18 +98,20 @@ pub async fn search_web(
     name = "read_url",
     description = "Fetches a URL and converts the page HTML to readable markdown text. Use this to read documentation or articles from search results."
 )]
-pub async fn read_url(
-    url: String,
-    _ctx: &ToolCallContext,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn read_url(url: String, _ctx: &ToolCallContext) -> Result<serde_json::Value, ToolError> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("Reqwest client error: {}", e)))?;
 
-    let res = client.get(&url).send().await
+    let res = client
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Request failed: {}", e)))?;
-    let html_bytes = res.bytes().await
+    let html_bytes = res
+        .bytes()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read bytes: {}", e)))?;
 
     let text = html2text::from_read(html_bytes.as_ref(), 100);
@@ -109,7 +119,11 @@ pub async fn read_url(
     let max_len = 15000;
     let mut truncated = text;
     if truncated.len() > max_len {
-        let safe_len = truncated.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated.len());
+        let safe_len = truncated
+            .char_indices()
+            .nth(max_len)
+            .map(|(i, _)| i)
+            .unwrap_or(truncated.len());
         truncated.truncate(safe_len);
         truncated.push_str("\n...[Content truncated due to length]...");
     }
@@ -154,9 +168,11 @@ pub async fn raw_http_fetch(
         request = request.header("Content-Type", "application/json").body(b);
     }
 
-    let response = request.send().await
+    let response = request
+        .send()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Request failed: {}", e)))?;
-    
+
     let status = response.status();
     let resp_headers: Vec<String> = response
         .headers()
@@ -165,13 +181,19 @@ pub async fn raw_http_fetch(
         .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or("?")))
         .collect();
 
-    let body_text = response.text().await
+    let body_text = response
+        .text()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed reading response: {}", e)))?;
-    
+
     let max_len = 15000;
     let mut truncated_body = body_text;
     if truncated_body.len() > max_len {
-        let safe_len = truncated_body.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(truncated_body.len());
+        let safe_len = truncated_body
+            .char_indices()
+            .nth(max_len)
+            .map(|(i, _)| i)
+            .unwrap_or(truncated_body.len());
         truncated_body.truncate(safe_len);
         truncated_body.push_str("\n...[Response truncated]...");
     }
@@ -204,32 +226,45 @@ pub async fn download_file(
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("Client error: {}", e)))?;
 
-    let head_res = client.head(&url).send().await
+    let head_res = client
+        .head(&url)
+        .send()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("HEAD request failed: {}", e)))?;
-    
+
     if let Some(len) = head_res.headers().get(reqwest::header::CONTENT_LENGTH) {
         let size = len.to_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
         if size > 50_000_000 {
             return Err(ToolError::ExecutionFailed(format!(
-                "File is too large ({} bytes). Maximum allowed size is 50MB.", size
+                "File is too large ({} bytes). Maximum allowed size is 50MB.",
+                size
             )));
         }
     }
 
-    let response = client.get(&url).send().await
+    let response = client
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("GET request failed: {}", e)))?;
     let status = response.status();
 
     if !status.is_success() {
-        return Err(ToolError::ExecutionFailed(format!("Download failed with status {}", status)));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Download failed with status {}",
+            status
+        )));
     }
 
-    let bytes = response.bytes().await
+    let bytes = response
+        .bytes()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed reading bytes: {}", e)))?;
-    
+
     if bytes.len() > 50_000_000 {
         return Err(ToolError::ExecutionFailed(format!(
-            "File is too large ({} bytes). Maximum allowed size is 50MB.", bytes.len()
+            "File is too large ({} bytes). Maximum allowed size is 50MB.",
+            bytes.len()
         )));
     }
 
@@ -245,7 +280,9 @@ pub async fn download_file(
         std::fs::write(&resolved_path, &bytes)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
         Ok(())
-    }).await.map_err(|e| ToolError::ExecutionFailed(format!("Task error: {}", e)))??;
+    })
+    .await
+    .map_err(|e| ToolError::ExecutionFailed(format!("Task error: {}", e)))??;
 
     Ok(serde_json::Value::String(format!(
         "✅ Downloaded {} bytes from {} → {}",
@@ -275,16 +312,22 @@ pub async fn get_stock_price(
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("Client error: {}", e)))?;
 
-    let response = client.get(&target_url).send().await
+    let response = client
+        .get(&target_url)
+        .send()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Request failed: {}", e)))?;
-    
+
     if !response.status().is_success() {
         return Err(ToolError::ExecutionFailed(format!(
-            "HTTP Request failed with status: {}", response.status()
+            "HTTP Request failed with status: {}",
+            response.status()
         )));
     }
 
-    let content = response.text().await
+    let content = response
+        .text()
+        .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed reading response: {}", e)))?;
     let document = scraper::Html::parse_document(&content);
 

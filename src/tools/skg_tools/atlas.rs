@@ -130,7 +130,8 @@ pub async fn project_atlas(
     action: String,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
 
     let atlas_path = ".tempest_atlas.md";
@@ -138,9 +139,14 @@ pub async fn project_atlas(
     match action.as_str() {
         "read" => {
             if let Ok(content) = fs::read_to_string(atlas_path) {
-                Ok(serde_json::Value::String(format!("📍 CURRENT PROJECT ATLAS:\n\n{}", content)))
+                Ok(serde_json::Value::String(format!(
+                    "📍 CURRENT PROJECT ATLAS:\n\n{}",
+                    content
+                )))
             } else {
-                Ok(serde_json::Value::String("❌ Atlas not found. Use 'map' to generate it first.".to_string()))
+                Ok(serde_json::Value::String(
+                    "❌ Atlas not found. Use 'map' to generate it first.".to_string(),
+                ))
             }
         }
         "map" => {
@@ -168,8 +174,9 @@ pub async fn project_atlas(
                 file_count
             ));
 
-            fs::write(atlas_path, &output)
-                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write atlas file: {}", e)))?;
+            fs::write(atlas_path, &output).map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to write atlas file: {}", e))
+            })?;
 
             // Spawns indexing in the background
             let brain = tool_ctx.vector_brain.clone();
@@ -179,7 +186,10 @@ pub async fn project_atlas(
 
             tokio::spawn(async move {
                 let b = backend.read().await;
-                if let Err(e) = crate::tools::atlas::run_semantic_indexing(&b, brain, &brain_path, true, tx).await {
+                if let Err(e) =
+                    crate::tools::atlas::run_semantic_indexing(&b, brain, &brain_path, true, tx)
+                        .await
+                {
                     eprintln!("❌ Background indexing FAILED: {}", e);
                 }
             });
@@ -189,6 +199,9 @@ pub async fn project_atlas(
                 atlas_path
             )))
         }
-        _ => Err(ToolError::ExecutionFailed(format!("Unknown project_atlas action '{}'.", action))),
+        _ => Err(ToolError::ExecutionFailed(format!(
+            "Unknown project_atlas action '{}'.",
+            action
+        ))),
     }
 }

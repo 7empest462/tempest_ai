@@ -7,6 +7,7 @@ use wasmtime::*;
 
 pub struct WasmSandboxEngine {
     engine: Engine,
+    calculator_module: Module,
 }
 
 impl Default for WasmSandboxEngine {
@@ -21,10 +22,7 @@ impl WasmSandboxEngine {
         config.consume_fuel(true);
         let engine = Engine::new(&config)
             .map_err(|e| miette!("Failed to create Wasmtime Engine: {:?}", e))?;
-        Ok(Self { engine })
-    }
 
-    pub fn run_calculator(&self, lh: i32, rh: i32, op: &str) -> Result<i32> {
         let wat = r#"
             (module
               (func $add (param $lh i32) (param $rh i32) (result i32)
@@ -50,9 +48,16 @@ impl WasmSandboxEngine {
             )
         "#;
 
-        let module = Module::new(&self.engine, wat)
-            .map_err(|e| miette!("Failed to compile WAT module: {:?}", e))?;
+        let calculator_module = Module::new(&engine, wat)
+            .map_err(|e| miette!("Failed to compile calculator WAT module: {:?}", e))?;
 
+        Ok(Self {
+            engine,
+            calculator_module,
+        })
+    }
+
+    pub fn run_calculator(&self, lh: i32, rh: i32, op: &str) -> Result<i32> {
         let limits = StoreLimitsBuilder::new()
             .memory_size(1024 * 1024 * 16)
             .build(); // 16MB cap
@@ -64,9 +69,7 @@ impl WasmSandboxEngine {
             .set_fuel(10_000)
             .map_err(|e| miette!("Failed to set fuel budget: {:?}", e))?;
 
-        let linker = Linker::new(&self.engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
+        let instance = Instance::new(&mut store, &self.calculator_module, &[])
             .map_err(|e| miette!("Failed to instantiate module: {:?}", e))?;
 
         let func = instance
@@ -106,9 +109,7 @@ impl WasmSandboxEngine {
             .set_fuel(500)
             .map_err(|e| miette!("Failed to set low fuel budget: {:?}", e))?;
 
-        let linker = Linker::new(&self.engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
+        let instance = Instance::new(&mut store, &module, &[])
             .map_err(|e| miette!("Failed to instantiate loop module: {:?}", e))?;
 
         let func = instance

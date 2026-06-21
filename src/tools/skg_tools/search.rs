@@ -115,7 +115,7 @@ pub async fn semantic_search(
     let vector_brain = tool_ctx.vector_brain.clone();
 
     let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-        "nomic-embed-text".to_string(),
+        tool_ctx.embedding_model.clone(),
         query.clone().into(),
     );
 
@@ -194,7 +194,7 @@ pub async fn index_file_semantically(
 
     for (i, chunk) in chunks.iter().enumerate() {
         let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-            "nomic-embed-text".to_string(),
+            tool_ctx.embedding_model.clone(),
             chunk.clone().into(),
         );
 

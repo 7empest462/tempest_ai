@@ -6,12 +6,12 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
+use skg_tool::ToolDyn;
 use tempest_ai::checkpoint::CheckpointManager;
 use tempest_ai::inference::Backend;
 use tempest_ai::tools::rust::CrateSearchTool;
 use tempest_ai::tools::{AgentTool, ToolContext};
 use tempest_ai::vector_brain::VectorBrain;
-use skg_tool::ToolDyn;
 
 fn make_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
     let (tx, _) = mpsc::channel(10);
@@ -20,9 +20,13 @@ fn make_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
 
     let context = ToolContext {
         ollama: Ollama::default(),
-        backend: Arc::new(RwLock::new(Backend::Ollama(Ollama::default()))),
+        backend: Arc::new(RwLock::new(Backend::Ollama(
+            Ollama::default(),
+            "mxbai-embed-large".to_string(),
+        ))),
         model: "test".to_string(),
         sub_agent_model: "test".to_string(),
+        embedding_model: "mxbai-embed-large".to_string(),
         history: Arc::new(Mutex::new(vec![])),
         task_context: Arc::new(Mutex::new("test".to_string())),
         vector_brain: Arc::new(Mutex::new(VectorBrain::new())),
@@ -34,7 +38,9 @@ fn make_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
         is_root: Arc::new(AtomicBool::new(false)),
         all_tools: vec![],
         checkpoint_mgr: Arc::new(Mutex::new(CheckpointManager::new(10))),
-        memory_store: Arc::new(Mutex::new(tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap())),
+        memory_store: Arc::new(Mutex::new(
+            tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap(),
+        )),
     };
 
     let skg_ctx = skg_tool::ToolCallContext::with_deps(
@@ -84,5 +90,7 @@ async fn test_native_cargo_search_not_found() {
 
     let res = tool.call(args, &skg_ctx).await.unwrap();
     let res_str = res.as_str().unwrap();
-    assert!(res_str.contains("No crates found matching your query") || res_str.contains("search_web"));
+    assert!(
+        res_str.contains("No crates found matching your query") || res_str.contains("search_web")
+    );
 }

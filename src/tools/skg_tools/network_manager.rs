@@ -31,7 +31,9 @@ pub async fn list_network_sockets(
     sockets.truncate(limit_val);
 
     if sockets.is_empty() {
-        return Ok(serde_json::Value::String("No matching active network sockets found.".to_string()));
+        return Ok(serde_json::Value::String(
+            "No matching active network sockets found.".to_string(),
+        ));
     }
 
     let mut report = format!("Found {} matching network sockets:\n\n", sockets.len());

@@ -32,9 +32,7 @@ pub async fn list_skills() -> Result<serde_json::Value, ToolError> {
     name = "recall_skill",
     description = "Recall the full instructions of a specific skill by name. Use this to follow a predefined recipe for a task."
 )]
-pub async fn recall_skill(
-    name: String,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn recall_skill(name: String) -> Result<serde_json::Value, ToolError> {
     let skills = crate::skills::load_skills();
     if let Some(skill) = skills.iter().find(|s| s.name == name) {
         Ok(serde_json::Value::String(format!(
@@ -76,8 +74,9 @@ pub async fn distill_knowledge(
         topic, timestamp, summary
     );
 
-    std::fs::write(&filepath, content)
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write knowledge item: {}", e)))?;
+    std::fs::write(&filepath, content).map_err(|e| {
+        ToolError::ExecutionFailed(format!("Failed to write knowledge item: {}", e))
+    })?;
 
     // 🧠 SEMANTIC SYNC (Index the new knowledge item immediately)
     let backend = tool_ctx.backend.read().await;

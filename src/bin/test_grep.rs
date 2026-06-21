@@ -1,9 +1,9 @@
 use grep::regex::RegexMatcher;
 use grep::searcher::{Searcher, sinks::UTF8};
 use ignore::WalkBuilder;
+use miette::{IntoDiagnostic, Result};
 use std::sync::Arc;
 use std::sync::Mutex;
-use miette::{Result, IntoDiagnostic, miette};
 
 pub fn run_grep(query: &str, path: &str) -> Result<Vec<String>> {
     let matcher = RegexMatcher::new(query).into_diagnostic()?;
@@ -15,8 +15,8 @@ pub fn run_grep(query: &str, path: &str) -> Result<Vec<String>> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        
-        if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
 
@@ -42,4 +42,17 @@ pub fn run_grep(query: &str, path: &str) -> Result<Vec<String>> {
 
     let final_results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
     Ok(final_results)
+}
+
+fn main() {
+    match run_grep("meltdown", ".") {
+        Ok(results) => {
+            for r in results {
+                println!("{}", r);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {:?}", e);
+        }
+    }
 }

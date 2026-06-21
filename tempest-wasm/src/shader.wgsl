@@ -1,3 +1,13 @@
+struct TimeUniform {
+    value: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
+};
+
+@group(0) @binding(0)
+var<uniform> time: TimeUniform;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -23,9 +33,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.uv;
     let dist = length(uv);
     
-    // 🌪️ Vortex Swirl Calculation
+    // 🌪️ Vortex Swirl Calculation (Animated with time)
     let angle = atan2(uv.y, uv.x);
-    let swirl = angle + (2.0 / (dist + 0.1));
+    let swirl = angle + (2.0 / (dist + 0.1)) - time.value * 1.5;
     
     // Dynamic Colors (Neon Cyan & Vortex Purple)
     let cyan = vec3<f32>(0.0, 0.95, 1.0);
@@ -36,7 +46,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let rings = sin(swirl * 8.0 - dist * 4.0) * 0.5 + 0.5;
     let glow = 0.05 / (dist + 0.05);
     
-    let mixed_color = mix(cyan, purple, sin(dist * 2.0) * 0.5 + 0.5);
+    // Shift colors along the swirl arms dynamically
+    let mixed_color = mix(cyan, purple, sin(dist * 2.0 + time.value * 0.5) * 0.5 + 0.5);
     let final_color = mix(deep_space, mixed_color, rings * glow);
     
     return vec4<f32>(final_color + (mixed_color * glow * 0.2), 1.0);

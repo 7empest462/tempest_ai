@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI: Knowledge Graph (v0.3.5 "Cyber-Orchestrator")
+# 🌪️ Tempest AI: Knowledge Graph (v0.3.7 "Cyber-Orchestrator")
 
 This document visualizes the internal architecture and data flow of the Tempest AI engine, including the new AI Bridge, Sub-agent operations, and Context Manager.
 
@@ -50,7 +50,7 @@ graph TD
     Agent -->|Verify| Sentinel[tempest_ai::sentinel::Sentinel]
 ```
 
-## 🛰️ Key Interaction Chains (v0.3.5)
+## 🛰️ Key Interaction Chains (v0.3.7)
 
 ### 1. The Inference Routing
 The `Backend` enum in `src/inference.rs` acts as the router for model execution. Depending on configuration (`--gemini`, `--mlx`, `--bridge`), Tempest AI will hot-swap the underlying LLM provider mid-flight. The new `AI Bridge` handles asynchronous streaming and REST requests to API services like Google Gemini.

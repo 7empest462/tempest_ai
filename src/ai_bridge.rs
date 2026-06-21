@@ -1,19 +1,28 @@
+use futures::Stream;
 use miette::{Result, miette};
+use parking_lot::Mutex;
 use std::pin::Pin;
 use std::sync::Arc;
-use parking_lot::Mutex;
-use futures::Stream;
 
 const FALLBACK_THOUGHT_SIGNATURE: &str = "EpIHCo8HAQw51sdknWnAK89Pxs4oLikSCAktcG09aUUkvYIDgh0WL+39AO9+YNckevcRnabXMKrue6P2NWkUojkEvpoJ97MpCwICfzZJQ79YaTQWN+syB/ycovPPp/xARYA0d7hmOtLVggf1HadAjJ9fy3RpEEmt2QxZotpGUtn46i+UAfuq2Oc/AUHmq9zDH0paELcSSbuPzTLkuUNXy6r03SRLs+QGh3MlzxCyvfDmvzIqNRszhjNFNumncV7ZgL/gmfxzHQ2AoaOamtWiqIEI1b3ULeVlG3OcGrCx2LFhqS0ve6Txh3jU1XgM9RkQlr4E+jSw8yZpoox0s8YJ1Iw8JZ2uLEANJxRbOyI7AF7MG+oyfQgGw3JiP7riplpgMCmR6xCU5YKfozXHr+STzQueCPZk1DyV6A2wZztYndOPOgjdwHhfbpM4cYppv6WNwnS3uG3359m1334cRph173p7+TeNb/r5R1xyEeT9bQVVJnXvSV2WvMF25DwWUYJsvSr87KZ2fzzA36mcnL5RcSCvoGciesdY83Yt0mZcjUtHrJhvWnaa2qy5TO+ty06HDbdPwJxPO3Oe/vjMbQ+kwYzLByBqqRZ/1bnjctP+mepsn/XR/vOedOdd8lNRff9Qyf+5Toxtwo8mx1fqxEK1qiv35g6F+Trr/2tk2VZw+3H5cazIIGediL+oJVENmzyuaKxgaB3g0+ZtctDnsLZMi/70oCH034YuMV74mrSyFQRJnu0DUw4ahEYxfwGTIRbMqmGP/AboM8Ih0SHSJ6aRV+AznQuPEfux5AVICCkjaSjm4iWVmyPsWESCYeO5lhRsYgE8rP27Mn6+AtjA1uqk6SC9C0uXpjppQiiw7lsuYzZBhgCbkS61EtN6KITRP6pSDUAUXtJseWhCQT/Kc7PvQSgvVQqhUtL/y+xyCs2ljFwSPfYz8LveB2TMnSDNQfpZtRtvXMyoKLg5pDxBbTDN7Csf8pFFVyP8iAB678QaKJgGgYEFFcql6n9IIfSfjB+DApNGIdi+VurJb93rVixjKrOOBattJfV1WkbryEDf6osQLjOUAje7sqiO1kS8LGXw5aVu52FmbqMnYVmtpQDi8P4VOlkfal6NOiSZtLMaer+aLdigQQ91TZh/OxzJCAwulklzRZpqBVCZJTeuLi/3A/5hn4h7P/RJSaihaB2ebbzKwfGwNnVOPIM29IzwzF5tdg/XT7zRbsEgQyYPQwQALM=";
 
 pub enum ModelProvider {
-    Ollama { base_url: String },
+    Ollama {
+        base_url: String,
+    },
     #[allow(dead_code)]
-    OpenAI { api_key: String, base_url: Option<String> },
+    OpenAI {
+        api_key: String,
+        base_url: Option<String>,
+    },
     #[allow(dead_code)]
-    Gemini { api_key: String },
+    Gemini {
+        api_key: String,
+    },
     #[allow(dead_code)]
-    MLX { base_url: Option<String> },
+    MLX {
+        base_url: Option<String>,
+    },
 }
 
 pub struct TempestAiBridge {
@@ -43,15 +52,17 @@ impl TempestAiBridge {
             ModelProvider::Ollama { base_url } => base_url.clone(),
             ModelProvider::OpenAI { api_key, base_url } => {
                 auth_token = Some(api_key.clone());
-                base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+                base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
             }
             ModelProvider::Gemini { api_key } => {
                 auth_token = Some(api_key.clone());
                 "https://generativelanguage.googleapis.com/v1beta/openai/".to_string()
             }
-            ModelProvider::MLX { base_url } => {
-                base_url.clone().unwrap_or_else(|| "http://localhost:8000/v1".to_string())
-            }
+            ModelProvider::MLX { base_url } => base_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:8000/v1".to_string()),
         };
 
         let req_client = reqwest::Client::new();
@@ -66,9 +77,13 @@ impl TempestAiBridge {
     }
 
     #[allow(dead_code)]
-    pub async fn chat(&self, messages: Vec<ollama_rs::generation::chat::ChatMessage>, tools: Option<Vec<ollama_rs::generation::tools::ToolInfo>>) -> Result<String> {
+    pub async fn chat(
+        &self,
+        messages: Vec<ollama_rs::generation::chat::ChatMessage>,
+        tools: Option<Vec<ollama_rs::generation::tools::ToolInfo>>,
+    ) -> Result<String> {
         let serialized_messages = serialize_chat_messages(&messages, &self.raw_history);
-        
+
         let mut body = serde_json::json!({
             "messages": serialized_messages,
             "stream": false,
@@ -92,13 +107,13 @@ impl TempestAiBridge {
         for model in &self.models {
             let mut body_for_model = body.clone();
             body_for_model["model"] = serde_json::json!(model.clone());
-            
+
             let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
             let mut req = self.reqwest_client.post(url).json(&body_for_model);
             if let Some(token) = &self.auth_token {
                 req = req.bearer_auth(token);
             }
-            
+
             match req.send().await {
                 Ok(response) => {
                     if !response.status().is_success() {
@@ -108,19 +123,21 @@ impl TempestAiBridge {
                         continue;
                     }
 
-                    let json: serde_json::Value = response.json().await
+                    let json: serde_json::Value = response
+                        .json()
+                        .await
                         .map_err(|e| miette!("Failed to parse chat response: {}", e))?;
-                    
+
                     let content = json["choices"][0]["message"]["content"]
                         .as_str()
                         .unwrap_or("")
                         .to_string();
-                    
+
                     if content.is_empty() {
                         errors.push(format!("Model '{}': No content in response", model));
                         continue;
                     }
-                    
+
                     return Ok(content);
                 }
                 Err(e) => {
@@ -129,18 +146,25 @@ impl TempestAiBridge {
                 }
             }
         }
-        
+
         let err_msg = if errors.is_empty() {
             "AI Bridge failed: No models configured or available".to_string()
         } else {
-            format!("AI Bridge failed to send chat. Attempted models:\n- {}", errors.join("\n- "))
+            format!(
+                "AI Bridge failed to send chat. Attempted models:\n- {}",
+                errors.join("\n- ")
+            )
         };
         Err(miette!(err_msg))
     }
 
-    pub async fn stream_chat(&self, messages: Vec<ollama_rs::generation::chat::ChatMessage>, tools: Option<Vec<ollama_rs::generation::tools::ToolInfo>>) -> Result<Pin<Box<dyn Stream<Item = Result<serde_json::Value, miette::Report>> + Send>>> {
+    pub async fn stream_chat(
+        &self,
+        messages: Vec<ollama_rs::generation::chat::ChatMessage>,
+        tools: Option<Vec<ollama_rs::generation::tools::ToolInfo>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<serde_json::Value, miette::Report>> + Send>>> {
         let serialized_messages = serialize_chat_messages(&messages, &self.raw_history);
-        
+
         let mut body = serde_json::json!({
             "messages": serialized_messages,
             "stream": true,
@@ -164,13 +188,13 @@ impl TempestAiBridge {
         for model in &self.models {
             let mut body_for_model = body.clone();
             body_for_model["model"] = serde_json::json!(model.clone());
-            
+
             let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
             let mut req = self.reqwest_client.post(url).json(&body_for_model);
             if let Some(token) = &self.auth_token {
                 req = req.bearer_auth(token);
             }
-            
+
             let send_result = req.send().await;
             match send_result {
                 Ok(response) => {
@@ -189,7 +213,7 @@ impl TempestAiBridge {
                         use futures::StreamExt;
                         let mut stream = stream;
                         let mut in_thought = false;
-                        
+
                         let mut accumulated_content = String::new();
                         let mut accumulated_reasoning = String::new();
                         let mut accumulated_tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -392,11 +416,14 @@ impl TempestAiBridge {
                 }
             }
         }
-        
+
         let err_msg = if errors.is_empty() {
             "AI Bridge failed: No models configured or available".to_string()
         } else {
-            format!("AI Bridge failed to stream chat. Attempted models:\n- {}", errors.join("\n- "))
+            format!(
+                "AI Bridge failed to stream chat. Attempted models:\n- {}",
+                errors.join("\n- ")
+            )
         };
         Err(miette!(err_msg))
     }
@@ -409,12 +436,12 @@ impl TempestAiBridge {
                 "model": model,
                 "input": [text.clone()],
             });
-            
+
             let mut req = self.reqwest_client.post(&url).json(&body);
             if let Some(token) = &self.auth_token {
                 req = req.bearer_auth(token);
             }
-            
+
             match req.send().await {
                 Ok(response) => {
                     if !response.status().is_success() {
@@ -424,29 +451,43 @@ impl TempestAiBridge {
                         continue;
                     }
 
-                    let json: serde_json::Value = response.json().await
+                    let json: serde_json::Value = response
+                        .json()
+                        .await
                         .map_err(|e| miette!("Failed to parse embeddings response: {}", e))?;
-                    
+
                     if let Some(data) = json["data"].as_array().and_then(|a| a.first())
                         && let Some(embedding) = data["embedding"].as_array()
                     {
-                        return Ok(embedding.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect());
+                        return Ok(embedding
+                            .iter()
+                            .filter_map(|v| v.as_f64().map(|f| f as f32))
+                            .collect());
                     }
-                    
-                    errors.push(format!("Model '{}': Invalid embeddings response format", model));
+
+                    errors.push(format!(
+                        "Model '{}': Invalid embeddings response format",
+                        model
+                    ));
                     continue;
                 }
                 Err(e) => {
-                    errors.push(format!("Model '{}': Embeddings request error - {}", model, e));
+                    errors.push(format!(
+                        "Model '{}': Embeddings request error - {}",
+                        model, e
+                    ));
                     continue;
                 }
             }
         }
-        
+
         let err_msg = if errors.is_empty() {
             "AI Bridge embeddings failed: No models configured or available".to_string()
         } else {
-            format!("AI Bridge embeddings failed. Attempted models:\n- {}", errors.join("\n- "))
+            format!(
+                "AI Bridge embeddings failed. Attempted models:\n- {}",
+                errors.join("\n- ")
+            )
         };
         Err(miette!(err_msg))
     }
@@ -485,9 +526,16 @@ fn merge_tool_call(acc: &mut serde_json::Value, delta: &serde_json::Value) {
             acc_func.insert("name".to_string(), name.clone());
         }
         if let Some(args_delta) = func_delta.get("arguments").and_then(|a| a.as_str()) {
-            let mut current_args = acc_func.get("arguments").and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let mut current_args = acc_func
+                .get("arguments")
+                .and_then(|a| a.as_str())
+                .unwrap_or("")
+                .to_string();
             current_args.push_str(args_delta);
-            acc_func.insert("arguments".to_string(), serde_json::Value::String(current_args));
+            acc_func.insert(
+                "arguments".to_string(),
+                serde_json::Value::String(current_args),
+            );
         }
     }
 }
@@ -519,14 +567,19 @@ fn is_retrieved_context_system_msg(val: &serde_json::Value) -> bool {
 
 fn is_retrieved_context_chat_msg(msg: &ollama_rs::generation::chat::ChatMessage) -> bool {
     if msg.role == ollama_rs::generation::chat::MessageRole::System
-        && msg.content.starts_with("### [RETRIEVED HISTORICAL CONTEXT]")
+        && msg
+            .content
+            .starts_with("### [RETRIEVED HISTORICAL CONTEXT]")
     {
         return true;
     }
     false
 }
 
-fn messages_match(raw_msg: &serde_json::Value, chat_msg: &ollama_rs::generation::chat::ChatMessage) -> bool {
+fn messages_match(
+    raw_msg: &serde_json::Value,
+    chat_msg: &ollama_rs::generation::chat::ChatMessage,
+) -> bool {
     let raw_role = match raw_msg.get("role").and_then(|r| r.as_str()) {
         Some(r) => r,
         None => return false,
@@ -536,12 +589,21 @@ fn messages_match(raw_msg: &serde_json::Value, chat_msg: &ollama_rs::generation:
         return false;
     }
     if target == "user" {
-        let raw_content = raw_msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        if raw_content != chat_msg.content && !raw_content.ends_with(&chat_msg.content) && !chat_msg.content.ends_with(raw_content) {
+        let raw_content = raw_msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        if raw_content != chat_msg.content
+            && !raw_content.ends_with(&chat_msg.content)
+            && !chat_msg.content.ends_with(raw_content)
+        {
             return false;
         }
     } else if target == "tool" {
-        let raw_content = raw_msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let raw_content = raw_msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
         if raw_content != chat_msg.content {
             return false;
         }
@@ -558,7 +620,7 @@ fn serialize_chat_messages(
     // 1. Align raw_hist based on messages using a suffix search with two pointers.
     let mut best_offset = raw_hist.len();
     let mut best_msg_idx = 0;
-    
+
     for offset in 0..=raw_hist.len() {
         let mut p_raw = offset;
         let mut p_msg = 0;
@@ -621,15 +683,18 @@ fn serialize_chat_messages(
                 p_msg += 1;
                 continue;
             }
-            
+
             let role = raw_hist[p_raw].get("role").and_then(|r| r.as_str());
             if role == Some("system") {
                 raw_hist[p_raw]["content"] = serde_json::json!(messages[p_msg].content);
             } else if role == Some("assistant")
-                && let Some(tool_calls) = raw_hist[p_raw].get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
+                && let Some(tool_calls) = raw_hist[p_raw]
+                    .get_mut("tool_calls")
+                    .and_then(|tc| tc.as_array_mut())
             {
                 for tc in tool_calls {
-                    let has_sig = tc.get("extra_content")
+                    let has_sig = tc
+                        .get("extra_content")
                         .and_then(|ec| ec.get("google"))
                         .and_then(|g| g.get("thought_signature"))
                         .is_some();
@@ -642,7 +707,7 @@ fn serialize_chat_messages(
                     }
                 }
             }
-            
+
             p_raw += 1;
             p_msg += 1;
         }
@@ -667,7 +732,9 @@ fn serialize_chat_messages(
             }
         } else if role == "tool"
             && let Some(tool_call_id) = val.get("tool_call_id").and_then(|id| id.as_str())
-            && let Some(pos) = unmatched_calls.iter().position(|tc| tc.get("id").and_then(|id| id.as_str()) == Some(tool_call_id))
+            && let Some(pos) = unmatched_calls
+                .iter()
+                .position(|tc| tc.get("id").and_then(|id| id.as_str()) == Some(tool_call_id))
         {
             unmatched_calls.remove(pos);
         }
@@ -680,12 +747,15 @@ fn serialize_chat_messages(
                 let mut is_tool_result = false;
                 if let Some(tool_name) = parse_tool_name_from_system_msg(&msg.content)
                     && let Some(pos) = unmatched_calls.iter().rposition(|tc| {
-                        tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) == Some(&tool_name)
+                        tc.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            == Some(&tool_name)
                     })
                 {
                     let tc = unmatched_calls.remove(pos);
                     let call_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("");
-                    
+
                     raw_hist.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -694,7 +764,7 @@ fn serialize_chat_messages(
                     }));
                     is_tool_result = true;
                 }
-                
+
                 if !is_tool_result {
                     raw_hist.push(serde_json::json!({
                         "role": "system",
@@ -724,15 +794,15 @@ fn serialize_chat_messages(
                     for call in &msg.tool_calls {
                         call_counter += 1;
                         let call_id = format!("call_{}", call_counter);
-                        
+
                         let mut name = call.function.name.clone();
                         if let Some(stripped) = name.strip_prefix("__idx_")
                             && let Some(end) = stripped.find("__")
                         {
                             let absolute_end = 6 + end;
-                            name = name[absolute_end+2..].to_string();
+                            name = name[absolute_end + 2..].to_string();
                         }
-                        
+
                         let tc_json = serde_json::json!({
                             "id": call_id,
                             "type": "function",
@@ -758,7 +828,10 @@ fn serialize_chat_messages(
                 let mut matched_call_id = None;
                 if !unmatched_calls.is_empty() {
                     let tc = unmatched_calls.remove(0);
-                    matched_call_id = tc.get("id").and_then(|id| id.as_str()).map(|s| s.to_string());
+                    matched_call_id = tc
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .map(|s| s.to_string());
                 }
 
                 let call_id = matched_call_id.unwrap_or_else(|| {
@@ -808,7 +881,7 @@ mod tests {
             ChatMessage::new(MessageRole::System, "Initial System Prompt".to_string()),
             ChatMessage::new(MessageRole::User, "Hello".to_string()),
         ];
-        
+
         let serialized = serialize_chat_messages(&messages, &raw_history);
         assert_eq!(serialized.len(), 2);
         assert_eq!(serialized[0]["role"], "system");
@@ -843,14 +916,12 @@ mod tests {
 
         // The agent appends the assistant message to messages list (simplified form)
         let mut assistant_msg = ChatMessage::new(MessageRole::Assistant, "".to_string());
-        assistant_msg.tool_calls = vec![
-            ToolCall {
-                function: ToolCallFunction {
-                    name: "run_command".to_string(),
-                    arguments: serde_json::json!({"command":"ls"}),
-                }
-            }
-        ];
+        assistant_msg.tool_calls = vec![ToolCall {
+            function: ToolCallFunction {
+                name: "run_command".to_string(),
+                arguments: serde_json::json!({"command":"ls"}),
+            },
+        }];
         messages.push(assistant_msg);
 
         // And then the agent executes the tool and appends the system observation
@@ -866,30 +937,44 @@ mod tests {
         // Serialize the full history:
         let serialized = serialize_chat_messages(&messages, &raw_history);
         assert_eq!(serialized.len(), 4);
-        
+
         // Assertions:
         assert_eq!(serialized[0]["role"], "system");
-        assert_eq!(serialized[0]["content"], "Updated System Prompt with Runway Report"); // Verified prompt drift updated
+        assert_eq!(
+            serialized[0]["content"],
+            "Updated System Prompt with Runway Report"
+        ); // Verified prompt drift updated
 
         assert_eq!(serialized[1]["role"], "user");
-        
+
         assert_eq!(serialized[2]["role"], "assistant");
         assert_eq!(serialized[2]["tool_calls"][0]["id"], original_call_id);
-        assert_eq!(serialized[2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "cryptosig456");
+        assert_eq!(
+            serialized[2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "cryptosig456"
+        );
 
         assert_eq!(serialized[3]["role"], "tool");
         assert_eq!(serialized[3]["tool_call_id"], original_call_id);
         assert_eq!(serialized[3]["name"], "run_command");
-        assert!(serialized[3]["content"].as_str().unwrap().contains("file1.txt"));
+        assert!(
+            serialized[3]["content"]
+                .as_str()
+                .unwrap()
+                .contains("file1.txt")
+        );
 
         // Simulate history compaction (truncating the first two messages: system and user)
         messages.remove(0); // remove system prompt
         messages.remove(0); // remove user message
         let compacted_serialized = serialize_chat_messages(&messages, &raw_history);
-        
+
         assert_eq!(compacted_serialized.len(), 2);
         assert_eq!(compacted_serialized[0]["role"], "assistant");
-        assert_eq!(compacted_serialized[0]["tool_calls"][0]["id"], original_call_id);
+        assert_eq!(
+            compacted_serialized[0]["tool_calls"][0]["id"],
+            original_call_id
+        );
         assert_eq!(compacted_serialized[1]["role"], "tool");
         assert_eq!(compacted_serialized[1]["tool_call_id"], original_call_id);
     }
@@ -903,22 +988,23 @@ mod tests {
             ChatMessage::new(MessageRole::User, "Hello".to_string()),
             {
                 let mut assistant_msg = ChatMessage::new(MessageRole::Assistant, "".to_string());
-                assistant_msg.tool_calls = vec![
-                    ToolCall {
-                        function: ToolCallFunction {
-                            name: "__idx_0__read_file".to_string(),
-                            arguments: serde_json::json!({"path":"foo.txt"}),
-                        }
-                    }
-                ];
+                assistant_msg.tool_calls = vec![ToolCall {
+                    function: ToolCallFunction {
+                        name: "__idx_0__read_file".to_string(),
+                        arguments: serde_json::json!({"path":"foo.txt"}),
+                    },
+                }];
                 assistant_msg
-            }
+            },
         ];
 
         let serialized = serialize_chat_messages(&messages, &raw_history);
         assert_eq!(serialized.len(), 3);
         assert_eq!(serialized[2]["role"], "assistant");
-        assert_eq!(serialized[2]["tool_calls"][0]["function"]["name"], "read_file");
+        assert_eq!(
+            serialized[2]["tool_calls"][0]["function"]["name"],
+            "read_file"
+        );
     }
 
     #[test]
@@ -962,7 +1048,7 @@ mod tests {
         ];
 
         let serialized_turn2 = serialize_chat_messages(&messages_turn2, &raw_history);
-        
+
         // Suffix alignment should match and preserve all of raw_history (including the assistant signature if any).
         // Let's verify that the new message is appended.
         assert_eq!(serialized_turn2.len(), 5); // system prompt, retrieved context, decorated user, assistant, new user
@@ -975,11 +1061,15 @@ mod tests {
     #[test]
     fn test_mlx_provider_url() {
         let provider_default = ModelProvider::MLX { base_url: None };
-        let bridge_default = TempestAiBridge::new(provider_default, vec!["mlx-model".to_string()]).unwrap();
+        let bridge_default =
+            TempestAiBridge::new(provider_default, vec!["mlx-model".to_string()]).unwrap();
         assert_eq!(bridge_default.base_url, "http://localhost:8000/v1");
 
-        let provider_custom = ModelProvider::MLX { base_url: Some("http://127.0.0.1:8080/v1".to_string()) };
-        let bridge_custom = TempestAiBridge::new(provider_custom, vec!["mlx-model".to_string()]).unwrap();
+        let provider_custom = ModelProvider::MLX {
+            base_url: Some("http://127.0.0.1:8080/v1".to_string()),
+        };
+        let bridge_custom =
+            TempestAiBridge::new(provider_custom, vec!["mlx-model".to_string()]).unwrap();
         assert_eq!(bridge_custom.base_url, "http://127.0.0.1:8080/v1");
     }
 }

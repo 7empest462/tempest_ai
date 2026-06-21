@@ -17,7 +17,7 @@
 //! - The full toolbox remains discoverable via `query_schema`
 
 use miette::{Result, miette};
-use ollama_rs::generation::tools::{ToolInfo, ToolType, ToolFunctionInfo};
+use ollama_rs::generation::tools::{ToolFunctionInfo, ToolInfo, ToolType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,11 +71,12 @@ pub struct ToolVectorIndex {
 }
 
 fn tool_dyn_to_info(tool: &dyn skg_tool::ToolDyn) -> ToolInfo {
-    let parameters: schemars::Schema = serde_json::from_value(tool.input_schema()).unwrap_or_else(|_| {
-        let mut settings = schemars::generate::SchemaSettings::draft07();
-        settings.inline_subschemas = true;
-        settings.into_generator().into_root_schema_for::<()>()
-    });
+    let parameters: schemars::Schema =
+        serde_json::from_value(tool.input_schema()).unwrap_or_else(|_| {
+            let mut settings = schemars::generate::SchemaSettings::draft07();
+            settings.inline_subschemas = true;
+            settings.into_generator().into_root_schema_for::<()>()
+        });
     ToolInfo {
         tool_type: ToolType::Function,
         function: ToolFunctionInfo {
@@ -100,7 +101,8 @@ impl ToolVectorIndex {
     ) -> Result<Self> {
         let mut entries = Vec::with_capacity(tools.len());
         let mut always_on = HashMap::new();
-        let all_tool_infos: Vec<ToolInfo> = tools.iter().map(|t| tool_dyn_to_info(t.as_ref())).collect();
+        let all_tool_infos: Vec<ToolInfo> =
+            tools.iter().map(|t| tool_dyn_to_info(t.as_ref())).collect();
 
         // Notify the TUI that we're building the tool index
         if let Some(tx) = event_tx.lock().clone() {
@@ -181,7 +183,8 @@ impl ToolVectorIndex {
     }
 
     pub fn build_fallback(tools: &[Arc<dyn skg_tool::ToolDyn>]) -> Self {
-        let all_tool_infos: Vec<ToolInfo> = tools.iter().map(|t| tool_dyn_to_info(t.as_ref())).collect();
+        let all_tool_infos: Vec<ToolInfo> =
+            tools.iter().map(|t| tool_dyn_to_info(t.as_ref())).collect();
         let mut always_on = HashMap::new();
         for tool in tools {
             if ALWAYS_ON_TOOLS.contains(&tool.name()) {
@@ -280,30 +283,29 @@ async fn generate_tool_embedding(
     text: &str,
 ) -> Result<Vec<f32>> {
     match backend {
-        crate::inference::Backend::Ollama(ollama) => {
+        crate::inference::Backend::Ollama(ollama, embedding_model) => {
             let req = ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                TOOL_RAG_EMBEDDING_MODEL.to_string(),
+                embedding_model.clone(),
                 text.to_string().into(),
             );
-            let res = ollama.generate_embeddings(req).await.map_err(|e| {
-                miette!(
-                    "Tool RAG embedding failed ({}): {}",
-                    TOOL_RAG_EMBEDDING_MODEL,
-                    e
-                )
-            })?;
+            let res = ollama
+                .generate_embeddings(req)
+                .await
+                .map_err(|e| miette!("Tool RAG embedding failed ({}): {}", embedding_model, e))?;
             Ok(res.embeddings.first().cloned().unwrap_or_default())
         }
         #[cfg(target_os = "macos")]
         crate::inference::Backend::MLX {
-            ollama_fallback, ..
+            ollama_fallback,
+            embedding_model,
+            ..
         } => {
             // MLX embedder uses all-minilm natively, so for Tool RAG we prefer
-            // the Ollama fallback which can route to nomic-embed-text
+            // the Ollama fallback which can route to the configured embedding model
             if let Some(ollama) = ollama_fallback {
                 let req =
                     ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                        TOOL_RAG_EMBEDDING_MODEL.to_string(),
+                        embedding_model.clone(),
                         text.to_string().into(),
                     );
                 let res = ollama
@@ -314,7 +316,7 @@ async fn generate_tool_embedding(
             } else {
                 Err(miette!(
                     "Tool RAG requires Ollama for {} embeddings (no fallback available)",
-                    TOOL_RAG_EMBEDDING_MODEL
+                    embedding_model
                 ))
             }
         }

@@ -20,9 +20,13 @@ fn make_mock_context() -> ToolContext {
 
     ToolContext {
         ollama: Ollama::default(),
-        backend: Arc::new(RwLock::new(Backend::Ollama(Ollama::default()))),
+        backend: Arc::new(RwLock::new(Backend::Ollama(
+            Ollama::default(),
+            "mxbai-embed-large".to_string(),
+        ))),
         model: "test".to_string(),
         sub_agent_model: "test".to_string(),
+        embedding_model: "mxbai-embed-large".to_string(),
         history: Arc::new(Mutex::new(vec![])),
         task_context: Arc::new(Mutex::new("test".to_string())),
         vector_brain: Arc::new(Mutex::new(VectorBrain::new())),
@@ -34,7 +38,9 @@ fn make_mock_context() -> ToolContext {
         is_root: Arc::new(AtomicBool::new(false)),
         all_tools: vec![],
         checkpoint_mgr: Arc::new(Mutex::new(CheckpointManager::new(10))),
-        memory_store: Arc::new(Mutex::new(tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap())),
+        memory_store: Arc::new(Mutex::new(
+            tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap(),
+        )),
     }
 }
 

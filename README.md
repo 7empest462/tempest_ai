@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.6` — "Command Center"
+# 🌪️ Tempest AI `v0.3.7` — "Command Center"
 
 [![Download Latest Release](https://img.shields.io/badge/Download-Latest%20Release-blue?style=for-the-badge&logo=github)](https://github.com/7empest462/tempest_ai/releases/latest)
 
@@ -12,7 +12,11 @@
 
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
-Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." With the v0.3.5 release, Tempest introduces **Google Gemini API Support** via the AI Bridge, **Smart 503 Fallback Routing**, **Semantic Compaction** for infinite context limits, and the **Agent Client Protocol (ACP)** for spawning parallel asynchronous sub-agents.
+Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer." The latest **v0.3.7** release introduces:
+- **🎨 WebGPU Neon Vortex Dashboard**: Hardware-accelerated fluid-neon visual animations directly in your browser or editor sidebar via WebGPU/WebGL auto-negotiation, built-in panic boundaries, and background layout safety.
+- **⚡ Sandboxed WASM Compiler Caching**: Zero-overhead execution of local WASM tools via Wasmtime compiler caching and direct instantiation, bypassing expensive runtime Linker allocations.
+- **🛡️ Physical RAM Guards & Safety Nets**: Dynamic 90% physical VRAM checks, localized process-level CPU/RAM metrics monitoring, and destructive file override protection guards to shield your workspace.
+- **🔌 Model Context Protocol (MCP)**: Native integration with external tools and asynchronous sub-agent delegation via the Agent Client Protocol (ACP).
 
 ---
 

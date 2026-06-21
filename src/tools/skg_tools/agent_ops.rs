@@ -3,10 +3,10 @@
 // ==========================================
 // Replaces the legacy AgentTool agent_ops tools.
 
+use colored::Colorize;
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use ollama_rs::generation::chat::{ChatMessage, MessageRole};
-use colored::Colorize;
 
 // ── ask_user ───────────────────────────────────────────────────────────────────
 
@@ -36,12 +36,21 @@ pub async fn ask_user(
         if let Some(rx) = rx_lock.as_mut() {
             match rx.recv().await {
                 Some(crate::tui::ToolResponse::Text(ans)) => {
-                    return Ok(serde_json::Value::String(format!("User responded: {}", ans)));
+                    return Ok(serde_json::Value::String(format!(
+                        "User responded: {}",
+                        ans
+                    )));
                 }
-                _ => return Err(ToolError::ExecutionFailed("User cancelled input.".to_string())),
+                _ => {
+                    return Err(ToolError::ExecutionFailed(
+                        "User cancelled input.".to_string(),
+                    ));
+                }
             }
         } else {
-            return Err(ToolError::ExecutionFailed("No live TUI input channel configured.".to_string()));
+            return Err(ToolError::ExecutionFailed(
+                "No live TUI input channel configured.".to_string(),
+            ));
         }
     }
 
@@ -59,12 +68,19 @@ pub async fn ask_user(
     if io::stdin().read_line(&mut input).is_ok() {
         let ans = input.trim().to_string();
         if ans.is_empty() {
-            Ok(serde_json::Value::String("User provided an empty response.".to_string()))
+            Ok(serde_json::Value::String(
+                "User provided an empty response.".to_string(),
+            ))
         } else {
-            Ok(serde_json::Value::String(format!("User responded: {}", ans)))
+            Ok(serde_json::Value::String(format!(
+                "User responded: {}",
+                ans
+            )))
         }
     } else {
-        Err(ToolError::ExecutionFailed("Failed to read input from terminal.".to_string()))
+        Err(ToolError::ExecutionFailed(
+            "Failed to read input from terminal.".to_string(),
+        ))
     }
 }
 
@@ -148,7 +164,10 @@ pub async fn spawn_sub_agent(
             "[SUB-AGENT ACP REPORT]: {}",
             res.content
         ))),
-        Err(e) => Err(ToolError::ExecutionFailed(format!("Sub-agent error: {}", e))),
+        Err(e) => Err(ToolError::ExecutionFailed(format!(
+            "Sub-agent error: {}",
+            e
+        ))),
     }
 }
 
@@ -178,7 +197,9 @@ pub async fn update_task_context(
             .await;
     }
 
-    Ok(serde_json::Value::String("Task context successfully updated.".to_string()))
+    Ok(serde_json::Value::String(
+        "Task context successfully updated.".to_string(),
+    ))
 }
 
 // ── query_schema ───────────────────────────────────────────────────────────────
@@ -196,7 +217,11 @@ pub async fn query_schema(
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
 
     if let Some(target) = tool_name {
-        if let Some(info) = tool_ctx.all_tools.iter().find(|t| t.function.name == target) {
+        if let Some(info) = tool_ctx
+            .all_tools
+            .iter()
+            .find(|t| t.function.name == target)
+        {
             return Ok(serde_json::Value::String(format!(
                 "Full Tool Schema for {}:\n{}",
                 target,
@@ -216,7 +241,9 @@ pub async fn query_schema(
             tool.function.name, tool.function.description
         ));
     }
-    summary.push_str("\nUse query_schema(tool_name: \"name\") for detailed JSON parameters of a specific tool.");
+    summary.push_str(
+        "\nUse query_schema(tool_name: \"name\") for detailed JSON parameters of a specific tool.",
+    );
     Ok(serde_json::Value::String(summary))
 }
 

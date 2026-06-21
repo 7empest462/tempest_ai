@@ -34,7 +34,11 @@ pub async fn edit_file_with_diff(
             })?;
         }
         std::fs::write(&path_buf, &content_for_write).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to write file {}: {}", path_buf.display(), e))
+            ToolError::ExecutionFailed(format!(
+                "Failed to write file {}: {}",
+                path_buf.display(),
+                e
+            ))
         })?;
         Ok(())
     })
@@ -79,7 +83,11 @@ pub async fn multi_edit(
         let path_clone = path_buf.clone();
         move || {
             std::fs::read_to_string(&path_clone).map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to read file {}: {}", path_clone.display(), e))
+                ToolError::ExecutionFailed(format!(
+                    "Failed to read file {}: {}",
+                    path_clone.display(),
+                    e
+                ))
             })
         }
     })
@@ -98,7 +106,11 @@ pub async fn multi_edit(
             })?;
         }
         std::fs::write(&path_clone, &content_for_write).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to write file {}: {}", path_clone.display(), e))
+            ToolError::ExecutionFailed(format!(
+                "Failed to write file {}: {}",
+                path_clone.display(),
+                e
+            ))
         })?;
         Ok(())
     })
@@ -118,4 +130,3 @@ pub async fn multi_edit(
         path_owned
     )))
 }
-

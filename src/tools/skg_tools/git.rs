@@ -3,9 +3,9 @@
 // ==========================================
 // Replaces the legacy AgentTool git tools.
 
+use super::execution::run_command;
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use super::execution::run_command;
 
 // ── git_status ─────────────────────────────────────────────────────────────────
 
@@ -13,15 +13,15 @@ use super::execution::run_command;
     name = "git_status",
     description = "Lists all changed and untracked files in the current repository."
 )]
-pub async fn git_status(
-    ctx: &ToolCallContext,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn git_status(ctx: &ToolCallContext) -> Result<serde_json::Value, ToolError> {
     let out = run_command("git status -s".to_string(), None, Some(30), ctx).await?;
-    
+
     if let Some(out_str) = out.as_str()
         && (out_str.contains("clean") || out_str.trim().is_empty())
     {
-        return Ok(serde_json::Value::String("No changes detected.".to_string()));
+        return Ok(serde_json::Value::String(
+            "No changes detected.".to_string(),
+        ));
     }
     Ok(out)
 }
@@ -53,11 +53,11 @@ pub async fn git_commit(
 ) -> Result<serde_json::Value, ToolError> {
     // Stage all changes
     let _ = run_command("git add .".to_string(), None, Some(30), ctx).await?;
-    
+
     // Escape single quotes for shell execution
     let safe_message = message.replace("'", "'\\''");
     let cmd = format!("git commit -m '{}'", safe_message);
-    
+
     run_command(cmd, None, Some(30), ctx).await
 }
 

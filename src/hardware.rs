@@ -25,7 +25,7 @@ impl AgentTool for LinuxProcessAnalyzerTool {
         "linux_process_analyzer"
     }
     fn description(&self) -> &'static str {
-        "CRITICAL: NVIDIA ONLY. Read detailed process memory maps, IO counters, and thread counts directly from the Linux kernel. DO NOT USE ON MACOS. If you are on a Mac, use `system_diagnostic_scan` to see GPU stats."
+        "Read detailed process memory usage, IO counters, and thread counts directly from the Linux kernel procfs directory. DO NOT USE ON MACOS or Windows."
     }
 
     fn tool_info(&self) -> ToolInfo {
@@ -283,10 +283,12 @@ impl AgentTool for TelemetryChartTool {
             min_y -= 1.0;
         }
 
-        let path = format!(
-            "/tmp/tempest_chart_{}.png",
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push(format!(
+            "tempest_chart_{}.png",
             chrono::Local::now().format("%H%M%S")
-        );
+        ));
+        let path = temp_path.to_string_lossy().to_string();
 
         use plotters::prelude::*;
         let root = BitMapBackend::new(&path, (800, 600)).into_drawing_area();

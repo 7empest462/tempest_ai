@@ -2,9 +2,9 @@
 // 🛡️ SKG THREAT SCANNER TOOL — Native Skelegent Implementations
 // ==========================================
 
+use sha2::{Digest, Sha256};
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -28,15 +28,11 @@ pub async fn threat_scan(
     let t_type = target_type.to_lowercase();
 
     let report = match t_type.as_str() {
-        "file" => {
-            scan_file_target(target_path.as_deref()).await?
-        }
+        "file" => scan_file_target(target_path.as_deref()).await?,
         "directory" => {
             scan_directory_target(target_path.as_deref(), deep_scan.unwrap_or(false)).await?
         }
-        "process" => {
-            scan_process_target(target_path.as_deref()).await?
-        }
+        "process" => scan_process_target(target_path.as_deref()).await?,
         _ => {
             return Err(ToolError::ExecutionFailed(format!(
                 "Invalid target_type '{}'. Supported: 'file', 'directory', 'process'",
@@ -54,7 +50,8 @@ fn compute_sha256(path: &Path) -> Result<String, ToolError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 8192];
     loop {
-        let n = file.read(&mut buffer)
+        let n = file
+            .read(&mut buffer)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
         if n == 0 {
             break;
@@ -101,9 +98,7 @@ fn scan_content_heuristics(path: &Path, content: &str) -> Vec<&'static str> {
     }
     if content.contains("socket.socket")
         && (content.contains("connect(") || content.contains("send("))
-        && (content.contains("exec")
-            || content.contains("subprocess")
-            || content.contains("dup2"))
+        && (content.contains("exec") || content.contains("subprocess") || content.contains("dup2"))
     {
         alarms.push("Socket command executor loop (Reverse shell spawner)");
     }
@@ -115,14 +110,22 @@ fn scan_content_heuristics(path: &Path, content: &str) -> Vec<&'static str> {
 }
 
 async fn scan_file_target(path_str: Option<&str>) -> Result<String, ToolError> {
-    let path_raw = path_str.ok_or_else(|| ToolError::ExecutionFailed("'target_path' is required for file scans".to_string()))?;
+    let path_raw = path_str.ok_or_else(|| {
+        ToolError::ExecutionFailed("'target_path' is required for file scans".to_string())
+    })?;
     let path = Path::new(path_raw);
 
     if !path.exists() {
-        return Err(ToolError::ExecutionFailed(format!("Target file path '{}' does not exist.", path_raw)));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Target file path '{}' does not exist.",
+            path_raw
+        )));
     }
     if !path.is_file() {
-        return Err(ToolError::ExecutionFailed(format!("Target path '{}' is not a file.", path_raw)));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Target path '{}' is not a file.",
+            path_raw
+        )));
     }
 
     let hash = compute_sha256(path)?;
@@ -177,21 +180,31 @@ async fn scan_file_target(path_str: Option<&str>) -> Result<String, ToolError> {
             report.push_str("2. **Refactor Code**: Avoid using raw shell redirection commands or raw PTY spawners.\n");
         }
     } else {
-        report.push_str("✅ No threat indicators or matching signatures were found. This file is clean.\n");
+        report.push_str(
+            "✅ No threat indicators or matching signatures were found. This file is clean.\n",
+        );
     }
 
     Ok(report)
 }
 
 async fn scan_directory_target(path_str: Option<&str>, deep: bool) -> Result<String, ToolError> {
-    let path_raw = path_str.ok_or_else(|| ToolError::ExecutionFailed("'target_path' is required for directory scans".to_string()))?;
+    let path_raw = path_str.ok_or_else(|| {
+        ToolError::ExecutionFailed("'target_path' is required for directory scans".to_string())
+    })?;
     let path = Path::new(path_raw);
 
     if !path.exists() {
-        return Err(ToolError::ExecutionFailed(format!("Target directory path '{}' does not exist.", path_raw)));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Target directory path '{}' does not exist.",
+            path_raw
+        )));
     }
     if !path.is_dir() {
-        return Err(ToolError::ExecutionFailed(format!("Target path '{}' is not a directory.", path_raw)));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Target path '{}' is not a directory.",
+            path_raw
+        )));
     }
 
     let mut files_to_scan = Vec::new();
@@ -388,7 +401,10 @@ async fn scan_process_target(filter: Option<&str>) -> Result<String, ToolError> 
         report.push_str("\n### 🛠️ Incident Containment Plan\n");
         report.push_str("1. **Kill Hostile Process**: Kill suspicious processes immediately using the `kill_process` tool:\n");
         for (pid, name, _, _, _) in &threat_procs {
-            report.push_str(&format!("   - `kill_process(pid: \"{}\", signal: \"KILL\")` to terminate hostile `{}`\n", pid, name));
+            report.push_str(&format!(
+                "   - `kill_process(pid: \"{}\", signal: \"KILL\")` to terminate hostile `{}`\n",
+                pid, name
+            ));
         }
         report.push_str("2. **Isolate Socket**: Check open ports using `list_network_sockets` and filter by the suspicious PIDs.\n");
     } else {

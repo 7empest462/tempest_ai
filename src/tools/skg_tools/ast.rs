@@ -3,9 +3,9 @@
 // ==========================================
 // Replaces the legacy AgentTool AST tools.
 
+use arborium::tree_sitter::{Language, Node, Parser, Query, QueryCursor};
 use skg_tool::ToolError;
 use skg_tool_macro::skg_tool;
-use arborium::tree_sitter::{Language, Node, Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
 
 /// Detect the tree-sitter language from a file extension.
@@ -116,9 +116,7 @@ fn collect_symbols(node: Node, source: &[u8], depth: usize, symbols: &mut Vec<St
     name = "ast_outline",
     description = "Parse a source file using tree-sitter and return a structural outline (functions, structs, classes, impls) with line numbers. Supports Rust, Python, JavaScript, TypeScript. Use this to understand code structure before editing."
 )]
-pub async fn ast_outline(
-    path: String,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn ast_outline(path: String) -> Result<serde_json::Value, ToolError> {
     let path_owned = shellexpand::tilde(&path).to_string();
     let filepath = std::path::PathBuf::from(&path_owned);
     let ext = filepath.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -143,9 +141,9 @@ pub async fn ast_outline(
         .set_language(&language)
         .map_err(|e| ToolError::ExecutionFailed(format!("Parser init error: {}", e)))?;
 
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| ToolError::ExecutionFailed(format!("Failed to parse file: {}", path_owned)))?;
+    let tree = parser.parse(&source, None).ok_or_else(|| {
+        ToolError::ExecutionFailed(format!("Failed to parse file: {}", path_owned))
+    })?;
 
     let mut symbols = Vec::new();
     collect_symbols(tree.root_node(), source.as_bytes(), 0, &mut symbols);
@@ -182,7 +180,8 @@ pub async fn ast_edit(
 ) -> Result<serde_json::Value, ToolError> {
     if new_content.contains("...existing code...") || new_content.contains("// unchanged") {
         return Err(ToolError::ExecutionFailed(
-            "Guardrail: Placeholder detected. You must provide the full symbol content.".to_string(),
+            "Guardrail: Placeholder detected. You must provide the full symbol content."
+                .to_string(),
         ));
     }
 
@@ -205,16 +204,12 @@ pub async fn ast_edit(
         .set_language(&language)
         .map_err(|e| ToolError::ExecutionFailed(format!("Parser init error: {}", e)))?;
 
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| ToolError::ExecutionFailed(format!("Failed to parse file: {}", path_owned)))?;
+    let tree = parser.parse(&source, None).ok_or_else(|| {
+        ToolError::ExecutionFailed(format!("Failed to parse file: {}", path_owned))
+    })?;
 
     // Find the target symbol by walking the AST
-    fn find_symbol<'a>(
-        node: Node<'a>,
-        source: &'a [u8],
-        target: &str,
-    ) -> Option<(usize, usize)> {
+    fn find_symbol<'a>(node: Node<'a>, source: &'a [u8], target: &str) -> Option<(usize, usize)> {
         let kind = node.kind();
         let is_structural = matches!(
             kind,
@@ -257,7 +252,12 @@ pub async fn ast_edit(
     }
 
     let (start_byte, end_byte) = find_symbol(tree.root_node(), source.as_bytes(), &symbol_name)
-        .ok_or_else(|| ToolError::ExecutionFailed(format!("Symbol '{}' not found in {}. Use `ast_outline` first to see available symbols.", symbol_name, path_owned)))?;
+        .ok_or_else(|| {
+            ToolError::ExecutionFailed(format!(
+                "Symbol '{}' not found in {}. Use `ast_outline` first to see available symbols.",
+                symbol_name, path_owned
+            ))
+        })?;
 
     // Perform the replacement
     let mut result = String::with_capacity(source.len());
@@ -291,8 +291,12 @@ pub async fn ast_query(
     let path_owned = shellexpand::tilde(&path).to_string();
     let lang_ext = language.trim_start_matches('.');
 
-    let ts_language = language_for_extension(lang_ext)
-        .ok_or_else(|| ToolError::ExecutionFailed(format!("Unsupported file extension: '{}'. Supported: any language enabled in arborium config.", lang_ext)))?;
+    let ts_language = language_for_extension(lang_ext).ok_or_else(|| {
+        ToolError::ExecutionFailed(format!(
+            "Unsupported file extension: '{}'. Supported: any language enabled in arborium config.",
+            lang_ext
+        ))
+    })?;
 
     let ts_query = Query::new(&ts_language, &query)
         .map_err(|e| ToolError::ExecutionFailed(format!("Invalid Tree-Sitter query: {:?}", e)))?;

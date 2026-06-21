@@ -25,7 +25,9 @@ pub async fn list_system_services(
     }
 
     if services.is_empty() {
-        return Ok(serde_json::Value::String("No services found matching criteria.".to_string()));
+        return Ok(serde_json::Value::String(
+            "No services found matching criteria.".to_string(),
+        ));
     }
 
     let total_found = services.len();
@@ -69,9 +71,8 @@ pub async fn list_system_services(
     }
 
     if limit_val > 0 && total_found > limit_val {
-        report.push_str(
-            "\n💡 [TRUNCATED] Use 'filter' parameter to narrow down specific services.",
-        );
+        report
+            .push_str("\n💡 [TRUNCATED] Use 'filter' parameter to narrow down specific services.");
     }
 
     Ok(serde_json::Value::String(report))

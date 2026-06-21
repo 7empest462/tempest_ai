@@ -20,13 +20,10 @@ pub mod prompts;
 pub mod rules;
 pub mod sentinel;
 pub mod skg_adapter;
-pub mod state_store;
 pub mod skills;
+pub mod state_store;
 pub mod telemetry;
 pub mod templates;
-#[cfg(test)]
-pub mod test_json_stop;
-pub mod test_types;
 pub mod tool_rag;
 pub mod tools;
 pub mod tui;
@@ -71,6 +68,7 @@ pub struct AppConfig {
     pub db_path: Option<String>,
     pub encrypt_history: Option<bool>,
     pub sub_agent_model: Option<String>,
+    pub embedding_model: Option<String>,
     pub mlx_model: Option<String>,
     pub mlx_quant: Option<String>,
     pub kalosm_model: Option<String>,
@@ -143,6 +141,7 @@ impl Default for AppConfig {
             db_path: Some("~/fleet.db".to_string()),
             encrypt_history: Some(false),
             sub_agent_model: Some("llama3.2:1b".to_string()),
+            embedding_model: Some("mxbai-embed-large".to_string()),
             mlx_model: Some(
                 "/Volumes/Corsair_Lab/Home/mlx_models/Tempest-Centurion-v8-Fused".to_string(),
             ),

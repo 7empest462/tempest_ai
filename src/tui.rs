@@ -46,6 +46,7 @@ pub enum AgentEvent {
     ContextStatus {
         used: usize,
         total: u64,
+        kv_cache_hit_pct: Option<f32>,
     },
     SentinelUpdate {
         active: Vec<String>,
@@ -80,6 +81,11 @@ pub enum AgentEvent {
     ToolStart {
         name: String,
         args: Option<String>,
+    },
+    PhaseDurations {
+        planning_ms: u64,
+        executing_ms: u64,
+        verifying_ms: u64,
     },
 }
 
@@ -954,7 +960,9 @@ pub async fn run_tui(
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL);
                         let is_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
-                        let is_shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                        let is_shift = key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::SHIFT);
 
                         match key.code {
                             // Ctrl+C to quit
@@ -1678,7 +1686,11 @@ pub async fn run_tui(
                 AgentEvent::SubagentStatus(msg) => {
                     app.engine_status = msg;
                 }
-                AgentEvent::ContextStatus { used, total } => {
+                AgentEvent::ContextStatus {
+                    used,
+                    total,
+                    kv_cache_hit_pct: _,
+                } => {
                     app.context_used = used;
                     app.context_total = total;
                 }
@@ -1725,6 +1737,16 @@ pub async fn run_tui(
                 }
                 AgentEvent::ToolStart { name, args: _ } => {
                     app.push_message(format!("⚙️ [TOOL]: {} started...", name.to_uppercase()));
+                }
+                AgentEvent::PhaseDurations {
+                    planning_ms,
+                    executing_ms,
+                    verifying_ms,
+                } => {
+                    app.push_message(format!(
+                        "⏱️ Phase timings: Planning: {}ms | Execution: {}ms | Verification: {}ms",
+                        planning_ms, executing_ms, verifying_ms
+                    ));
                 }
             }
         }
@@ -2187,10 +2209,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    "v0.3.6",
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("v0.3.7", Style::default().fg(Color::DarkGray)),
             ]),
             Line::from(""),
             Line::from(vec![

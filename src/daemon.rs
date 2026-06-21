@@ -13,17 +13,18 @@ pub async fn run_daemon() {
     );
 
     let mut sys = System::new_all();
-    let mut networks = Networks::new_with_refreshed_list();
+    sys.refresh_all();
+    let total_ram = sys.total_memory() / 1024 / 1024;
+    // Set warning threshold to 90% of total physical RAM
+    let memory_threshold_mb = (total_ram as f64 * 0.90) as u64;
 
-    // Simple Autonomous Ruleset
-    let memory_threshold_mb = 14_000; // Let's say 14GB RAM threshold out of 16GB
+    let mut networks = Networks::new_with_refreshed_list();
 
     loop {
         sys.refresh_all();
         networks.refresh(true);
 
         let used_ram = sys.used_memory() / 1024 / 1024;
-        let total_ram = sys.total_memory() / 1024 / 1024;
 
         if used_ram >= memory_threshold_mb {
             println!(

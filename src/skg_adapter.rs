@@ -26,7 +26,7 @@ impl Provider for SkgBackendProvider {
                     layer0::context::Role::User => MessageRole::User,
                     layer0::context::Role::Assistant => MessageRole::Assistant,
                     layer0::context::Role::System => MessageRole::System,
-                    layer0::context::Role::Tool { .. } => MessageRole::User,
+                    layer0::context::Role::Tool { .. } => MessageRole::Tool,
                     _ => MessageRole::User,
                 };
 

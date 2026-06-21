@@ -61,6 +61,18 @@ export function useNexusSocket() {
           if (msg.payload.ctx_total != null) {
             store.setCtxTotal(msg.payload.ctx_total);
           }
+          if (msg.payload.kv_cache_hit_pct !== undefined) {
+            store.setKvCacheHitPct(msg.payload.kv_cache_hit_pct);
+          }
+          if (msg.payload.planning_duration_ms !== undefined ||
+              msg.payload.executing_duration_ms !== undefined ||
+              msg.payload.verifying_duration_ms !== undefined) {
+            store.setPhaseDurations(
+              msg.payload.planning_duration_ms ?? null,
+              msg.payload.executing_duration_ms ?? null,
+              msg.payload.verifying_duration_ms ?? null
+            );
+          }
           break;
         case 'FileTree':
           store.setExplorer(msg.payload.current_path, msg.payload.items);

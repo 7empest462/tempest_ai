@@ -17,21 +17,22 @@ pub async fn request_privileges(
     rationale: String,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
 
     if tool_ctx.is_root.load(Ordering::SeqCst) {
-        return Ok(serde_json::Value::String("✅ Agent already has root privileges.".to_string()));
+        return Ok(serde_json::Value::String(
+            "✅ Agent already has root privileges.".to_string(),
+        ));
     }
 
     // Proposed Improvement: Check if passwordless or cached sudo is already active BEFORE requesting TUI approval
-    let check = Command::new("sudo")
-        .arg("-n")
-        .arg("true")
-        .status()
-        .await;
+    let check = Command::new("sudo").arg("-n").arg("true").status().await;
 
-    if let Ok(status) = check && status.success() {
+    if let Ok(status) = check
+        && status.success()
+    {
         tool_ctx.is_root.store(true, Ordering::SeqCst);
         return Ok(serde_json::Value::String(format!(
             "🚀 Privilege escalation SUCCESSFUL. Rationale: {} (Passwordless/Cached mode confirmed)",
@@ -49,7 +50,12 @@ pub async fn request_privileges(
                 response_tx: tx,
             })
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to send privilege request to TUI: {}", e)))?;
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to send privilege request to TUI: {}",
+                    e
+                ))
+            })?;
     } else {
         return Err(ToolError::ExecutionFailed(
             "Privilege escalation requires interactive password entry, but agent is running in non-TUI mode and no sudo credentials are cached.".to_string()
@@ -70,20 +76,21 @@ pub async fn request_privileges(
                         rationale
                     )))
                 }
-                _ => {
-                    Ok(serde_json::Value::String(format!(
-                        "⚠️ Privilege escalation approved but requires a password. Commands will fail until you run 'sudo -v' (or similar) in your primary terminal to cache credentials. Rationale: {}",
-                        rationale
-                    )))
-                }
+                _ => Ok(serde_json::Value::String(format!(
+                    "⚠️ Privilege escalation approved but requires a password. Commands will fail until you run 'sudo -v' (or similar) in your primary terminal to cache credentials. Rationale: {}",
+                    rationale
+                ))),
             }
         }
-        Some(crate::tui::ToolResponse::Confirmed(false)) => {
-            Err(ToolError::ExecutionFailed("Privilege escalation REJECTED by user.".to_string()))
-        }
-        Some(crate::tui::ToolResponse::Error(e)) => {
-            Err(ToolError::ExecutionFailed(format!("TUI error during privilege escalation: {}", e)))
-        }
-        _ => Err(ToolError::ExecutionFailed("Privilege escalation FAILED: No response or timeout.".to_string())),
+        Some(crate::tui::ToolResponse::Confirmed(false)) => Err(ToolError::ExecutionFailed(
+            "Privilege escalation REJECTED by user.".to_string(),
+        )),
+        Some(crate::tui::ToolResponse::Error(e)) => Err(ToolError::ExecutionFailed(format!(
+            "TUI error during privilege escalation: {}",
+            e
+        ))),
+        _ => Err(ToolError::ExecutionFailed(
+            "Privilege escalation FAILED: No response or timeout.".to_string(),
+        )),
     }
 }

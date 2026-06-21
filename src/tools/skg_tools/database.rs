@@ -2,9 +2,9 @@
 // 🗄️ SKG DATABASE TOOLS — Native Skelegent Implementations
 // ==========================================
 
+use rusqlite::types::ValueRef;
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use rusqlite::types::ValueRef;
 
 // ── sqlite_query ───────────────────────────────────────────────────────────────
 
@@ -28,8 +28,9 @@ pub async fn sqlite_query(
             .map_err(|e| ToolError::ExecutionFailed(format!("WAL fail: {}", e)))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")
             .map_err(|e| ToolError::ExecutionFailed(format!("WAL fail: {}", e)))?;
-            
-        let mut stmt = conn.prepare(&query)
+
+        let mut stmt = conn
+            .prepare(&query)
             .map_err(|e| ToolError::ExecutionFailed(format!("SQL prepare failed: {}", e)))?;
 
         let column_names: Vec<String> = stmt
@@ -39,7 +40,8 @@ pub async fn sqlite_query(
             .collect();
 
         if column_names.is_empty() {
-            let changed = stmt.execute([])
+            let changed = stmt
+                .execute([])
                 .map_err(|e| ToolError::ExecutionFailed(format!("SQL execute failed: {}", e)))?;
             return Ok(format!(
                 "Query executed successfully. {} rows affected.",
@@ -47,16 +49,19 @@ pub async fn sqlite_query(
             ));
         }
 
-        let mut rows = stmt.query([])
+        let mut rows = stmt
+            .query([])
             .map_err(|e| ToolError::ExecutionFailed(format!("SQL query failed: {}", e)))?;
         let mut results = Vec::new();
 
-        while let Some(row) = rows.next()
+        while let Some(row) = rows
+            .next()
             .map_err(|e| ToolError::ExecutionFailed(format!("Row retrieval failed: {}", e)))?
         {
             let mut row_map = serde_json::Map::new();
             for (i, name) in column_names.iter().enumerate() {
-                let val_ref = row.get_ref(i)
+                let val_ref = row
+                    .get_ref(i)
                     .map_err(|e| ToolError::ExecutionFailed(format!("Val ref failed: {}", e)))?;
                 let val = match val_ref {
                     ValueRef::Null => serde_json::Value::Null,

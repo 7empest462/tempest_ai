@@ -16,7 +16,10 @@ pub struct Checkpoint {
     pub timestamp: String,
     /// Map of file path → original content (before modification)
     /// If the file didn't exist, the value is None (so undo = delete)
-    pub snapshots: HashMap<PathBuf, Option<String>>,
+    pub snapshots: HashMap<PathBuf, Option<Vec<u8>>>,
+    /// Map of file path → committed content (after modification, captured at commit time)
+    /// If the file didn't exist and wasn't created/written, the value is None
+    pub committed: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 /// Manages the checkpoint stack for undo/redo operations.
@@ -45,6 +48,7 @@ impl CheckpointManager {
             description: description.to_string(),
             timestamp: Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             snapshots: HashMap::new(),
+            committed: HashMap::new(),
         });
     }
 
@@ -58,7 +62,7 @@ impl CheckpointManager {
                 return;
             }
 
-            let content = fs::read_to_string(path).ok();
+            let content = fs::read(path).ok();
             pending.snapshots.insert(path.to_path_buf(), content);
         }
     }
@@ -66,10 +70,18 @@ impl CheckpointManager {
     /// Commit the pending checkpoint to the stack.
     /// Returns the checkpoint ID if successful.
     pub fn commit_checkpoint(&mut self) -> Option<String> {
-        if let Some(checkpoint) = self.pending.take() {
+        if let Some(mut checkpoint) = self.pending.take() {
             if checkpoint.snapshots.is_empty() {
                 return None; // Nothing was actually modified
             }
+
+            // Capture the committed state of each file
+            let mut committed = HashMap::new();
+            for path in checkpoint.snapshots.keys() {
+                let content = fs::read(path).ok();
+                committed.insert(path.clone(), content);
+            }
+            checkpoint.committed = committed;
 
             let id = checkpoint.id.clone();
             self.stack.push(checkpoint);
@@ -97,11 +109,30 @@ impl CheckpointManager {
         let mut errors = Vec::new();
 
         for (path, original_content) in &checkpoint.snapshots {
+            let committed_content = checkpoint.committed.get(path).cloned().flatten();
+            let current_content = fs::read(path).ok();
+
+            let is_modified_externally = current_content.is_some()
+                && committed_content.is_some()
+                && current_content != committed_content;
+
+            let suffix = if is_modified_externally {
+                " (Warning: Modified externally since checkpoint)"
+            } else {
+                ""
+            };
+
             match original_content {
                 Some(content) => {
+                    // Ensure parent directories exist
+                    if let Some(parent) = path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
                     // File existed before — restore its content
                     match fs::write(path, content) {
-                        Ok(_) => restored.push(format!("  ↩ Restored: {}", path.display())),
+                        Ok(_) => {
+                            restored.push(format!("  ↩ Restored{}: {}", suffix, path.display()))
+                        }
                         Err(e) => {
                             errors.push(format!("  ✗ Failed to restore {}: {}", path.display(), e))
                         }
@@ -109,13 +140,14 @@ impl CheckpointManager {
                 }
                 None => {
                     // File didn't exist before — delete it
-                    match fs::remove_file(path) {
-                        Ok(_) => {
-                            restored.push(format!("  🗑 Removed (was new): {}", path.display()))
-                        }
-                        Err(e) => {
-                            // Not a hard error if the file is already gone
-                            if path.exists() {
+                    if path.exists() {
+                        match fs::remove_file(path) {
+                            Ok(_) => restored.push(format!(
+                                "  🗑 Removed (was new){}: {}",
+                                suffix,
+                                path.display()
+                            )),
+                            Err(e) => {
                                 errors.push(format!(
                                     "  ✗ Failed to remove {}: {}",
                                     path.display(),
@@ -142,6 +174,69 @@ impl CheckpointManager {
 
         if !errors.is_empty() {
             summary.push_str("\n⚠️ Errors:\n");
+            summary.push_str(&errors.join("\n"));
+            summary.push('\n');
+        }
+
+        Ok(summary)
+    }
+
+    /// Rollback the pending checkpoint, restoring all snapshotted files to original states.
+    /// Discards the pending checkpoint.
+    pub fn rollback_pending(&mut self) -> Result<String, String> {
+        let checkpoint = self
+            .pending
+            .take()
+            .ok_or_else(|| "No pending checkpoint to rollback.".to_string())?;
+
+        let mut restored = Vec::new();
+        let mut errors = Vec::new();
+
+        for (path, original_content) in &checkpoint.snapshots {
+            match original_content {
+                Some(content) => {
+                    // Ensure parent directories exist
+                    if let Some(parent) = path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    match fs::write(path, content) {
+                        Ok(_) => restored.push(format!("  ↩ Restored: {}", path.display())),
+                        Err(e) => {
+                            errors.push(format!("  ✗ Failed to restore {}: {}", path.display(), e))
+                        }
+                    }
+                }
+                None => {
+                    if path.exists() {
+                        match fs::remove_file(path) {
+                            Ok(_) => {
+                                restored.push(format!("  🗑 Removed (was new): {}", path.display()))
+                            }
+                            Err(e) => {
+                                errors.push(format!(
+                                    "  ✗ Failed to remove {}: {}",
+                                    path.display(),
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut summary = format!(
+            "⏪ Rolled Back Pending Checkpoint: {} ({})\n",
+            checkpoint.description, checkpoint.timestamp
+        );
+
+        if !restored.is_empty() {
+            summary.push_str(&restored.join("\n"));
+            summary.push('\n');
+        }
+
+        if !errors.is_empty() {
+            summary.push_str("\n⚠️ Errors during rollback:\n");
             summary.push_str(&errors.join("\n"));
             summary.push('\n');
         }
@@ -209,8 +304,10 @@ impl CheckpointManager {
 
         let mut results = Vec::new();
         for (path, original) in original_states {
-            let current = fs::read_to_string(&path).ok();
-            results.push((path, original, current));
+            let current = fs::read(&path).ok();
+            let original_str = original.map(|v| String::from_utf8_lossy(&v).into_owned());
+            let current_str = current.map(|v| String::from_utf8_lossy(&v).into_owned());
+            results.push((path, original_str, current_str));
         }
         results
     }
@@ -411,12 +508,99 @@ mod tests {
             mgr.begin_checkpoint(&format!("checkpoint {}", i));
             mgr.pending.as_mut().unwrap().snapshots.insert(
                 PathBuf::from(format!("/tmp/fake_{}", i)),
-                Some("content".to_string()),
+                Some("content".as_bytes().to_vec()),
             );
             mgr.commit_checkpoint();
         }
 
         // Should only keep the last 3
         assert_eq!(mgr.checkpoint_count(), 3);
+    }
+
+    #[test]
+    fn test_checkpoint_binary_safety() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.bin");
+
+        let binary_data = vec![0, 15, 255, 128, 64, 0, 32];
+        fs::write(&file_path, &binary_data).unwrap();
+
+        let mut mgr = CheckpointManager::new(10);
+        mgr.begin_checkpoint("binary edit");
+        mgr.snapshot_file(&file_path);
+
+        fs::write(&file_path, vec![255, 0, 255]).unwrap();
+        mgr.commit_checkpoint();
+
+        // Undo
+        mgr.undo().unwrap();
+        assert_eq!(fs::read(&file_path).unwrap(), binary_data);
+    }
+
+    #[test]
+    fn test_rollback_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("rollback.txt");
+        fs::write(&file_path, "original content").unwrap();
+
+        let mut mgr = CheckpointManager::new(10);
+        mgr.begin_checkpoint("rollback test");
+        mgr.snapshot_file(&file_path);
+
+        fs::write(&file_path, "dirty content").unwrap();
+
+        // Rollback
+        let res = mgr.rollback_pending();
+        assert!(res.is_ok());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "original content");
+        assert!(!mgr.has_pending());
+        assert_eq!(mgr.checkpoint_count(), 0);
+    }
+
+    #[test]
+    fn test_directory_recreation_on_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("nested").join("folder");
+        fs::create_dir_all(&sub_dir).unwrap();
+        let file_path = sub_dir.join("nested_file.txt");
+        fs::write(&file_path, "nested file").unwrap();
+
+        let mut mgr = CheckpointManager::new(10);
+        mgr.begin_checkpoint("dir deletion test");
+        mgr.snapshot_file(&file_path);
+
+        // Delete nested file and the directories
+        fs::remove_file(&file_path).unwrap();
+        fs::remove_dir(&sub_dir).unwrap();
+        fs::remove_dir(sub_dir.parent().unwrap()).unwrap();
+
+        mgr.commit_checkpoint();
+
+        // Undo should recreate nested directories and restore the file
+        mgr.undo().unwrap();
+        assert!(file_path.exists());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "nested file");
+    }
+
+    #[test]
+    fn test_external_change_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("external.txt");
+        fs::write(&file_path, "base").unwrap();
+
+        let mut mgr = CheckpointManager::new(10);
+        mgr.begin_checkpoint("external mod test");
+        mgr.snapshot_file(&file_path);
+
+        fs::write(&file_path, "agent mod").unwrap();
+        mgr.commit_checkpoint();
+
+        // Now simulate external modification (by user or another process)
+        fs::write(&file_path, "external user mod").unwrap();
+
+        let summary = mgr.undo().unwrap();
+        assert!(summary.contains("Warning: Modified externally since checkpoint"));
+        // Check that original content was still successfully restored
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "base");
     }
 }

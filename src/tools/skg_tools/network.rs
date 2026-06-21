@@ -53,14 +53,14 @@ pub async fn network_check(
             }
         }
         NetworkAction::Port => {
-            let p_num = port.ok_or_else(|| ToolError::ExecutionFailed("Missing 'port' for port check".to_string()))?;
+            let p_num = port.ok_or_else(|| {
+                ToolError::ExecutionFailed("Missing 'port' for port check".to_string())
+            })?;
             let addr = format!("{}:{}", host, p_num);
             match std::net::TcpStream::connect_timeout(
                 &format!("{}:{}", host, p_num)
                     .parse()
-                    .unwrap_or_else(|_| {
-                        std::net::SocketAddr::from(([127, 0, 0, 1], p_num))
-                    }),
+                    .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], p_num))),
                 std::time::Duration::from_secs(3),
             ) {
                 Ok(_) => format!("✅ Port {} is OPEN on {}", p_num, host),

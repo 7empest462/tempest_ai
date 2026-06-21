@@ -50,7 +50,7 @@ mlx_repeat_penalty_execution = 1.02
 # 🧹 BASE SETTINGS
 # ==========================================
 model = "qwen3.5:9b-mlx"
-tool_engine = "skg"
+tool_engine = "legacy"
 gemini_model = "gemini-3.1-pro-preview-customtools, gemini-3.5-flash, gemini-3.1-pro-preview"
 kalosm_model = "/Users/7empest_mac/.cache/huggingface/hub/models--bartowski--Qwen2.5-Coder-7B-Instruct-GGUF/snapshots/1f629da0c8bed16b9e50cee91c70693650e66c35/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"
 
@@ -78,15 +78,15 @@ max_output_bytes = 524288
 session_reset_after_messages = 0
 
 # Sub-Agent & Semantic Compaction Configuration:
-# In Phase 5, generative sub-agent summarizing (such as llama3.2:1b) is bypassed 
-# in favor of Option A (Semantic Memory Compaction) which uses extremely fast, 
-# 50MB-100MB VRAM local embedding models to segment and index history dynamically.
+# - sub_agent_model: Generative local LLM (e.g. llama3.2:1b, qwen2.5:1.5b) used to generate conceptual summaries.
+# - embedding_model: Local vector embedding model used to index/search semantic memories.
 #
-# Highly recommended embedding models (run 'ollama pull <name>'):
-# - "all-minilm" (Default - ultra lightweight & fast)
-# - "nomic-embed-text" (High dimension, excellent for technical retrieval)
-# - "mxbai-embed-large" (Dense search performance)
-sub_agent_model = "mxbai-embed-large" 
+# Highly recommended embedding models:
+# - "all-minilm" (Ultra lightweight & fast)
+# - "nomic-embed-text" (Large 8192-token context length)
+# - "mxbai-embed-large" (Dense 1024-dim state-of-the-art search performance)
+sub_agent_model = "llama3.2:1b"
+embedding_model = "mxbai-embed-large"
 
 history_path = "history.json"
 db_path = "~/fleet.db"

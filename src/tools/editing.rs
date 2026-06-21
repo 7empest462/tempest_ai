@@ -153,8 +153,7 @@ impl AgentTool for MultiEditTool {
     }
 
     async fn execute(&self, args: &Value, context: ToolContext) -> Result<String> {
-        let typed_args: MultiEditArgs =
-            serde_json::from_value(args.clone()).into_diagnostic()?;
+        let typed_args: MultiEditArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path_owned = shellexpand::tilde(&typed_args.path).to_string();
         let path = std::path::PathBuf::from(&path_owned);
 
@@ -181,7 +180,10 @@ impl AgentTool for MultiEditTool {
             });
         }
 
-        Ok(format!("Successfully applied multi-edit to {}.", path_owned))
+        Ok(format!(
+            "Successfully applied multi-edit to {}.",
+            path_owned
+        ))
     }
 
     async fn get_approval_preview(&self, args: &Value) -> Option<String> {
@@ -234,7 +236,8 @@ pub fn apply_multi_edit(content: &str, edits: &[EditChunk]) -> Result<String, St
         }
 
         // 1. Convert line range to byte range
-        let (start_byte, end_byte) = line_range_to_byte_range(content, chunk.start_line, chunk.end_line)?;
+        let (start_byte, end_byte) =
+            line_range_to_byte_range(content, chunk.start_line, chunk.end_line)?;
 
         // 2. Search for the target text
         let search_area = &content[start_byte..end_byte];

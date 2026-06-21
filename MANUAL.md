@@ -1,4 +1,4 @@
-# 🌪️ Tempest AI `v0.3.5` — "Cyber-Orchestrator"
+# 🌪️ Tempest AI `v0.3.7` — "Cyber-Orchestrator"
 **The Hardware-Aware, Local-Inference Autonomous Engineer.**
 
 Tempest AI is a high-performance, Rust-based autonomous agent designed to be your local "Principal Engineer."
@@ -67,7 +67,7 @@ Every modification made by Tempest triggers an **Automatic Checkpoint**.
 ---
 
 ## 🔧 Configuration
-Configuration is stored in `config.toml`. Key v0.3.5 fields:
+Configuration is stored in `config.toml`. Key v0.3.7 fields:
 - `tui_theme`: Your persistent aesthetic choice (Ocean, Mocha, Solarized).
 - `mlx_model`: Default native engine preset for Apple Silicon.
 - `gemini_model`: The default model string for Gemini mode (e.g. `gemini-3.5-flash`).

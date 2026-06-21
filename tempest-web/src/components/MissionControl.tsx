@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useStore } from '../store';
 import type { AgentPhase, WebMemoryItem } from '../store';
-import { Brain, ClipboardList, Wrench, Search, RefreshCw, ChevronDown, Calendar, Tag, Copy, Check, Cpu, ShieldCheck } from 'lucide-react';
+import { Brain, ClipboardList, Wrench, Search, RefreshCw, ChevronDown, Calendar, Tag, Copy, Check } from 'lucide-react';
 
 const phases = [
   { id: 'Thinking' as AgentPhase, icon: Brain, label: 'Thinking' },
@@ -179,13 +179,8 @@ export function MissionControl() {
     currentTask,
     activeTools,
     memories,
-    engineStatus,
-    plannerModel,
-    executorModel,
-    verifierModel
   } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
-  const [modelsOpen, setModelsOpen] = useState(true);
 
   const isActive = (phaseId: AgentPhase) => {
     if (phaseId === 'Planning' && agentPhase === 'PendingTools') return true;
@@ -234,84 +229,6 @@ export function MissionControl() {
         })}
       </div>
 
-      {/* Active Models (Collapsible) */}
-      <div className="bg-white/[0.01] border border-white/5 rounded-xl flex flex-col flex-none hover:border-white/10 transition-colors overflow-hidden">
-        <div
-          onClick={() => setModelsOpen(!modelsOpen)}
-          className="p-3 flex items-center justify-between cursor-pointer select-none"
-        >
-          <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground flex items-center gap-1.5">
-            <Cpu size={12} className="text-accent" /> Active Models &amp; Engine
-          </h4>
-          <motion.div
-            animate={{ rotate: modelsOpen ? 180 : 0 }}
-            transition={{ duration: 0.15 }}
-            className="text-muted-foreground"
-          >
-            <ChevronDown size={14} />
-          </motion.div>
-        </div>
-
-        <div className={`grid transition-all duration-200 ease-in-out ${modelsOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
-          }`}>
-          <div className="overflow-hidden">
-            <div className="px-3 pb-3">
-              {/* Detect VRAM Sharing: all 3 models identical and non-placeholder */}
-              {plannerModel === executorModel && executorModel === verifierModel && plannerModel !== '--' ? (
-                /* Unified VRAM Sharing Layout */
-                <div className="flex flex-col gap-2 text-[10px] font-mono">
-                  <div className="bg-black/35 border border-white/5 px-3 py-2.5 rounded-lg flex flex-col gap-1.5 select-text hover:bg-black/45 transition-colors">
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground/60 uppercase text-[8px] tracking-wider font-semibold">Engine</span>
-                      <span className="text-[7px] font-bold uppercase tracking-widest bg-accent/15 text-accent border border-accent/25 px-2 py-0.5 rounded-full">
-                        VRAM Sharing
-                      </span>
-                    </div>
-                    <span className="text-accent truncate font-bold text-[11px]" title={engineStatus}>
-                      {engineStatus.replace(' (VRAM Sharing)', '')}
-                    </span>
-                  </div>
-                  <div className="bg-black/35 border border-white/5 px-3 py-2.5 rounded-lg flex flex-col gap-1.5 select-text hover:bg-black/45 transition-colors">
-                    <span className="text-muted-foreground/60 uppercase text-[8px] tracking-wider font-semibold flex items-center gap-1">
-                      <Brain size={8} className="text-purple-400" /> Unified Model
-                    </span>
-                    <span className="text-purple-400 truncate font-bold text-[11px]" title={plannerModel}>{plannerModel}</span>
-                    <span className="text-[8px] text-muted-foreground/50 leading-tight">
-                      Planner · Executor · Verifier — single model, dynamic system prompt switching
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                /* Standard 3-Tier Layout */
-                <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-                  <div className="bg-black/35 border border-white/5 px-2.5 py-1.5 rounded-lg flex flex-col gap-0.5 select-text hover:bg-black/45 transition-colors">
-                    <span className="text-muted-foreground/60 uppercase text-[8px] tracking-wider font-semibold">Engine</span>
-                    <span className="text-accent truncate font-bold" title={engineStatus}>{engineStatus}</span>
-                  </div>
-                  <div className="bg-black/35 border border-white/5 px-2.5 py-1.5 rounded-lg flex flex-col gap-0.5 select-text hover:bg-black/45 transition-colors">
-                    <span className="text-muted-foreground/60 uppercase text-[8px] tracking-wider font-semibold flex items-center gap-1">
-                      <Brain size={8} className="text-purple-400" /> Planner
-                    </span>
-                    <span className="text-purple-400 truncate font-bold" title={plannerModel}>{plannerModel}</span>
-                  </div>
-                  <div className="bg-black/35 border border-white/5 px-2.5 py-1.5 rounded-lg flex flex-col gap-0.5 select-text hover:bg-black/45 transition-colors">
-                    <span className="text-muted-foreground/60 uppercase text-[8px] tracking-wider font-semibold flex items-center gap-1">
-                      <Wrench size={8} className="text-pink-400" /> Executor
-                    </span>
-                    <span className="text-pink-400 truncate font-bold" title={executorModel}>{executorModel}</span>
-                  </div>
-                  <div className="bg-black/35 border border-white/5 px-2.5 py-1.5 rounded-lg flex flex-col gap-0.5 select-text hover:bg-black/45 transition-colors">
-                    <span className="text-muted-foreground/60 uppercase text-[8px] tracking-wider font-semibold flex items-center gap-1">
-                      <ShieldCheck size={8} className="text-emerald-400" /> Verifier
-                    </span>
-                    <span className="text-emerald-400 truncate font-bold" title={verifierModel}>{verifierModel}</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* Task */}
       {currentTask !== '--' && (

@@ -1,8 +1,9 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use ollama_rs::Ollama;
 use parking_lot::Mutex;
 use serde_json::json;
+use skg_tool::ToolDyn;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tempest_ai::checkpoint::CheckpointManager;
@@ -11,14 +12,13 @@ use tempest_ai::tools::{AgentTool, ToolContext};
 use tempest_ai::vector_brain::VectorBrain;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
-use skg_tool::ToolDyn;
 
 // Imports
 use tempest_ai::tools::file::ReadFileTool as LegacyReadFileTool;
 use tempest_ai::tools::skg_tools::file::ReadFileTool as SkgReadFileTool;
 
-use tempest_ai::tools::wasm_sandbox::WasmSafeCalculatorTool as LegacyWasmSafeCalcTool;
 use tempest_ai::tools::skg_tools::wasm_sandbox::WasmSafeCalcTool as SkgWasmSafeCalcTool;
+use tempest_ai::tools::wasm_sandbox::WasmSafeCalculatorTool as LegacyWasmSafeCalcTool;
 
 use tempest_ai::tools::csv::QueryCsvTool as LegacyQueryCsvTool;
 use tempest_ai::tools::skg_tools::csv::QueryCsvTool as SkgQueryCsvTool;
@@ -30,9 +30,13 @@ fn create_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
 
     let context = ToolContext {
         ollama: Ollama::default(),
-        backend: Arc::new(RwLock::new(Backend::Ollama(Ollama::default()))),
+        backend: Arc::new(RwLock::new(Backend::Ollama(
+            Ollama::default(),
+            "mxbai-embed-large".to_string(),
+        ))),
         model: "test".to_string(),
         sub_agent_model: "test".to_string(),
+        embedding_model: "mxbai-embed-large".to_string(),
         history: Arc::new(Mutex::new(vec![])),
         task_context: Arc::new(Mutex::new("test".to_string())),
         vector_brain: Arc::new(Mutex::new(VectorBrain::new())),
@@ -44,7 +48,9 @@ fn create_mock_context() -> (ToolContext, skg_tool::ToolCallContext) {
         is_root: Arc::new(AtomicBool::new(false)),
         all_tools: vec![],
         checkpoint_mgr: Arc::new(Mutex::new(CheckpointManager::new(10))),
-        memory_store: Arc::new(Mutex::new(tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap())),
+        memory_store: Arc::new(Mutex::new(
+            tempest_ai::memory::MemoryStore::new("test".to_string()).unwrap(),
+        )),
     };
 
     let skg_ctx = skg_tool::ToolCallContext::with_deps(

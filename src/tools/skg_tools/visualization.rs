@@ -2,9 +2,9 @@
 // 📊 SKG VISUALIZATION TOOLS — Native Skelegent Implementations
 // ==========================================
 
+use plotters::prelude::*;
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use plotters::prelude::*;
 use std::path::Path;
 
 #[derive(serde::Deserialize, Debug, schemars::JsonSchema)]
@@ -30,7 +30,9 @@ pub async fn generate_graph(
     _ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
     if series.is_empty() {
-        return Err(ToolError::ExecutionFailed("No data series provided.".to_string()));
+        return Err(ToolError::ExecutionFailed(
+            "No data series provided.".to_string(),
+        ));
     }
 
     let mut min_x = f64::MAX;
@@ -77,8 +79,9 @@ pub async fn generate_graph(
     if let Some(parent) = out_path.parent()
         && !parent.exists()
     {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to create output directory: {}", e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to create output directory: {}", e))
+        })?;
     }
 
     let root = BitMapBackend::new(&out_path, (800, 600)).into_drawing_area();
@@ -114,12 +117,7 @@ pub async fn generate_graph(
         }
 
         let color = *colors[i % colors.len()];
-        let data_points: Vec<(f64, f64)> = s
-            .x
-            .iter()
-            .copied()
-            .zip(s.y.iter().copied())
-            .collect();
+        let data_points: Vec<(f64, f64)> = s.x.iter().copied().zip(s.y.iter().copied()).collect();
 
         if chart_type.to_lowercase() == "scatter" {
             chart
@@ -151,7 +149,7 @@ pub async fn generate_graph(
         .map_err(|e| ToolError::ExecutionFailed(format!("File save error: {}", e)))?;
 
     let abs_path = std::fs::canonicalize(out_path).unwrap_or_else(|_| out_path.to_path_buf());
-    
+
     Ok(serde_json::Value::String(format!(
         "Successfully generated chart and saved to: {}",
         abs_path.display()

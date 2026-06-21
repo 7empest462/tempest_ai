@@ -15,7 +15,8 @@ pub struct TelemetryCollector {
 impl TelemetryCollector {
     pub fn new(event_tx: Sender<AgentEvent>) -> Self {
         let mut sys = System::new_all();
-        sys.refresh_all();
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
         Self { sys, event_tx }
     }
 
@@ -23,7 +24,8 @@ impl TelemetryCollector {
         let mut interval = interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
-            self.sys.refresh_all();
+            self.sys.refresh_cpu_all();
+            self.sys.refresh_memory();
 
             // In sysinfo 0.30+, global_cpu_usage() returns f32 directly
             let cpu_usage = self.sys.global_cpu_usage() as u64;

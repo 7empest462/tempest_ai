@@ -162,10 +162,10 @@ export default function App() {
             {/* Sidebar Tab Header */}
             <div className="flex border-b border-border/50 bg-black/20 p-1 gap-1">
               {[
-                { id: 'files', label: 'Files', icon: Folder },
-                { id: 'agent', label: 'Agent', icon: Brain },
-                { id: 'search', label: 'Search', icon: Search },
-                { id: 'settings', label: 'Settings', icon: Settings },
+                { id: 'files', label: 'Explorer', icon: Folder },
+                { id: 'agent', label: 'Core', icon: Brain },
+                { id: 'search', label: 'Diagnostics', icon: Search },
+                { id: 'settings', label: 'Tuning', icon: Settings },
               ].map((tab) => {
                 const Icon = tab.icon;
                 const active = activeTab === tab.id;

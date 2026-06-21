@@ -1,6 +1,7 @@
 use crate::inference::{Backend, SamplingConfig};
 use miette::Result;
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
+use ollama_rs::models::ModelOptions;
 use std::sync::Arc;
 
 // SKG types
@@ -38,46 +39,52 @@ pub fn estimate_tokens_layer0(messages: &[layer0::context::Message]) -> usize {
 
 /// Helper mapping from ChatMessage to layer0 Message
 pub fn to_layer0_messages(messages: &[ChatMessage]) -> Vec<layer0::context::Message> {
-    messages.iter().map(|msg| {
-        let role = match msg.role {
-            MessageRole::System => layer0::context::Role::System,
-            MessageRole::User => layer0::context::Role::User,
-            MessageRole::Assistant => layer0::context::Role::Assistant,
-            MessageRole::Tool => layer0::context::Role::User, // Map to User for generic rule processing
-        };
-        let content = if msg.role == MessageRole::Tool {
-            format!("[TOOL RESULT]: {}", msg.content)
-        } else {
-            msg.content.clone()
-        };
-        layer0::context::Message::new(role, layer0::content::Content::text(content))
-    }).collect()
+    messages
+        .iter()
+        .map(|msg| {
+            let role = match msg.role {
+                MessageRole::System => layer0::context::Role::System,
+                MessageRole::User => layer0::context::Role::User,
+                MessageRole::Assistant => layer0::context::Role::Assistant,
+                MessageRole::Tool => layer0::context::Role::User, // Map to User for generic rule processing
+            };
+            let content = if msg.role == MessageRole::Tool {
+                format!("[TOOL RESULT]: {}", msg.content)
+            } else {
+                msg.content.clone()
+            };
+            layer0::context::Message::new(role, layer0::content::Content::text(content))
+        })
+        .collect()
 }
 
 /// Helper mapping from layer0 Message to ChatMessage
 pub fn to_chat_messages(messages: &[layer0::context::Message]) -> Vec<ChatMessage> {
-    messages.iter().map(|msg| {
-        let role = match msg.role {
-            layer0::context::Role::System => MessageRole::System,
-            layer0::context::Role::User => MessageRole::User,
-            layer0::context::Role::Assistant => MessageRole::Assistant,
-            _ => MessageRole::User,
-        };
-        let mut content = msg.text_content().to_string();
-        let final_role = if content.starts_with("[TOOL RESULT]: ") {
-            content = content["[TOOL RESULT]: ".len()..].to_string();
-            MessageRole::Tool
-        } else {
-            role
-        };
-        ChatMessage {
-            role: final_role,
-            content,
-            images: None,
-            tool_calls: Vec::new(),
-            thinking: None,
-        }
-    }).collect()
+    messages
+        .iter()
+        .map(|msg| {
+            let role = match msg.role {
+                layer0::context::Role::System => MessageRole::System,
+                layer0::context::Role::User => MessageRole::User,
+                layer0::context::Role::Assistant => MessageRole::Assistant,
+                _ => MessageRole::User,
+            };
+            let mut content = msg.text_content().to_string();
+            let final_role = if content.starts_with("[TOOL RESULT]: ") {
+                content = content["[TOOL RESULT]: ".len()..].to_string();
+                MessageRole::Tool
+            } else {
+                role
+            };
+            ChatMessage {
+                role: final_role,
+                content,
+                images: None,
+                tool_calls: Vec::new(),
+                thinking: None,
+            }
+        })
+        .collect()
 }
 
 /// Returns true if the estimated token count exceeds the trigger threshold.
@@ -98,11 +105,18 @@ pub struct RunwayReportOp;
 impl skg_context_engine::ContextOp for RunwayReportOp {
     type Output = ();
 
-    async fn execute(&self, ctx: &mut skg_context_engine::Context) -> std::result::Result<(), skg_context_engine::EngineError> {
-        let limit = ctx.extensions.get::<ContextLimit>().map(|l| l.0).unwrap_or(20000);
+    async fn execute(
+        &self,
+        ctx: &mut skg_context_engine::Context,
+    ) -> std::result::Result<(), skg_context_engine::EngineError> {
+        let limit = ctx
+            .extensions
+            .get::<ContextLimit>()
+            .map(|l| l.0)
+            .unwrap_or(20000);
         let current_tokens = estimate_tokens_layer0(&ctx.messages);
         let report = generate_runway_report(current_tokens, limit as u64);
-        
+
         if !ctx.messages.is_empty() && ctx.messages[0].role == layer0::context::Role::System {
             let mut content = ctx.messages[0].text_content().to_string();
             if let Some(pos) = content.find("\n\n[SESSION RUNWAY STATUS]") {
@@ -127,19 +141,26 @@ pub struct VectorCompactionOp {
 impl skg_context_engine::ContextOp for VectorCompactionOp {
     type Output = ();
 
-    async fn execute(&self, ctx: &mut skg_context_engine::Context) -> std::result::Result<(), skg_context_engine::EngineError> {
-        let limit = ctx.extensions.get::<ContextLimit>().map(|l| l.0).unwrap_or(20000);
+    async fn execute(
+        &self,
+        ctx: &mut skg_context_engine::Context,
+    ) -> std::result::Result<(), skg_context_engine::EngineError> {
+        let limit = ctx
+            .extensions
+            .get::<ContextLimit>()
+            .map(|l| l.0)
+            .unwrap_or(20000);
         let current_tokens = estimate_tokens_layer0(&ctx.messages);
-        
+
         let focal_cap = 20000;
         let threshold = ((limit as f64 * 0.85) as usize).min(focal_cap);
-        
+
         if current_tokens <= threshold {
             return Ok(());
         }
-        
+
         let pressure_pct = (current_tokens as f64 / limit as f64 * 100.0).min(100.0);
-        
+
         let (ratio, intensity) = if pressure_pct > 90.0 {
             (
                 "10x",
@@ -151,21 +172,22 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
                 "Standard density. Distill history while retaining technical context and logic flow.",
             )
         };
-        
+
         if ctx.messages.len() <= 6 {
             return Ok(());
         }
-        
+
         // Zone Protection:
         // Index 0: System Prompt + Schema (PROTECTED)
         // Index 1 & 2: Original user prompts (PROTECTED)
         // Last 6 messages: Active working context (PROTECTED)
         let head_size = 3.min(ctx.messages.len() - 1);
         let tail_size = 6.min(ctx.messages.len() - head_size - 1);
-        
+
         let compaction_target_range = head_size..(ctx.messages.len() - tail_size);
-        let target_messages: Vec<layer0::context::Message> = ctx.messages[compaction_target_range.clone()].to_vec();
-        
+        let target_messages: Vec<layer0::context::Message> =
+            ctx.messages[compaction_target_range.clone()].to_vec();
+
         // 🧠 SEMANTIC VECTOR INDEXING
         {
             let mut current_chunk = String::new();
@@ -178,7 +200,7 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
                     _ => "Other",
                 };
                 current_chunk.push_str(&format!("{}: {}\n\n", role, msg.text_content()));
-                
+
                 if msg.role == layer0::context::Role::Assistant || current_chunk.len() > 1200 {
                     let chunk_text = current_chunk.trim().to_string();
                     if !chunk_text.is_empty() {
@@ -187,12 +209,12 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
                     current_chunk.clear();
                 }
             }
-            
+
             let chunk_text = current_chunk.trim().to_string();
             if !chunk_text.is_empty() {
                 chunks_to_embed.push(chunk_text);
             }
-            
+
             for chunk in chunks_to_embed {
                 if let Ok(embedding) = self.backend.generate_embeddings(&chunk).await {
                     let mut brain = self.vector_brain.lock();
@@ -204,11 +226,11 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
                     );
                 }
             }
-            
+
             let brain = self.vector_brain.lock();
             let _ = brain.save_to_disk(&self.brain_path);
         }
-        
+
         // Construct summarization prompt
         let mut summary_context = String::new();
         for msg in &target_messages {
@@ -220,7 +242,7 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
             };
             summary_context.push_str(&format!("{}: {}\n\n", role, msg.text_content()));
         }
-        
+
         let summary_prompt = format!(
             "### TASK: CONTEXT DENSITY COMPACTION (Pressure: {:.1}%)\n\
             You are a high-speed context compressor. Summarize the following session history.\n\n\
@@ -235,42 +257,77 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
             \n### CONVERSATION STREAM:\n{}",
             pressure_pct, ratio, intensity, summary_context
         );
-        
-        let sampling = SamplingConfig {
-            temperature: 0.01,
-            top_p: 0.9,
-            repeat_penalty: 1.1,
-            context_size: 4096,
-        };
-        
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let event_tx = Arc::new(parking_lot::Mutex::new(None));
-        
-        let summary_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            self.backend.clone().stream_chat(crate::inference::ChatRequest {
-                model: self.sub_model.to_string(),
-                history: vec![ChatMessage::new(MessageRole::User, summary_prompt)],
-                sampling,
-                event_tx,
-                stop,
-                system_prompt: "".to_string(),
-                on_tool_call: None,
-                tool_registry: None,
-            }),
-        )
-        .await;
-        
-        match summary_result {
-            Ok(Ok(response)) => {
-                let summary_text = response.content;
-                let summary_message = layer0::context::Message::new(
-                    layer0::context::Role::System,
-                    layer0::content::Content::text(format!("[CONTEXT SUMMARY - COMPACTED]:\n{}", summary_text)),
-                );
-                ctx.messages.splice(compaction_target_range, std::iter::once(summary_message));
+
+        let summary_text = match &self.backend {
+            Backend::Ollama(ollama, _) => {
+                let options = ModelOptions::default()
+                    .temperature(0.01)
+                    .top_p(0.9)
+                    .repeat_penalty(1.1)
+                    .num_ctx(4096);
+                let mut coordinator = ollama_rs::coordinator::Coordinator::new(
+                    ollama.clone(),
+                    self.sub_model.to_string(),
+                    vec![],
+                )
+                .options(options)
+                .think(ollama_rs::generation::parameters::ThinkType::Low);
+
+                let chat_fut =
+                    coordinator.chat(vec![ChatMessage::new(MessageRole::User, summary_prompt)]);
+                match tokio::time::timeout(tokio::time::Duration::from_secs(30), chat_fut).await {
+                    Ok(Ok(response)) => {
+                        let mut text = response.message.content;
+                        if let Some(thinking) = response.message.thinking
+                            && !thinking.is_empty()
+                        {
+                            text = format!("<think>\n{}\n</think>\n{}", thinking, text);
+                        }
+                        Some(text)
+                    }
+                    _ => None,
+                }
             }
             _ => {
+                let sampling = SamplingConfig {
+                    temperature: 0.01,
+                    top_p: 0.9,
+                    repeat_penalty: 1.1,
+                    context_size: 4096,
+                };
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let event_tx = Arc::new(parking_lot::Mutex::new(None));
+                let cloned_backend = self.backend.clone();
+                let chat_fut = cloned_backend.stream_chat(crate::inference::ChatRequest {
+                    model: self.sub_model.to_string(),
+                    history: vec![ChatMessage::new(MessageRole::User, summary_prompt)],
+                    sampling,
+                    event_tx,
+                    stop,
+                    system_prompt: "".to_string(),
+                    on_tool_call: None,
+                    tool_registry: None,
+                });
+                match tokio::time::timeout(tokio::time::Duration::from_secs(30), chat_fut).await {
+                    Ok(Ok(response)) => Some(response.content),
+                    _ => None,
+                }
+            }
+        };
+
+        match summary_text {
+            Some(summary_text) => {
+                let summary_message = layer0::context::Message::new(
+                    layer0::context::Role::System,
+                    layer0::content::Content::text(format!(
+                        "[CONTEXT SUMMARY - COMPACTED]:\n{}",
+                        summary_text
+                    )),
+                );
+                ctx.messages
+                    .splice(compaction_target_range, std::iter::once(summary_message));
+            }
+            None => {
                 // Determine target range budget:
                 let total_used = estimate_tokens_layer0(&ctx.messages);
                 let target_used = estimate_tokens_layer0(&target_messages);
@@ -288,12 +345,13 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
                     reorder_for_recall: true, // "lost in the middle" reordering
                     chars_per_token: 4,
                 };
-                
+
                 let mut compactor = skg_context::salience_packing_compactor(config);
                 let compacted_target = compactor(&target_messages);
-                
-                ctx.messages.splice(compaction_target_range, compacted_target);
-                
+
+                ctx.messages
+                    .splice(compaction_target_range, compacted_target);
+
                 let panic_message = layer0::context::Message::new(
                     layer0::context::Role::System,
                     layer0::content::Content::text("⚠️ [CRITICAL OVERLOAD]: Summarization model error or timeout (30s). Old history mathematically compacted using salience packing to restore stability.".to_string()),
@@ -301,7 +359,7 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
                 ctx.messages.insert(head_size, panic_message);
             }
         }
-        
+
         Ok(())
     }
 }
@@ -322,12 +380,7 @@ pub async fn compact_history(
     ctx.extensions.insert(ContextLimit(ctx_limit as usize));
 
     // Register runway monitor rule
-    let runway_rule = Rule::when(
-        "Context Runway Monitor",
-        100,
-        |_| true,
-        RunwayReportOp,
-    );
+    let runway_rule = Rule::when("Context Runway Monitor", 100, |_| true, RunwayReportOp);
     ctx.add_rule(runway_rule);
 
     // Run compaction operator
@@ -339,12 +392,11 @@ pub async fn compact_history(
     };
 
     match ctx.run(compaction_op).await {
-        Ok(_) => {
-            Ok(to_chat_messages(&ctx.messages))
-        }
-        Err(e) => {
-            Err(miette::miette!("SKG context compaction pipeline failed: {:?}", e))
-        }
+        Ok(_) => Ok(to_chat_messages(&ctx.messages)),
+        Err(e) => Err(miette::miette!(
+            "SKG context compaction pipeline failed: {:?}",
+            e
+        )),
     }
 }
 

@@ -133,6 +133,10 @@ pub enum NexusResponse {
         tps: Option<u64>,
         ctx_used: Option<usize>,
         ctx_total: Option<u64>,
+        kv_cache_hit_pct: Option<f32>,
+        planning_duration_ms: Option<u64>,
+        executing_duration_ms: Option<u64>,
+        verifying_duration_ms: Option<u64>,
     },
     SentinelLog {
         sentinel: String,
@@ -490,17 +494,47 @@ pub async fn run_nexus(
                                 tps,
                                 ctx_used: None,
                                 ctx_total: None,
+                                kv_cache_hit_pct: None,
+                                planning_duration_ms: None,
+                                executing_duration_ms: None,
+                                verifying_duration_ms: None,
                             };
                             if let Ok(json) = serde_json::to_string(&res) {
                                 let _ = b_tx_clone.send(json);
                             }
                         }
                     }
-                    crate::tui::AgentEvent::ContextStatus { used, total } => {
+                    crate::tui::AgentEvent::ContextStatus {
+                        used,
+                        total,
+                        kv_cache_hit_pct,
+                    } => {
                         let res = NexusResponse::InferenceMetrics {
                             tps: None,
                             ctx_used: Some(used),
                             ctx_total: Some(total),
+                            kv_cache_hit_pct,
+                            planning_duration_ms: None,
+                            executing_duration_ms: None,
+                            verifying_duration_ms: None,
+                        };
+                        if let Ok(json) = serde_json::to_string(&res) {
+                            let _ = b_tx_clone.send(json);
+                        }
+                    }
+                    crate::tui::AgentEvent::PhaseDurations {
+                        planning_ms,
+                        executing_ms,
+                        verifying_ms,
+                    } => {
+                        let res = NexusResponse::InferenceMetrics {
+                            tps: None,
+                            ctx_used: None,
+                            ctx_total: None,
+                            kv_cache_hit_pct: None,
+                            planning_duration_ms: Some(planning_ms),
+                            executing_duration_ms: Some(executing_ms),
+                            verifying_duration_ms: Some(verifying_ms),
                         };
                         if let Ok(json) = serde_json::to_string(&res) {
                             let _ = b_tx_clone.send(json);

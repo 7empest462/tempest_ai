@@ -2,9 +2,9 @@
 // 🛠️ SKG DEVELOPER TOOLS — Native Skelegent Implementations
 // ==========================================
 
+use super::execution::run_command;
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use super::execution::run_command;
 
 // ── initialize_rust_project ───────────────────────────────────────────────────
 
@@ -30,7 +30,10 @@ pub async fn initialize_rust_project(
     let res1 = res1_val.as_str().unwrap_or("");
 
     if res1.contains("error:") || res1.contains("Exit Status: exit status: 101") {
-        return Ok(serde_json::Value::String(format!("Failed to initialize project: {}", res1)));
+        return Ok(serde_json::Value::String(format!(
+            "Failed to initialize project: {}",
+            res1
+        )));
     }
 
     // 2. Add dependencies

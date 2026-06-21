@@ -15,28 +15,30 @@ pub fn get_env() -> &'static Environment<'static> {
 
         env.add_template(
             "editor_context",
-            "### [EDITOR GROUND TRUTH] ###\n\
-             - ACTIVE FILE: {{ file_name }}\n\
-             - FULL PATH: {{ file_path }}\n\
-             - LANGUAGE: {{ language }}\n\
-             - CURSOR LINE: {{ cursor_line }}\n\
-             - STATUS: {{ status_type }} contains {{ lines_count }} lines of code\n\
-             \n\
-             ```{{ language }}\n\
-             {{ visible_code }}\n\
-             ```\n\
-             ### [END EDITOR CONTEXT] ###\n\n"
+            r#"### [EDITOR GROUND TRUTH] ###
+- ACTIVE FILE: {{ file_name }}
+- FULL PATH: {{ file_path }}
+- LANGUAGE: {{ language }}
+- CURSOR LINE: {{ cursor_line }}
+- STATUS: {{ status_type }} contains {{ lines_count }} lines of code
+
+```{{ language }}
+{{ visible_code }}
+```
+### [END EDITOR CONTEXT] ###
+
+"#
         ).unwrap();
 
         env.add_template(
             "historical_context",
-            "### [RETRIEVED HISTORICAL CONTEXT] (Similarity >= 70%) ###\n\
-             To help you maintain continuity, here are relevant details retrieved from your long-term conversation history:\n\
-             {% for memory in memories %}\
-             {{ memory }}\n\
-             {% if not loop.last %}---\n{% endif %}\
-             {% endfor %}\
-             ### [END HISTORICAL CONTEXT] ###\n\n"
+            r#"### [RETRIEVED HISTORICAL CONTEXT] (Similarity >= 70%) ###
+To help you maintain continuity, here are relevant details retrieved from your long-term conversation history:
+{% for memory in memories %}{{ memory }}
+{% if not loop.last %}---
+{% endif %}{% endfor %}### [END HISTORICAL CONTEXT] ###
+
+"#
         ).unwrap();
 
         env

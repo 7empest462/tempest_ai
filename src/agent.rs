@@ -55,7 +55,10 @@ struct PlannerOutput {
     reasoning: String,
     native_tool_calls: Vec<ollama_rs::generation::tools::ToolCall>,
     /// Tool results that were already executed mid-stream (real-time approval)
-    executed_mid_stream: Vec<(ollama_rs::generation::tools::ToolCall, (String, String, bool))>,
+    executed_mid_stream: Vec<(
+        ollama_rs::generation::tools::ToolCall,
+        (String, String, bool),
+    )>,
 }
 
 static TOOL_BLOCK_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -120,6 +123,7 @@ pub struct Agent {
     pub vector_brain: Arc<Mutex<crate::vector_brain::VectorBrain>>,
     #[allow(dead_code)]
     pub sub_agent_model: String,
+    pub embedding_model: String,
     #[allow(dead_code)]
     syntax_set: SyntaxSet,
     #[allow(dead_code)]
@@ -181,10 +185,34 @@ pub struct AgentStream<'a> {
     pub stop: Arc<AtomicBool>,
     pub iteration: usize,
     pub decomposer: crate::turn_kit::TempestTurnDecomposer,
+    pub silent_failure_count: usize,
 }
 
 impl<'a> AgentStream<'a> {
     pub fn new(agent: &'a Agent, stop: Arc<AtomicBool>) -> Self {
+        let mut decomposer = crate::turn_kit::TempestTurnDecomposer::new();
+        // Auto-detect project verification environment
+        if std::path::Path::new("Cargo.toml").exists() {
+            decomposer.register_hook(crate::turn_kit::VerificationHook {
+                name: "Cargo Check".to_string(),
+                command: "cargo check".to_string(),
+            });
+            // If the project has a tests directory or test files, auto-run tests too
+            if std::path::Path::new("tests").exists()
+                || std::path::Path::new("src/tests.rs").exists()
+            {
+                decomposer.register_hook(crate::turn_kit::VerificationHook {
+                    name: "Cargo Test".to_string(),
+                    command: "cargo test".to_string(),
+                });
+            }
+        } else if std::path::Path::new("package.json").exists() {
+            decomposer.register_hook(crate::turn_kit::VerificationHook {
+                name: "NPM Build".to_string(),
+                command: "npm run build".to_string(),
+            });
+        }
+
         Self {
             agent,
             state: AgentStreamState::Thinking {
@@ -192,7 +220,37 @@ impl<'a> AgentStream<'a> {
             },
             stop,
             iteration: 0,
-            decomposer: crate::turn_kit::TempestTurnDecomposer::new(),
+            decomposer,
+            silent_failure_count: 0,
+        }
+    }
+
+    fn handle_silent_failure(&mut self) {
+        let is_silent_failure = !self.agent.history.lock().is_empty();
+        if is_silent_failure && self.silent_failure_count < 3 {
+            self.silent_failure_count += 1;
+            let nudge = "⚠️ [SILENT FAILURE]: You reasoned about an action but didn't output a tool call. YOU must output the JSON tool call now to finish the task.".to_string();
+            self.agent
+                .history
+                .lock()
+                .push(ollama_rs::generation::chat::ChatMessage::new(
+                    ollama_rs::generation::chat::MessageRole::System,
+                    nudge,
+                ));
+            self.state = AgentStreamState::Thinking {
+                accumulated: String::new(),
+            };
+        } else {
+            if is_silent_failure {
+                let tx_opt = self.agent.event_tx.lock().clone();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                        "⚠️ [SILENT FAILURE]: Hit maximum silent failure retry limit. Ending turn."
+                            .to_string(),
+                    ));
+                }
+            }
+            self.state = AgentStreamState::Done;
         }
     }
 
@@ -200,9 +258,24 @@ impl<'a> AgentStream<'a> {
         let current_state = self.state.clone();
         match current_state {
             AgentStreamState::Thinking { accumulated } => {
-                let phase_lbl = self
-                    .decomposer
-                    .transition_phase(crate::turn_kit::TurnPhase::Planning);
+                self.agent.inject_state_context();
+                let ctx_limit = self.agent.calculate_optimal_ctx().await;
+                self.agent.run_sentinel_stage(ctx_limit).await?;
+
+                let active_phase = self.agent.phase.lock().clone();
+                let run_phase = if !self.agent.planning_enabled {
+                    AgentPhase::Execution
+                } else {
+                    active_phase
+                };
+
+                let decomposer_phase = match run_phase {
+                    AgentPhase::Planning => crate::turn_kit::TurnPhase::Planning,
+                    AgentPhase::Execution => crate::turn_kit::TurnPhase::Executing,
+                    AgentPhase::Testing => crate::turn_kit::TurnPhase::Verifying,
+                };
+
+                let phase_lbl = self.decomposer.transition_phase(decomposer_phase);
                 let tx_opt = self.agent.event_tx.lock().clone();
                 if let Some(ref tx) = tx_opt {
                     let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
@@ -222,129 +295,7 @@ impl<'a> AgentStream<'a> {
                     }
                 }
 
-                self.agent.inject_state_context();
-                let ctx_limit = self.agent.calculate_optimal_ctx().await;
-                self.agent.run_sentinel_stage(ctx_limit).await?;
-                if !self.agent.planning_enabled {
-                    // Bypass planning: Jump straight to Execution Turn
-                    self.agent.switch_phase(AgentPhase::Execution).await?;
-                    let output = self.agent.planner_turn(self.stop.clone()).await?;
-
-                    self.state = AgentStreamState::Thinking {
-                        accumulated: output.reasoning.clone(),
-                    };
-
-                    let mut all_tool_calls = Vec::new();
-                    for native_call in output.native_tool_calls {
-                        all_tool_calls.push(native_call);
-                    }
-                    if all_tool_calls.is_empty() {
-                        // Try content first, then fall through to reasoning
-                        // (models sometimes emit tool calls inside <think> blocks)
-                        let sources = [&output.content, &output.reasoning];
-                        for source in sources {
-                            if !all_tool_calls.is_empty() {
-                                break;
-                            }
-                            if source.is_empty() {
-                                continue;
-                            }
-                            if let Ok(legacy_calls) = self.agent.extract_tool_calls(source) {
-                                for call in legacy_calls {
-                                    let name = call
-                                        .get("name")
-                                        .or(call.get("tool"))
-                                        .or(call.get("function"))
-                                        .and_then(|v| v.as_str());
-                                    let args = call
-                                        .get("arguments")
-                                        .or(call.get("args"))
-                                        .cloned()
-                                        .unwrap_or(serde_json::json!({}));
-                                    if let Some(n) = name {
-                                        // 🛡️ REASONING RESCUE: Tool call found in thinking block
-                                        if std::ptr::eq(source, &output.reasoning) {
-                                            let tx_opt = self.agent.event_tx.lock().clone();
-                                            if let Some(tx) = tx_opt {
-                                                let _ = tx.try_send(crate::tui::AgentEvent::SentinelUpdate {
-                                                     active: vec!["Reasoning Rescue".to_string()],
-                                                     log: format!("Rescued tool call '{}' from <think> block", n),
-                                                 });
-                                            }
-                                        }
-                                        let tc = ollama_rs::generation::tools::ToolCall {
-                                            function:
-                                                ollama_rs::generation::tools::ToolCallFunction {
-                                                    name: n.to_string(),
-                                                    arguments: args,
-                                                },
-                                        };
-                                        {
-                                            let mut hist = self.agent.history.lock();
-                                            if let Some(last_msg) = hist.last_mut()
-                                                && last_msg.role == MessageRole::Assistant
-                                                && !last_msg.tool_calls.iter().any(|c| c.function.name == tc.function.name && c.function.arguments == tc.function.arguments)
-                                            {
-                                                last_msg.tool_calls.push(tc.clone());
-                                            }
-                                        }
-                                        all_tool_calls.push(tc);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Deduplicate
-                    let mut unique_calls = Vec::new();
-                    for call in all_tool_calls {
-                        let is_duplicate = unique_calls.iter().any(
-                            |u: &ollama_rs::generation::tools::ToolCall| {
-                                u.function.name == call.function.name
-                                    && u.function.arguments == call.function.arguments
-                            },
-                        );
-                        if !is_duplicate {
-                            unique_calls.push(call);
-                        }
-                    }
-                    all_tool_calls = unique_calls;
-
-                    // Handle mid-stream results
-                    let mid_stream_results = output.executed_mid_stream;
-                    if !mid_stream_results.is_empty() {
-                        let feedback: Vec<_> = mid_stream_results
-                            .iter()
-                            .map(|(_, res)| res.clone())
-                            .collect();
-                        self.agent
-                            .process_tool_feedback_stage(feedback)
-                            .await?;
-
-                        // Filter out already executed mid-stream tool calls from all_tool_calls
-                        all_tool_calls.retain(|call| {
-                            !mid_stream_results.iter().any(|(mid_call, _)| {
-                                mid_call.function.name == call.function.name
-                                    && mid_call.function.arguments == call.function.arguments
-                            })
-                        });
-                    }
-
-                    if !all_tool_calls.is_empty() {
-                        self.state = AgentStreamState::PendingTools {
-                            tool_calls: all_tool_calls,
-                        };
-                    } else if !output.content.trim().is_empty() {
-                        self.state = AgentStreamState::StreamingContent {
-                            content: output.content,
-                        };
-                    } else {
-                        self.state = AgentStreamState::Done;
-                    }
-                    return Ok(());
-                }
-
-                self.agent.switch_phase(AgentPhase::Planning).await?;
+                self.agent.switch_phase(run_phase.clone()).await?;
 
                 let planner_output = self.agent.planner_turn(self.stop.clone()).await?;
 
@@ -408,7 +359,10 @@ impl<'a> AgentStream<'a> {
                                         let mut hist = self.agent.history.lock();
                                         if let Some(last_msg) = hist.last_mut()
                                             && last_msg.role == MessageRole::Assistant
-                                            && !last_msg.tool_calls.iter().any(|c| c.function.name == tc.function.name && c.function.arguments == tc.function.arguments)
+                                            && !last_msg.tool_calls.iter().any(|c| {
+                                                c.function.name == tc.function.name
+                                                    && c.function.arguments == tc.function.arguments
+                                            })
                                         {
                                             last_msg.tool_calls.push(tc.clone());
                                         }
@@ -443,9 +397,7 @@ impl<'a> AgentStream<'a> {
                         .iter()
                         .map(|(_, res)| res.clone())
                         .collect();
-                    self.agent
-                        .process_tool_feedback_stage(feedback)
-                        .await?;
+                    self.agent.process_tool_feedback_stage(feedback).await?;
 
                     // Filter out already executed mid-stream tool calls from all_tool_calls
                     all_tool_calls.retain(|call| {
@@ -461,152 +413,162 @@ impl<'a> AgentStream<'a> {
                         tool_calls: all_tool_calls,
                     };
                 } else if !planner_output.content.trim().is_empty() {
+                    // Since we finished planning, switch the phase to Execution for the next turn
+                    if matches!(run_phase, AgentPhase::Planning) {
+                        self.agent.switch_phase(AgentPhase::Execution).await?;
+                    }
                     self.state = AgentStreamState::StreamingContent {
                         content: planner_output.content,
                     };
                 } else {
-                    // --- ⚡ AUTOMATIC EXECUTION HANDOVER (Hardened) ---
-                    let tx_opt = self.agent.event_tx.lock().clone();
-                    if let Some(ref tx) = tx_opt {
-                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                            "⚡ HANDOVER: Handing context to EXECUTOR...".to_string(),
-                        ));
-                    }
-
-                    // INJECT REASONING INTO HISTORY: This links the phases!
-                    // CAP REASONING: Prevent unbounded accumulation causing thinking loops
-                    if !planner_output.reasoning.is_empty() {
-                        let max_reasoning_chars = 2000; // ~500 tokens max, keeps thinking bounded
-                        let reasoning_to_inject =
-                            if planner_output.reasoning.len() > max_reasoning_chars {
-                                format!(
-                                    "{}...[truncated]",
-                                    &planner_output.reasoning[..max_reasoning_chars]
-                                )
-                            } else {
-                                planner_output.reasoning.clone()
-                            };
-
-                        let mut history = self.agent.history.lock();
-                        history.push(ollama_rs::generation::chat::ChatMessage::new(
-                            ollama_rs::generation::chat::MessageRole::Assistant,
-                            format!("<think>\n{}\n</think>", reasoning_to_inject),
-                        ));
-                    }
-
-                    self.agent.switch_phase(AgentPhase::Execution).await?;
-
-                    // Small buffer for Ollama to settle VRAM swap
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-                    let mut output = self.agent.planner_turn(self.stop.clone()).await?;
-
-                    // If the first handover turn returns nothing, try one more time
-                    if output.content.trim().is_empty()
-                        && !self.stop.load(std::sync::atomic::Ordering::Relaxed)
-                    {
+                    if matches!(run_phase, AgentPhase::Planning) {
+                        // --- ⚡ AUTOMATIC EXECUTION HANDOVER (Hardened) ---
+                        let tx_opt = self.agent.event_tx.lock().clone();
                         if let Some(ref tx) = tx_opt {
-                            let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(
-                                "📡 Retrying Handover...".to_string(),
-                            )));
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                "⚡ HANDOVER: Handing context to EXECUTOR...".to_string(),
+                            ));
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        output = self.agent.planner_turn(self.stop.clone()).await?;
-                    }
 
-                    let mut all_tool_calls = Vec::new();
-                    for native_call in output.native_tool_calls {
-                        all_tool_calls.push(native_call);
-                    }
-                    if all_tool_calls.is_empty() {
-                        let sources = [&output.content, &output.reasoning];
-                        for source in sources {
-                            if !all_tool_calls.is_empty() {
-                                break;
+                        // INJECT REASONING INTO HISTORY: This links the phases!
+                        // CAP REASONING: Prevent unbounded accumulation causing thinking loops
+                        if !planner_output.reasoning.is_empty() {
+                            let max_reasoning_chars = 2000; // ~500 tokens max, keeps thinking bounded
+                            let reasoning_to_inject =
+                                if planner_output.reasoning.len() > max_reasoning_chars {
+                                    format!(
+                                        "{}...[truncated]",
+                                        &planner_output.reasoning[..max_reasoning_chars]
+                                    )
+                                } else {
+                                    planner_output.reasoning.clone()
+                                };
+
+                            let mut history = self.agent.history.lock();
+                            history.push(ollama_rs::generation::chat::ChatMessage::new(
+                                ollama_rs::generation::chat::MessageRole::Assistant,
+                                format!("<think>\n{}\n</think>", reasoning_to_inject),
+                            ));
+                        }
+
+                        self.agent.switch_phase(AgentPhase::Execution).await?;
+
+                        // Small buffer for Ollama to settle VRAM swap
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                        let mut output = self.agent.planner_turn(self.stop.clone()).await?;
+
+                        // If the first handover turn returns nothing, try one more time
+                        if output.content.trim().is_empty()
+                            && !self.stop.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            if let Some(ref tx) = tx_opt {
+                                let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(
+                                    "📡 Retrying Handover...".to_string(),
+                                )));
                             }
-                            if source.is_empty() {
-                                continue;
-                            }
-                            if let Ok(legacy_calls) = self.agent.extract_tool_calls(source) {
-                                for call in legacy_calls {
-                                    let name = call
-                                        .get("name")
-                                        .or(call.get("tool"))
-                                        .or(call.get("function"))
-                                        .and_then(|v| v.as_str());
-                                    let args = call
-                                        .get("arguments")
-                                        .or(call.get("args"))
-                                        .cloned()
-                                        .unwrap_or(serde_json::json!({}));
-                                    if let Some(n) = name {
-                                        let tc = ollama_rs::generation::tools::ToolCall {
-                                            function:
-                                                ollama_rs::generation::tools::ToolCallFunction {
-                                                    name: n.to_string(),
-                                                    arguments: args,
-                                                },
-                                        };
-                                        {
-                                            let mut hist = self.agent.history.lock();
-                                            if let Some(last_msg) = hist.last_mut()
-                                                && last_msg.role == MessageRole::Assistant
-                                                && !last_msg.tool_calls.iter().any(|c| c.function.name == tc.function.name && c.function.arguments == tc.function.arguments)
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            output = self.agent.planner_turn(self.stop.clone()).await?;
+                        }
+
+                        let mut all_tool_calls = Vec::new();
+                        for native_call in output.native_tool_calls {
+                            all_tool_calls.push(native_call);
+                        }
+                        if all_tool_calls.is_empty() {
+                            let sources = [&output.content, &output.reasoning];
+                            for source in sources {
+                                if !all_tool_calls.is_empty() {
+                                    break;
+                                }
+                                if source.is_empty() {
+                                    continue;
+                                }
+                                if let Ok(legacy_calls) = self.agent.extract_tool_calls(source) {
+                                    for call in legacy_calls {
+                                        let name = call
+                                            .get("name")
+                                            .or(call.get("tool"))
+                                            .or(call.get("function"))
+                                            .and_then(|v| v.as_str());
+                                        let args = call
+                                            .get("arguments")
+                                            .or(call.get("args"))
+                                            .cloned()
+                                            .unwrap_or(serde_json::json!({}));
+                                        if let Some(n) = name {
+                                            let tc = ollama_rs::generation::tools::ToolCall {
+                                                function:
+                                                    ollama_rs::generation::tools::ToolCallFunction {
+                                                        name: n.to_string(),
+                                                        arguments: args,
+                                                    },
+                                            };
                                             {
-                                                last_msg.tool_calls.push(tc.clone());
+                                                let mut hist = self.agent.history.lock();
+                                                if let Some(last_msg) = hist.last_mut()
+                                                    && last_msg.role == MessageRole::Assistant
+                                                    && !last_msg.tool_calls.iter().any(|c| {
+                                                        c.function.name == tc.function.name
+                                                            && c.function.arguments
+                                                                == tc.function.arguments
+                                                    })
+                                                {
+                                                    last_msg.tool_calls.push(tc.clone());
+                                                }
                                             }
+                                            all_tool_calls.push(tc);
                                         }
-                                        all_tool_calls.push(tc);
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // Deduplicate
-                    let mut unique_calls = Vec::new();
-                    for call in all_tool_calls {
-                        let is_duplicate = unique_calls.iter().any(
-                            |u: &ollama_rs::generation::tools::ToolCall| {
-                                u.function.name == call.function.name
-                                    && u.function.arguments == call.function.arguments
-                            },
-                        );
-                        if !is_duplicate {
-                            unique_calls.push(call);
+                        // Deduplicate
+                        let mut unique_calls = Vec::new();
+                        for call in all_tool_calls {
+                            let is_duplicate = unique_calls.iter().any(
+                                |u: &ollama_rs::generation::tools::ToolCall| {
+                                    u.function.name == call.function.name
+                                        && u.function.arguments == call.function.arguments
+                                },
+                            );
+                            if !is_duplicate {
+                                unique_calls.push(call);
+                            }
                         }
-                    }
-                    all_tool_calls = unique_calls;
+                        all_tool_calls = unique_calls;
 
-                    // Handle mid-stream results
-                    let mid_stream_results = output.executed_mid_stream;
-                    if !mid_stream_results.is_empty() {
-                        let feedback: Vec<_> = mid_stream_results
-                            .iter()
-                            .map(|(_, res)| res.clone())
-                            .collect();
-                        self.agent
-                            .process_tool_feedback_stage(feedback)
-                            .await?;
+                        // Handle mid-stream results
+                        let mid_stream_results = output.executed_mid_stream;
+                        if !mid_stream_results.is_empty() {
+                            let feedback: Vec<_> = mid_stream_results
+                                .iter()
+                                .map(|(_, res)| res.clone())
+                                .collect();
+                            self.agent.process_tool_feedback_stage(feedback).await?;
 
-                        all_tool_calls.retain(|call| {
-                            !mid_stream_results.iter().any(|(mid_call, _)| {
-                                mid_call.function.name == call.function.name
-                                    && mid_call.function.arguments == call.function.arguments
-                            })
-                        });
-                    }
+                            all_tool_calls.retain(|call| {
+                                !mid_stream_results.iter().any(|(mid_call, _)| {
+                                    mid_call.function.name == call.function.name
+                                        && mid_call.function.arguments == call.function.arguments
+                                })
+                            });
+                        }
 
-                    if !all_tool_calls.is_empty() {
-                        self.state = AgentStreamState::PendingTools {
-                            tool_calls: all_tool_calls,
-                        };
-                    } else if !output.content.trim().is_empty() {
-                        self.state = AgentStreamState::StreamingContent {
-                            content: output.content,
-                        };
+                        if !all_tool_calls.is_empty() {
+                            self.state = AgentStreamState::PendingTools {
+                                tool_calls: all_tool_calls,
+                            };
+                        } else if !output.content.trim().is_empty() {
+                            self.state = AgentStreamState::StreamingContent {
+                                content: output.content,
+                            };
+                        } else {
+                            self.handle_silent_failure();
+                        }
                     } else {
-                        self.state = AgentStreamState::Done;
+                        self.handle_silent_failure();
                     }
                 }
             }
@@ -834,49 +796,100 @@ impl<'a> AgentStream<'a> {
                 }
 
                 if was_modifying {
-                    // Check if we are in a Rust project
-                    if std::path::Path::new("Cargo.toml").exists() {
+                    let hooks_to_run = if !self.decomposer.hooks.is_empty() {
+                        self.decomposer.hooks.clone()
+                    } else {
+                        // Fallback logic
+                        let mut fallbacks = Vec::new();
+                        if std::path::Path::new("Cargo.toml").exists() {
+                            fallbacks.push(crate::turn_kit::VerificationHook {
+                                name: "Cargo Check".to_string(),
+                                command: "cargo check".to_string(),
+                            });
+                        }
+                        fallbacks
+                    };
+
+                    let mut verification_failures = Vec::new();
+
+                    for hook in hooks_to_run {
                         let tx_opt = self.agent.event_tx.lock().clone();
                         if let Some(tx) = tx_opt {
                             let _ = tx.try_send(crate::tui::AgentEvent::SubagentStatus(Some(
-                                "🔬 [SENTINEL]: Verifying changes via cargo check...".to_string(),
+                                format!("🔬 [SENTINEL]: Verifying via {}...", hook.name),
                             )));
                         }
 
-                        // Run cargo check
-                        let output = tokio::process::Command::new("cargo")
-                            .arg("check")
-                            .arg("--color")
-                            .arg("never")
-                            .output()
-                            .await;
+                        // Parse command and args
+                        let parts: Vec<&str> = hook.command.split_whitespace().collect();
+                        if parts.is_empty() {
+                            continue;
+                        }
 
-                        if let Ok(out) = output {
-                            let stderr = String::from_utf8_lossy(&out.stderr);
-                            if !out.status.success() {
-                                // INJECT ERROR DIRECTLY INTO HISTORY
-                                let reprimand = format!(
-                                    "🛑 [VERIFICATION FAILED]: Your recent changes broke the build. You MUST fix these errors before proceeding:\n\n```\n{}\n```",
-                                    stderr
-                                );
-                                self.agent
-                                    .history
-                                    .lock()
-                                    .push(ChatMessage::new(MessageRole::System, reprimand));
+                        let mut cmd = tokio::process::Command::new(parts[0]);
+                        if parts.len() > 1 {
+                            cmd.args(&parts[1..]);
+                        }
 
-                                if let Some(tx) = self.agent.event_tx.lock().clone() {
-                                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                                        "⚠️ [SENTINEL]: Build broken. Force-correcting..."
-                                            .to_string(),
-                                    ));
-                                }
-                            } else {
-                                if let Some(tx) = self.agent.event_tx.lock().clone() {
-                                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                                        "✅ [SENTINEL]: Build verified.".to_string(),
-                                    ));
+                        // Fallback/standard arg handling: if the command is cargo, disable colors
+                        if parts[0] == "cargo" {
+                            cmd.arg("--color").arg("never");
+                        }
+
+                        let output = cmd.output().await;
+                        match output {
+                            Ok(out) => {
+                                if !out.status.success() {
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+
+                                    let mut error_details = String::new();
+                                    if !stderr.trim().is_empty() {
+                                        error_details.push_str(&stderr);
+                                    }
+                                    if !stdout.trim().is_empty() {
+                                        if !error_details.is_empty() {
+                                            error_details.push_str("\n--- STDOUT Output ---\n");
+                                        }
+                                        error_details.push_str(&stdout);
+                                    }
+
+                                    verification_failures.push((hook.name, error_details));
                                 }
                             }
+                            Err(e) => {
+                                verification_failures
+                                    .push((hook.name, format!("Failed to execute command: {}", e)));
+                            }
+                        }
+                    }
+
+                    if !verification_failures.is_empty() {
+                        // INJECT FAILURE DETAILS DIRECTLY INTO HISTORY
+                        let mut reprimand = "🛑 [VERIFICATION FAILED]: The verification suite has identified issues. You MUST resolve these errors before reporting completion:\n".to_string();
+                        for (name, error) in verification_failures {
+                            reprimand.push_str(&format!(
+                                "\n### [Failure] {}\n```\n{}\n```\n",
+                                name, error
+                            ));
+                        }
+
+                        self.agent
+                            .history
+                            .lock()
+                            .push(ChatMessage::new(MessageRole::System, reprimand));
+
+                        if let Some(tx) = self.agent.event_tx.lock().clone() {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                "⚠️ [SENTINEL]: Verification failed. Force-correcting..."
+                                    .to_string(),
+                            ));
+                        }
+                    } else {
+                        if let Some(tx) = self.agent.event_tx.lock().clone() {
+                            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                "✅ [SENTINEL]: All verification checks passed.".to_string(),
+                            ));
                         }
                     }
                 }
@@ -1007,7 +1020,6 @@ impl<'a> AgentStream<'a> {
                         || planner_name.contains("battle")
                         || planner_name.contains("reasoning");
 
-
                     if (contains_raw_code && !is_r1) || is_delegating {
                         let reprimand = if is_delegating {
                             "⚠️ [ROLE REMINDER]: Assistant, YOU are the engineer with the tools. The User cannot help you with file operations. Please re-issue your response and use the correct `write_file` or `run_command` JSON tool call yourself.".to_string()
@@ -1054,17 +1066,21 @@ impl<'a> AgentStream<'a> {
                             let tx_opt = self.agent.event_tx.lock().clone();
 
                             // Silent failure nudge
+                            let active_phase = self.agent.phase.lock().clone();
                             let is_silent_failure =
-                                content.len() < 15 && !self.agent.history.lock().is_empty() && {
+                                (content.len() < 15 && !self.agent.history.lock().is_empty() && {
                                     let last_msg = self.agent.history.lock().last().cloned();
                                     let reasoning_len = last_msg
                                         .and_then(|m| m.thinking)
                                         .map(|s| s.len())
                                         .unwrap_or(0);
                                     reasoning_len > 100
-                                };
+                                }) || ((matches!(active_phase, AgentPhase::Execution)
+                                    || matches!(active_phase, AgentPhase::Testing))
+                                    && !is_done);
 
-                            if is_silent_failure {
+                            if is_silent_failure && self.silent_failure_count < 3 {
+                                self.silent_failure_count += 1;
                                 let nudge = "⚠️ [SILENT FAILURE]: You reasoned about an action but didn't output a tool call. YOU must output the JSON tool call now to finish the task.".to_string();
                                 self.agent.history.lock().push(
                                     ollama_rs::generation::chat::ChatMessage::new(
@@ -1076,11 +1092,20 @@ impl<'a> AgentStream<'a> {
                                     accumulated: String::new(),
                                 };
                             } else {
-                                if let Some(tx) = tx_opt {
-                                    let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
-                                        "🔄 MOMENTUM: Response received. Turn completed."
-                                            .to_string(),
-                                    ));
+                                if is_silent_failure {
+                                    if let Some(tx) = tx_opt {
+                                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                            "⚠️ [SILENT FAILURE]: Hit maximum silent failure retry limit. Ending turn."
+                                                .to_string(),
+                                        ));
+                                    }
+                                } else {
+                                    if let Some(tx) = tx_opt {
+                                        let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(
+                                            "🔄 MOMENTUM: Response received. Turn completed."
+                                                .to_string(),
+                                        ));
+                                    }
                                 }
                                 self.state = AgentStreamState::Done;
                             }
@@ -1146,6 +1171,146 @@ impl Agent {
         &self.tools
     }
 
+    pub async fn consolidate_memories(&self) -> Result<String> {
+        use crate::inference::SamplingConfig;
+        use ollama_rs::models::ModelOptions;
+
+        let records = {
+            let store = self.memory_store.lock();
+            store.list_all()?
+        };
+
+        if records.len() < 5 {
+            return Ok("No need to dream yet. Long-term memory is clean and compact.".to_string());
+        }
+
+        let mut text_list = String::new();
+        for (i, r) in records.iter().enumerate() {
+            text_list.push_str(&format!(
+                "{}. Topic: \"{}\" | Tags: \"{}\" | Fact: \"{}\"\n",
+                i + 1,
+                r.topic,
+                r.tags.as_deref().unwrap_or("none"),
+                r.content
+            ));
+        }
+
+        let prompt = format!(
+            "### TASK: LONG-TERM MEMORY CONSOLIDATION\n\
+             You are the agent's subconscious mind, running during sleep/dreaming phase.\n\
+             Consolidate the following facts. Merge overlapping facts, remove obsolete/redundant information, and compile a clean, unified list.\n\n\
+             ### RULES:\n\
+             1. Output MUST be a valid JSON array of objects, with NO surrounding text, markdown blocks, or preamble.\n\
+             2. Output format:\n\
+                [\n\
+                  {{\n\
+                    \"topic\": \"concise category or topic name\",\n\
+                    \"tags\": [\"tag1\", \"tag2\"],\n\
+                    \"fact\": \"synthesized fact statement\"\n\
+                  }}\n\
+                ]\n\n\
+             ### CURRENT FACTS:\n{}",
+            text_list
+        );
+
+        let response_text = match &*self.backend.read().await {
+            Backend::Ollama(ollama, _) => {
+                let options = ModelOptions::default()
+                    .temperature(0.1)
+                    .top_p(0.9)
+                    .repeat_penalty(1.1)
+                    .num_ctx(4096);
+                let mut coordinator = ollama_rs::coordinator::Coordinator::new(
+                    ollama.clone(),
+                    self.get_model(),
+                    vec![],
+                )
+                .options(options);
+
+                let chat_fut =
+                    coordinator.chat(vec![ollama_rs::generation::chat::ChatMessage::new(
+                        ollama_rs::generation::chat::MessageRole::User,
+                        prompt,
+                    )]);
+                match tokio::time::timeout(tokio::time::Duration::from_secs(45), chat_fut).await {
+                    Ok(Ok(response)) => Some(response.message.content),
+                    _ => None,
+                }
+            }
+            backend => {
+                let sampling = SamplingConfig {
+                    temperature: 0.1,
+                    top_p: 0.9,
+                    repeat_penalty: 1.1,
+                    context_size: 4096,
+                };
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let event_tx = Arc::new(parking_lot::Mutex::new(None));
+                let chat_fut = backend.stream_chat(crate::inference::ChatRequest {
+                    model: self.get_model(),
+                    history: vec![ollama_rs::generation::chat::ChatMessage::new(
+                        ollama_rs::generation::chat::MessageRole::User,
+                        prompt,
+                    )],
+                    sampling,
+                    event_tx,
+                    stop,
+                    system_prompt: "".to_string(),
+                    on_tool_call: None,
+                    tool_registry: None,
+                });
+                match tokio::time::timeout(tokio::time::Duration::from_secs(45), chat_fut).await {
+                    Ok(Ok(response)) => Some(response.content),
+                    _ => None,
+                }
+            }
+        };
+
+        let response_text = response_text.ok_or_else(|| {
+            miette::miette!("Memory consolidation model invocation timed out or failed")
+        })?;
+
+        let clean_json = response_text
+            .trim()
+            .strip_prefix("```json")
+            .unwrap_or(&response_text)
+            .strip_suffix("```")
+            .unwrap_or(&response_text)
+            .trim();
+
+        #[derive(serde::Deserialize)]
+        struct ConsFact {
+            topic: String,
+            tags: Vec<String>,
+            fact: String,
+        }
+
+        let consolidated: Vec<ConsFact> = serde_json::from_str(clean_json).map_err(|e| {
+            miette::miette!(
+                "Failed to parse consolidated memory JSON: {}. Raw response: {}",
+                e,
+                response_text
+            )
+        })?;
+
+        let mut repopulate_records = Vec::new();
+        for item in consolidated {
+            repopulate_records.push((item.topic, item.fact, Some(item.tags)));
+        }
+
+        let original_count = records.len();
+        let new_count = repopulate_records.len();
+
+        self.memory_store
+            .lock()
+            .clear_and_repopulate(repopulate_records)?;
+
+        Ok(format!(
+            "Memory consolidation complete (dreamed {} facts down to {} facts).",
+            original_count, new_count
+        ))
+    }
+
     pub async fn execute_tool_by_name(
         &self,
         name: &str,
@@ -1182,6 +1347,7 @@ impl Agent {
         session_id: String,
         memory_store: Arc<Mutex<MemoryStore>>,
         sub_agent_model: String,
+        embedding_model: String,
         event_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::tui::AgentEvent>>>>,
         config: AgentConfig,
     ) -> Result<Self> {
@@ -1232,6 +1398,7 @@ impl Agent {
             base_url: b_url,
             pa_memory_mb: config.pa_memory_mb,
             ollama_remote: config.ollama_remote.clone(),
+            embedding_model: Some(embedding_model.clone()),
         };
         let (backend, final_model) = Backend::new(backend_config).await?;
         let backend = Arc::new(tokio::sync::RwLock::new(backend));
@@ -1305,6 +1472,7 @@ impl Agent {
             Arc::new(crate::tools::file::ExtractAndWriteTool),
             Arc::new(crate::tools::git::GitActionTool),
             Arc::new(crate::tools::search::IndexFileSemanticallyTool),
+            Arc::new(crate::tools::search::IndexFileConceptuallyTool),
             Arc::new(crate::tools::memory::MemorySearchTool::new(
                 memory_store.clone(),
             )),
@@ -1342,24 +1510,48 @@ impl Agent {
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::ReadFileTool::new()));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::WriteFileTool::new()));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::ListDirTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::SearchFilesTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::SearchFilesTool::new(),
+        ));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::DiffFilesTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::AppendFileTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::AppendFileTool::new(),
+        ));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::PatchFileTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::FindReplaceTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::CreateDirectoryTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::DeleteFileTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::RenameFileTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::FindReplaceTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::CreateDirectoryTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::DeleteFileTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::RenameFileTool::new(),
+        ));
 
         // Execution Tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::execution::RunCommandTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::execution::RunTestsTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::execution::BuildProjectTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::execution::RunCommandTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::execution::RunTestsTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::execution::BuildProjectTool::new(),
+        ));
 
         // Search Tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::search::GrepSearchTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::search::SemanticSearchTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::search::IndexFileSemanticallyTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::search::GrepSearchTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::search::SemanticSearchTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::search::IndexFileSemanticallyTool::new(),
+        ));
 
         // Wave 2: Git Tools
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::git::GitStatusTool::new()));
@@ -1370,71 +1562,159 @@ impl Agent {
         // Wave 2: Web Tools
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::web::SearchWebTool::new()));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::web::ReadUrlTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::web::RawHttpFetchTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::web::DownloadFileTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::web::GetStockPriceTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::web::RawHttpFetchTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::web::DownloadFileTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::web::GetStockPriceTool::new(),
+        ));
 
         // Wave 2: Memory Tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::memory::StoreMemoryTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::memory::RecallMemoryTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::memory::MemorySearchTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::memory::StoreMemoryTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::memory::RecallMemoryTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::memory::MemorySearchTool::new(),
+        ));
 
         // Wave 3: Editing, Agent Ops, Process, Terminal Tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::editing::EditFileWithDiffTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::editing::MultiEditTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::editing::EditFileWithDiffTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::editing::MultiEditTool::new(),
+        ));
 
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::agent_ops::AskUserTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::agent_ops::SpawnSubAgentTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::agent_ops::UpdateTaskContextTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::agent_ops::QuerySchemaTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::agent_ops::AskUserTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::agent_ops::SpawnSubAgentTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::agent_ops::UpdateTaskContextTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::agent_ops::QuerySchemaTool::new(),
+        ));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::agent_ops::NoOpTool::new()));
 
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::process::RunBackgroundTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::process::ReadProcessLogsTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::process::KillProcessTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::process::WatchDirectoryTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::process::RunBackgroundTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::process::ReadProcessLogsTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::process::KillProcessTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::process::WatchDirectoryTool::new(),
+        ));
 
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::terminal::TerminalSpawnTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::terminal::TerminalInputTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::terminal::TerminalReadTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::terminal::TerminalCloseTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::terminal::TerminalSpawnTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::terminal::TerminalInputTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::terminal::TerminalReadTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::terminal::TerminalCloseTool::new(),
+        ));
 
         // Wave 4: Knowledge, Utilities, AST, Rust Tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::knowledge::ListSkillsTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::knowledge::RecallSkillTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::knowledge::DistillKnowledgeTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::knowledge::RecallBrainTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::knowledge::ListSkillsTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::knowledge::RecallSkillTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::knowledge::DistillKnowledgeTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::knowledge::RecallBrainTool::new(),
+        ));
 
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::utilities::ClipboardTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::utilities::NotifyTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::utilities::EnvVarTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::utilities::ChmodTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::utilities::CalculatorTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::utilities::ClipboardTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::utilities::NotifyTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::utilities::EnvVarTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::utilities::ChmodTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::utilities::CalculatorTool::new(),
+        ));
 
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::ast::AstOutlineTool::new()));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::ast::AstEditTool::new()));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::ast::AstQueryTool::new()));
 
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::rust::CargoAddTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::rust::CargoSearchTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::rust::CargoSearchTool::new(),
+        ));
 
         // Wave 6: Remaining system/development/database/visualization/safety tools
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::wasm_sandbox::WasmSafeCalcTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::threat_scanner::ThreatScanTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::wasm_sandbox::WasmSafeCalcTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::threat_scanner::ThreatScanTool::new(),
+        ));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::csv::QueryCsvTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::telemetry::SystemTelemetryTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::network_manager::ListNetworkSocketsTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::service_manager::ListSystemServicesTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::developer::InitializeRustProjectTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::database::SqliteQueryTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::network::NetworkCheckTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::telemetry::SystemTelemetryTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::network_manager::ListNetworkSocketsTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::service_manager::ListSystemServicesTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::developer::InitializeRustProjectTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::database::SqliteQueryTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::network::NetworkCheckTool::new(),
+        ));
         tool_registry_skg.register(Arc::new(crate::tools::skg_tools::atlas::TreeTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::atlas::ProjectAtlasTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::file::ExtractAndWriteTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::system::SystemdManagerTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::system::CurrentProcessInfoTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::privilege::RequestPrivilegesTool::new()));
-        tool_registry_skg.register(Arc::new(crate::tools::skg_tools::visualization::GenerateGraphTool::new()));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::atlas::ProjectAtlasTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::file::ExtractAndWriteTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::system::SystemdManagerTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::system::CurrentProcessInfoTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::privilege::RequestPrivilegesTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::visualization::GenerateGraphTool::new(),
+        ));
 
         let tool_registry_skg = Arc::new(tool_registry_skg);
 
@@ -1449,7 +1729,8 @@ impl Agent {
         // into a vector index using nomic-embed-text. On each user turn, only the
         // top-K most relevant tools are injected into the schema.
         // The full toolbox remains discoverable via `query_schema`.
-        let skg_tools_vec: Vec<Arc<dyn skg_tool::ToolDyn>> = tool_registry_skg.iter().cloned().collect();
+        let skg_tools_vec: Vec<Arc<dyn skg_tool::ToolDyn>> =
+            tool_registry_skg.iter().cloned().collect();
         let tool_rag_index = crate::tool_rag::ToolVectorIndex::build(
             &skg_tools_vec,
             &*backend.read().await,
@@ -1472,8 +1753,9 @@ impl Agent {
         // compatibility with stream_chat's tool schema parameter.
         let tool_registry: Vec<ollama_rs::generation::tools::ToolInfo> = Vec::new();
 
+        let passphrase = memory_store.lock().passphrase().to_string();
         let vector_brain = Arc::new(Mutex::new(
-            crate::vector_brain::VectorBrain::load_from_disk(&brain_path)
+            crate::vector_brain::VectorBrain::load_from_disk(&brain_path, Some(&passphrase))
                 .unwrap_or_else(|_| crate::vector_brain::VectorBrain::new()),
         ));
 
@@ -1486,7 +1768,10 @@ impl Agent {
             Arc::new(skg_state_memory::MemoryStore::new())
         } else {
             let path = std::path::Path::new(&history_path);
-            let parent = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+            let parent = path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf();
             Arc::new(crate::state_store::FileStateStore::new(parent))
         };
 
@@ -1507,6 +1792,7 @@ impl Agent {
             task_context: Arc::new(Mutex::new("Not started yet.".to_string())),
             vector_brain,
             sub_agent_model,
+            embedding_model,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: Arc::new(ThemeSet::load_defaults()),
             rules: crate::rules::RuleEngine::new(),
@@ -1584,7 +1870,7 @@ impl Agent {
 
     pub async fn get_ollama(&self) -> Result<Ollama> {
         match &*self.backend.read().await {
-            Backend::Ollama(o) => Ok(o.clone()),
+            Backend::Ollama(o, _) => Ok(o.clone()),
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => Err(miette!("Active backend is MLX, not Ollama")),
             Backend::Bridge(_) => Err(miette!("Active backend is AI Bridge, not Ollama")),
@@ -1619,7 +1905,7 @@ impl Agent {
     pub async fn check_connection(&self) -> Result<()> {
         let backend = self.backend.read().await;
         match &*backend {
-            crate::inference::Backend::Ollama(_) => {
+            crate::inference::Backend::Ollama(_, _) => {
                 if let Ok(ollama) = self.get_ollama().await {
                     let models_result = tokio::time::timeout(
                         std::time::Duration::from_secs(10),
@@ -1921,10 +2207,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let scope = layer0::effect::Scope::Session(layer0::id::SessionId::new(&self.session_id));
 
         let history_value = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.state_store.read(&scope, "history").await
-            })
-        }).map_err(|e| miette::miette!("Failed to read state: {:?}", e))?;
+            tokio::runtime::Handle::current()
+                .block_on(async { self.state_store.read(&scope, "history").await })
+        })
+        .map_err(|e| miette::miette!("Failed to read state: {:?}", e))?;
 
         if let Some(val) = history_value
             && let Ok(mut history) = serde_json::from_value::<Vec<ChatMessage>>(val)
@@ -1962,10 +2248,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
         // Load raw history if it exists to preserve thought signatures and extra fields
         let raw_value = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.state_store.read(&scope, "raw_history").await
-            })
-        }).map_err(|e| miette::miette!("Failed to read raw state: {:?}", e))?;
+            tokio::runtime::Handle::current()
+                .block_on(async { self.state_store.read(&scope, "raw_history").await })
+        })
+        .map_err(|e| miette::miette!("Failed to read raw state: {:?}", e))?;
 
         if let Some(val) = raw_value
             && let Ok(mut raw_history_vec) = serde_json::from_value::<Vec<serde_json::Value>>(val)
@@ -2077,10 +2363,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         let val = serde_json::to_value(&*history).into_diagnostic()?;
 
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.state_store.write(&scope, "history", val).await
-            })
-        }).map_err(|e| miette::miette!("Failed to write state: {:?}", e))?;
+            tokio::runtime::Handle::current()
+                .block_on(async { self.state_store.write(&scope, "history", val).await })
+        })
+        .map_err(|e| miette::miette!("Failed to write state: {:?}", e))?;
 
         // Save raw history to preserve thought signatures and extra fields
         if let Some(raw_hist_arc) = self.backend.try_read().ok().and_then(|b| b.raw_history()) {
@@ -2090,7 +2376,8 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 tokio::runtime::Handle::current().block_on(async {
                     self.state_store.write(&scope, "raw_history", raw_val).await
                 })
-            }).map_err(|e| miette::miette!("Failed to write raw state: {:?}", e))?;
+            })
+            .map_err(|e| miette::miette!("Failed to write raw state: {:?}", e))?;
         }
 
         Ok(())
@@ -2218,10 +2505,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             )
         };
 
-        // CRITICAL: Tool results must be System/Observation role, not User.
+        // CRITICAL: Tool results must be Tool/Observation role, not User.
         self.history
             .lock()
-            .push(ChatMessage::new(MessageRole::System, feedback));
+            .push(ChatMessage::new(MessageRole::Tool, feedback));
         self.save_history()?;
 
         // --- 📊 RESTORE TOOL RESULT TRACKER ---
@@ -2316,6 +2603,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             base_url: None,
             pa_memory_mb: self.pa_memory_mb,
             ollama_remote: self.ollama_remote.clone(),
+            embedding_model: Some(self.embedding_model.clone()),
         };
 
         let (new_backend, new_model_name) = crate::inference::Backend::new(config).await?;
@@ -2479,6 +2767,13 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
         }
 
+        if self.planning_enabled {
+            let mut p_lock = self.phase.lock();
+            if *p_lock == AgentPhase::Testing {
+                *p_lock = AgentPhase::Planning;
+            }
+        }
+
         self.initialize_session(&initial_user_prompt).await?;
 
         // Notify Web/HUD of initial task
@@ -2574,6 +2869,23 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 }
             }
         }
+
+        stream.decomposer.finalize();
+        let telemetry_str = stream.decomposer.format_telemetry();
+
+        let tx_opt = self.event_tx.lock().clone();
+        if let Some(tx) = tx_opt {
+            let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
+                "📊 [SKELEGENT TURN-KIT] {}",
+                telemetry_str
+            )));
+            let _ = tx.try_send(crate::tui::AgentEvent::PhaseDurations {
+                planning_ms: stream.decomposer.planning_duration_ms,
+                executing_ms: stream.decomposer.executing_duration_ms,
+                verifying_ms: stream.decomposer.verifying_duration_ms,
+            });
+        }
+        println!("📊 [SKELEGENT TURN-KIT] {}", telemetry_str);
 
         let _ = self.save_history();
         self.overwatch.mark_success();
@@ -2799,7 +3111,20 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         &self,
         results: Vec<(String, String, bool)>,
     ) -> Result<()> {
-        self.switch_phase(AgentPhase::Testing).await?;
+        let mut was_modifying = false;
+        for (tool_name, _, is_success) in &results {
+            if *is_success
+                && let Some(tool) = self.tools.get(tool_name).map(|r| r.value().clone())
+                && tool.is_modifying()
+            {
+                was_modifying = true;
+                break;
+            }
+        }
+
+        if was_modifying {
+            self.switch_phase(AgentPhase::Testing).await?;
+        }
         let mut detected_loop_key = None;
         let mut feedback_to_apply = Vec::new();
 
@@ -2938,12 +3263,15 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             let _ = tx.try_send(crate::tui::AgentEvent::ContextStatus {
                 used,
                 total: ctx_limit,
+                kv_cache_hit_pct: None,
             });
         }
 
         let mut skg_ctx = skg_context_engine::Context::new();
         skg_ctx.messages = crate::context_manager::to_layer0_messages(&history_snapshot);
-        skg_ctx.extensions.insert(crate::context_manager::ContextLimit(ctx_limit as usize));
+        skg_ctx
+            .extensions
+            .insert(crate::context_manager::ContextLimit(ctx_limit as usize));
 
         let runway_rule = skg_context_engine::Rule::when(
             "Context Runway Monitor",
@@ -2957,7 +3285,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         #[async_trait::async_trait]
         impl skg_context_engine::ContextOp for NoOp {
             type Output = ();
-            async fn execute(&self, _ctx: &mut skg_context_engine::Context) -> std::result::Result<(), skg_context_engine::EngineError> {
+            async fn execute(
+                &self,
+                _ctx: &mut skg_context_engine::Context,
+            ) -> std::result::Result<(), skg_context_engine::EngineError> {
                 Ok(())
             }
         }
@@ -2977,11 +3308,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             while let Some(call) = tool_rx.recv().await {
                 let agent_clone = agent_for_task.clone();
                 let call_clone = call.clone();
-                join_set
-                    .spawn(async move {
-                        let res = agent_clone.process_single_tool_call(call, false).await;
-                        (call_clone, res)
-                    });
+                join_set.spawn(async move {
+                    let res = agent_clone.process_single_tool_call(call, false).await;
+                    (call_clone, res)
+                });
             }
             while let Some(res) = join_set.join_next().await {
                 if let Ok(r) = res {
@@ -3359,7 +3689,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             _ => {
                 if self.tools.contains_key(name) || self.tool_registry_skg.get(name).is_some() {
                     name.to_string()
-                } else if self.tools.contains_key(&name_lower) || self.tool_registry_skg.get(&name_lower).is_some() {
+                } else if self.tools.contains_key(&name_lower)
+                    || self.tool_registry_skg.get(&name_lower).is_some()
+                {
                     name_lower
                 } else {
                     name.to_string()
@@ -3474,7 +3806,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                             Err(e) => {
                                 let call = &current_batch_calls[i];
                                 let err_msg = if e.is_panic() {
-                                    format!("Skelegent Error: Tool '{}' panicked during execution (likely missing or invalid required arguments). Please check the tool schema.", call.function.name)
+                                    format!(
+                                        "Skelegent Error: Tool '{}' panicked during execution (likely missing or invalid required arguments). Please check the tool schema.",
+                                        call.function.name
+                                    )
                                 } else {
                                     format!("Skelegent Error: Tool execution failed: {}", e)
                                 };
@@ -3522,15 +3857,16 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     let mut cp = self_clone.checkpoint_mgr.lock();
                     cp.begin_checkpoint(&format!("Tool: {}", call_clone.function.name));
 
-                    if let Some(path_str) = call_clone
-                        .function
-                        .arguments
-                        .get("path")
-                        .or(call_clone.function.arguments.get("file_path"))
-                        .and_then(|v| v.as_str())
-                    {
-                        let expanded = shellexpand::tilde(path_str).to_string();
-                        cp.snapshot_file(std::path::Path::new(&expanded));
+                    for param in &["path", "file_path", "old_path", "new_path"] {
+                        if let Some(path_str) = call_clone
+                            .function
+                            .arguments
+                            .get(*param)
+                            .and_then(|v| v.as_str())
+                        {
+                            let expanded = shellexpand::tilde(path_str).to_string();
+                            cp.snapshot_file(std::path::Path::new(&expanded));
+                        }
                     }
                 }
 
@@ -3547,7 +3883,23 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     if res_succ {
                         let _ = self_clone.checkpoint_mgr.lock().commit_checkpoint();
                     } else {
-                        self_clone.checkpoint_mgr.lock().discard_pending();
+                        let rollback_res = self_clone.checkpoint_mgr.lock().rollback_pending();
+                        match rollback_res {
+                            Ok(summary) => {
+                                let tx_opt = self_clone.event_tx.lock().clone();
+                                if let Some(tx) = tx_opt {
+                                    let _ = tx
+                                        .send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                            "⚠️ Tool failed. Rolled back modifications:\n{}",
+                                            summary
+                                        )))
+                                        .await;
+                                }
+                            }
+                            Err(_) => {
+                                self_clone.checkpoint_mgr.lock().discard_pending();
+                            }
+                        }
                     }
                 }
                 (
@@ -3570,7 +3922,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                         Err(e) => {
                             let call = &current_batch_calls[i];
                             let err_msg = if e.is_panic() {
-                                format!("Skelegent Error: Tool '{}' panicked during execution (likely missing or invalid required arguments). Please check the tool schema.", call.function.name)
+                                format!(
+                                    "Skelegent Error: Tool '{}' panicked during execution (likely missing or invalid required arguments). Please check the tool schema.",
+                                    call.function.name
+                                )
                             } else {
                                 format!("Skelegent Error: Tool execution failed: {}", e)
                             };
@@ -3594,8 +3949,6 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 }
             }
         }
-
-
 
         Ok(results)
     }
@@ -3781,7 +4134,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             });
         }
 
-        let result = self.process_single_tool_call_internal(tool_call.clone(), skip_approval).await;
+        let result = self
+            .process_single_tool_call_internal(tool_call.clone(), skip_approval)
+            .await;
 
         if let Some(ref tx) = tx_opt {
             if result.2 {
@@ -3793,7 +4148,11 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             } else {
                 let _ = tx.try_send(crate::tui::AgentEvent::ToolError {
                     name: result.0.clone(),
-                    error: if result.1.is_empty() { "Execution failed".to_string() } else { result.1.clone() },
+                    error: if result.1.is_empty() {
+                        "Execution failed".to_string()
+                    } else {
+                        result.1.clone()
+                    },
                     args: Some(tool_call.function.arguments.to_string()),
                 });
             }
@@ -4093,7 +4452,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                         // Increment failure stats on final attempt or if non-retryable
                         let classification =
                             crate::error_classifier::classify_error(&tool_name, &err_msg);
-                        if classification != crate::error_classifier::ErrorClass::Retryable
+                        if classification.class != crate::error_classifier::ErrorClass::Retryable
                             || attempt == max_attempts
                         {
                             self.tool_stats
@@ -4105,7 +4464,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                                 .increment(1);
                         }
 
-                        if classification == crate::error_classifier::ErrorClass::Retryable
+                        if classification.class == crate::error_classifier::ErrorClass::Retryable
                             && attempt < max_attempts
                         {
                             // Exponential backoff with jitter
@@ -4136,24 +4495,21 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                                 false,
                             );
                             continue;
-                        } else if classification == crate::error_classifier::ErrorClass::Recoverable
-                        {
-                            let tip = if err_msg.to_lowercase().contains("permission")
-                                || err_msg.to_lowercase().contains("sudo")
+                        } else {
+                            let tip = if let Some(t) = &classification.tip {
+                                format!("\n\nSYSTEM TIP: {}", t)
+                            } else if classification.class
+                                == crate::error_classifier::ErrorClass::Recoverable
                             {
-                                "\n\nSYSTEM TIP: This looks like a permission issue. You may need to ask the user for elevated privileges (root/sudo) or use a different path."
+                                "\n\nSYSTEM TIP: This failure might be recoverable by changing your strategy or asking the user for clarification.".to_string()
                             } else {
-                                "\n\nSYSTEM TIP: This failure might be recoverable by changing your strategy or asking the user for clarification."
+                                "".to_string()
                             };
                             last_result = (
                                 tool_name.to_string(),
                                 format!("Error: {}{}", err_msg, tip),
                                 false,
                             );
-                            break;
-                        } else {
-                            last_result =
-                                (tool_name.to_string(), format!("Error: {}", err_msg), false);
                             break;
                         }
                     }
@@ -4191,6 +4547,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             backend: self.backend.clone(),
             model: self.model.lock().clone(),
             sub_agent_model: self.sub_agent_model.clone(),
+            embedding_model: self.embedding_model.clone(),
             history: self.history.clone(),
             task_context: self.task_context.clone(),
             vector_brain: self.vector_brain.clone(),
@@ -4512,6 +4869,44 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 continue;
             }
 
+            if user_msg == "/dream" {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(tx) = tx_opt.as_ref() {
+                    let _ = tx
+                        .send(crate::tui::AgentEvent::SystemUpdate(
+                            "💤 Entering memory consolidation phase (dreaming)...".to_string(),
+                        ))
+                        .await;
+                }
+
+                match self.consolidate_memories().await {
+                    Ok(summary) => {
+                        if let Some(tx) = tx_opt {
+                            let _ = tx
+                                .send(crate::tui::AgentEvent::StreamToken(format!(
+                                    "✨ {}\n",
+                                    summary
+                                )))
+                                .await;
+                            let _ = tx
+                                .send(crate::tui::AgentEvent::StreamToken(String::new()))
+                                .await;
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(tx) = tx_opt {
+                            let _ = tx
+                                .send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                    "⚠️ Memory consolidation failed: {}",
+                                    e
+                                )))
+                                .await;
+                        }
+                    }
+                }
+                continue;
+            }
+
             if user_msg.starts_with("/tool ") {
                 let parts: Vec<&str> = user_msg.splitn(3, ' ').collect();
                 if parts.len() >= 2 {
@@ -4588,6 +4983,9 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }));
 
             // Reset stop is not needed here as it's per-task now
+        }
+        if let Some(task) = current_task.take() {
+            task.abort();
         }
         Ok(())
     }
@@ -4693,19 +5091,32 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         }
     }
 
-    /// Explicitly unload the model from Ollama's memory (GPU) by sending a request with keep_alive: 0.
+    /// Explicitly unload all loaded models from Ollama's memory (GPU) by sending a request with keep_alive: 0.
     pub async fn shutdown(&self) {
         let backend = self.backend.read().await;
 
-        // 1. Unload primary model
-        let primary_model = self.model.lock().clone();
-        backend.shutdown(primary_model).await;
+        let mut models = std::collections::HashSet::new();
+        models.insert(self.model.lock().clone());
+        if let Some(planner) = &self.planner_model {
+            models.insert(planner.clone());
+        }
+        if let Some(executor) = &self.executor_model {
+            models.insert(executor.clone());
+        }
+        if let Some(verifier) = &self.verifier_model {
+            models.insert(verifier.clone());
+        }
+        if !self.sub_agent_model.is_empty() {
+            models.insert(self.sub_agent_model.clone());
+        }
+        if !self.embedding_model.is_empty() {
+            models.insert(self.embedding_model.clone());
+        }
 
-        // 2. Unload planner model if different
-        if let Some(planner) = &self.planner_model
-            && planner != &self.model.lock().clone()
-        {
-            backend.shutdown(planner.clone()).await;
+        for model in models {
+            if !model.is_empty() {
+                backend.shutdown(model).await;
+            }
         }
     }
 
@@ -4828,6 +5239,7 @@ mod tests {
             "test-session-id".to_string(),
             memory_store,
             "test-sub-model".to_string(),
+            "test-embedding-model".to_string(),
             Arc::new(Mutex::new(None)),
             AgentConfig {
                 planner_model: None,
@@ -4880,6 +5292,7 @@ mod tests {
             "test-session-id-2".to_string(),
             memory_store,
             "test-sub-model".to_string(),
+            "test-embedding-model".to_string(),
             Arc::new(Mutex::new(None)),
             AgentConfig {
                 planner_model: Some("deepseek-r1:8b".to_string()),
@@ -4938,6 +5351,7 @@ mod tests {
             "test-session-id-3".to_string(),
             memory_store,
             "test-sub-model".to_string(),
+            "test-embedding-model".to_string(),
             Arc::new(Mutex::new(None)),
             AgentConfig {
                 planner_model: None,
@@ -5021,6 +5435,7 @@ mod tests {
             "test-session-id-repair".to_string(),
             memory_store,
             "test-sub-model".to_string(),
+            "test-embedding-model".to_string(),
             Arc::new(Mutex::new(None)),
             AgentConfig {
                 planner_model: None,
@@ -5073,5 +5488,72 @@ mod tests {
         assert_eq!(name, "recall_memory");
         assert!(success, "Tool execution failed: {}", out);
         assert!(out.contains("No matching memories found.") || out.contains("memories"));
+    }
+
+    #[test]
+    fn test_json_extraction() {
+        let content = r#"The user is asking me to list the contents of the `./src/` directory. This is a straightforward request to examine the files in the source directory. I should use the `list_dir` tool to retrieve this information. Since the user hasn't specified any particular file, I'll assume they want a general overview of the directory structure. I'll explain my action and then call the tool.
+I'll list the contents of the `./src/` directory to show what files are present.
+{"tool":"list_dir","arguments":{"path":"./src"}}<｜begin of sentence｜>
+The user is asking me to list the contents of the `./src/` directory."#;
+
+        let mut calls = Vec::new();
+        let chars: Vec<char> = content.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                let mut brace_count = 0;
+                let mut in_string = false;
+                let mut escape = false;
+                let start_idx = i;
+                let mut end_idx = i;
+
+                let mut j = i;
+                while j < chars.len() {
+                    let c = chars[j];
+                    if !escape && c == '"' {
+                        in_string = !in_string;
+                    }
+                    if !in_string && !escape {
+                        if c == '{' {
+                            brace_count += 1;
+                        } else if c == '}' {
+                            brace_count -= 1;
+                        }
+                    }
+
+                    if c == '\\' {
+                        escape = !escape;
+                    } else {
+                        escape = false;
+                    }
+
+                    if brace_count == 0 {
+                        end_idx = j;
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if brace_count == 0 {
+                    let json_str: String = chars[start_idx..=end_idx].iter().collect();
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        if let Some(obj) = val.as_object()
+                            && (obj.contains_key("tool")
+                                || obj.contains_key("name")
+                                || obj.contains_key("function_name")
+                                || obj.contains_key("function")
+                                || obj.contains_key("action"))
+                        {
+                            calls.push(val);
+                        }
+                    }
+                    i = end_idx;
+                }
+            }
+            i += 1;
+        }
+
+        assert_eq!(calls.len(), 1);
     }
 }

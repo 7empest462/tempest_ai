@@ -4,8 +4,8 @@
 
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use sysinfo::{Components, System};
 use std::sync::atomic::Ordering;
+use sysinfo::{Components, System};
 
 #[cfg(target_os = "macos")]
 use tempest_monitor::macos_helper::get_macos_gpu_info;
@@ -21,7 +21,8 @@ pub async fn system_telemetry(
     extensive: Option<bool>,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
 
     let summary_only_val = summary_only.unwrap_or(false);
@@ -70,9 +71,7 @@ pub async fn system_telemetry(
     );
 
     if !tool_ctx.is_root.load(Ordering::SeqCst) {
-        report.push_str(
-            "⚠️  Note: Restricted privileges. Run as sudo for full GPU/SMC matrix.\n",
-        );
+        report.push_str("⚠️  Note: Restricted privileges. Run as sudo for full GPU/SMC matrix.\n");
     }
 
     if !summary_only_val {
@@ -125,9 +124,7 @@ pub async fn system_telemetry(
                 }
             }
             if total_sensors > sensor_limit {
-                report.push_str(
-                    "  ... [TRUNCATED] Critical thermal sensors prioritized above.\n",
-                );
+                report.push_str("  ... [TRUNCATED] Critical thermal sensors prioritized above.\n");
             }
         } else {
             report.push_str("  - [NONE DETECTED]\n");

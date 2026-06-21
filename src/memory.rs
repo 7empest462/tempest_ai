@@ -23,7 +23,10 @@ impl MemoryStore {
         path.push("tempest_ai");
         fs::create_dir_all(&path).into_diagnostic()?;
         path.push("brain.db");
+        Self::new_with_path(path, passphrase)
+    }
 
+    pub fn new_with_path(path: PathBuf, passphrase: String) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -159,5 +162,61 @@ impl MemoryStore {
             }
         }
         Ok(results)
+    }
+
+    pub fn passphrase(&self) -> &str {
+        &self.passphrase
+    }
+
+    pub fn clear_and_repopulate(
+        &self,
+        records: Vec<(String, String, Option<Vec<String>>)>,
+    ) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM memories", [])
+            .map_err(|e| miette::miette!("Failed to clear memories: {}", e))?;
+        for (topic, content, tags) in records {
+            self.store(&topic, &content, tags)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_store_encryption_and_clear_repopulate() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let store = MemoryStore::new_with_path(db_path, "test-passphrase".to_string()).unwrap();
+
+        // 1. Store a memory fact
+        store
+            .store("fact1", "fact1 content", Some(vec!["tag1".to_string()]))
+            .unwrap();
+        store
+            .store("fact2", "fact2 content", Some(vec!["tag2".to_string()]))
+            .unwrap();
+
+        // Verify stored
+        let records = store.list_all().unwrap();
+        assert_eq!(records.len(), 2);
+
+        // 2. Clear and repopulate
+        let new_records = vec![(
+            "consolidated_fact".to_string(),
+            "consolidated fact content".to_string(),
+            Some(vec!["tag1".to_string(), "tag2".to_string()]),
+        )];
+        store.clear_and_repopulate(new_records).unwrap();
+
+        // Verify clear and repopulate succeeded
+        let final_records = store.list_all().unwrap();
+        assert_eq!(final_records.len(), 1);
+        assert_eq!(final_records[0].topic, "consolidated_fact");
+        assert_eq!(final_records[0].content, "consolidated fact content");
+        assert_eq!(final_records[0].tags.as_deref(), Some("tag1, tag2"));
     }
 }

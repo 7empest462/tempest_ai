@@ -89,10 +89,7 @@ pub async fn cargo_search(
     cwd: Option<String>,
 ) -> Result<serde_json::Value, ToolError> {
     let mut cmd = Command::new("cargo");
-    cmd.arg("search")
-        .arg(&query)
-        .arg("--limit")
-        .arg("10");
+    cmd.arg("search").arg(&query).arg("--limit").arg("10");
 
     if let Some(dir) = cwd {
         let path = std::path::Path::new(&dir);

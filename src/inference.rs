@@ -49,17 +49,19 @@ pub struct BackendConfig {
     pub base_url: Option<String>,
     pub pa_memory_mb: Option<usize>,
     pub ollama_remote: Option<crate::OllamaRemoteConfig>,
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Clone)]
 pub enum Backend {
-    Ollama(Ollama),
+    Ollama(Ollama, String),
     #[cfg(target_os = "macos")]
     MLX {
         model: std::sync::Arc<Model>,
         _ctx_limit: usize,
         embedder: Option<std::sync::Arc<Model>>,
         ollama_fallback: Option<Ollama>,
+        embedding_model: String,
     },
     Bridge(crate::ai_bridge::TempestAiBridge),
     Kalosm {
@@ -110,7 +112,7 @@ pub struct ChatRequest {
 impl Backend {
     pub fn mode(&self) -> AgentMode {
         match self {
-            Backend::Ollama(_) => AgentMode::Ollama,
+            Backend::Ollama(_, _) => AgentMode::Ollama,
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => AgentMode::MLX,
             Backend::Bridge(_) => AgentMode::Bridge, // Note: LMStudio also maps to Bridge internally for now
@@ -131,7 +133,7 @@ impl Backend {
     #[allow(dead_code)]
     pub fn supports_tools(&self) -> bool {
         match self {
-            Backend::Ollama(_) => true,
+            Backend::Ollama(_, _) => true,
             #[cfg(target_os = "macos")]
             Backend::MLX { .. } => true,
             Backend::Bridge(_) => true, // We handle raw text tool parsing for Bridge
@@ -218,16 +220,23 @@ impl Backend {
                             .build()
                             .unwrap_or_default();
 
-                        client = Ollama::new_with_client(
-                            "http://localhost".to_string(),
-                            11435,
-                            reqwest_client,
-                        );
+                        client = Ollama::builder()
+                            .host("http://localhost".to_string())
+                            .port(11435)
+                            .reqwest_client(reqwest_client)
+                            .build();
                     } else {
-                        client = Ollama::new("http://localhost".to_string(), 11435);
+                        client = Ollama::builder()
+                            .host("http://localhost".to_string())
+                            .port(11435)
+                            .build();
                     }
 
-                    return Ok((Backend::Ollama(client), config.model));
+                    let embedding_model = config
+                        .embedding_model
+                        .clone()
+                        .unwrap_or_else(|| "mxbai-embed-large".to_string());
+                    return Ok((Backend::Ollama(client, embedding_model), config.model));
                 }
 
                 if let Some(url_str) = config.base_url
@@ -236,7 +245,11 @@ impl Backend {
                     client = Ollama::from_url(url);
                 }
 
-                Ok((Backend::Ollama(client), config.model))
+                let embedding_model = config
+                    .embedding_model
+                    .clone()
+                    .unwrap_or_else(|| "mxbai-embed-large".to_string());
+                Ok((Backend::Ollama(client, embedding_model), config.model))
             }
             AgentMode::MLX => {
                 #[cfg(target_os = "macos")]
@@ -249,7 +262,9 @@ impl Backend {
                                     .to_string(),
                             )))
                             .await;
-                        let _ = tx.send(AgentEvent::SubagentStatus(Some("📦 Note: Downloading/Verifying ~5GB model from Hugging Face if not cached...".to_string()))).await;
+                        let _ = tx.send(AgentEvent::SubagentStatus(Some(
+                            "📦 Note: Downloading/Verifying ~5GB model from Hugging Face if not cached...".to_string(),
+                        ))).await;
                     } else {
                         println!(
                             "{} Loading MLX Backend (Apple Silicon Neural Engine + GPU)...",
@@ -414,7 +429,10 @@ impl Backend {
                                 ))))
                                 .await;
                         } else {
-                            println!("🔒 [MLX Fallback] Establishing SSH Tunnel to {}...", remote.host);
+                            println!(
+                                "🔒 [MLX Fallback] Establishing SSH Tunnel to {}...",
+                                remote.host
+                            );
                         }
 
                         // Start SSH Tunnel
@@ -454,11 +472,13 @@ impl Backend {
                         // Build custom reqwest client if API key is provided
                         if let Some(api_key) = &remote.api_key {
                             let mut headers = reqwest::header::HeaderMap::new();
-                            let mut auth_value =
-                                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
-                                    .unwrap_or_else(|_| {
-                                        reqwest::header::HeaderValue::from_static("Bearer INVALID")
-                                    });
+                            let mut auth_value = reqwest::header::HeaderValue::from_str(&format!(
+                                "Bearer {}",
+                                api_key
+                            ))
+                            .unwrap_or_else(|_| {
+                                reqwest::header::HeaderValue::from_static("Bearer INVALID")
+                            });
                             auth_value.set_sensitive(true);
                             headers.insert(reqwest::header::AUTHORIZATION, auth_value);
 
@@ -467,13 +487,17 @@ impl Backend {
                                 .build()
                                 .unwrap_or_default();
 
-                            fallback_client = Ollama::new_with_client(
-                                "http://localhost".to_string(),
-                                11435,
-                                reqwest_client,
-                            );
+                            // Create fallback client
+                            fallback_client = Ollama::builder()
+                                .host("http://localhost".to_string())
+                                .port(11435)
+                                .reqwest_client(reqwest_client)
+                                .build();
                         } else {
-                            fallback_client = Ollama::new("http://localhost".to_string(), 11435);
+                            fallback_client = Ollama::builder()
+                                .host("http://localhost".to_string())
+                                .port(11435)
+                                .build();
                         }
                     } else if let Some(url_str) = &config.base_url
                         && let Ok(url) = url::Url::parse(url_str)
@@ -481,12 +505,17 @@ impl Backend {
                         fallback_client = Ollama::from_url(url.clone());
                     }
 
+                    let embedding_model = config
+                        .embedding_model
+                        .clone()
+                        .unwrap_or_else(|| "mxbai-embed-large".to_string());
                     Ok((
                         Backend::MLX {
                             model: std::sync::Arc::new(mlx_model),
                             _ctx_limit: config.ctx_limit,
                             embedder: embed_model,
                             ollama_fallback: Some(fallback_client),
+                            embedding_model,
                         },
                         config.model,
                     ))
@@ -499,7 +528,14 @@ impl Backend {
                     {
                         fallback_client = Ollama::from_url(url.clone());
                     }
-                    Ok((Backend::Ollama(fallback_client), config.model))
+                    let embedding_model = config
+                        .embedding_model
+                        .clone()
+                        .unwrap_or_else(|| "mxbai-embed-large".to_string());
+                    Ok((
+                        Backend::Ollama(fallback_client, embedding_model),
+                        config.model,
+                    ))
                 }
             }
             AgentMode::Bridge => {
@@ -647,10 +683,25 @@ impl Backend {
     }
 
     pub async fn stream_chat(&self, request: ChatRequest) -> Result<InferenceOutput> {
+        let use_native_tools = match self {
+            Backend::Ollama(_, _) => {
+                let model_lower = request.model.to_lowercase();
+                let is_reasoning = model_lower.contains("r1")
+                    || model_lower.contains("deepseek")
+                    || model_lower.contains("deep-seek")
+                    || model_lower.contains("qwq")
+                    || model_lower.contains("centurion")
+                    || model_lower.contains("battle")
+                    || model_lower.contains("reasoning");
+                !is_reasoning && request.tool_registry.is_some()
+            }
+            _ => false,
+        };
+
         let history = if matches!(self, Backend::Bridge(_)) {
             request.history
         } else {
-            normalize_history(&request.history)
+            normalize_history(&request.history, use_native_tools)
         };
 
         // Pre-allocate with capacity to reduce reallocations during streaming
@@ -878,7 +929,9 @@ impl Backend {
                                         is_thinking = false;
                                         current_pos += end_idx + 8;
                                         continue;
-                                    } else if let Some(json_idx) = text[current_pos..].find("```json") {
+                                    } else if let Some(json_idx) =
+                                        text[current_pos..].find("```json")
+                                    {
                                         // FAILSAFE: Implicit end of explicit thinking block
                                         let reasoning = &text[current_pos..current_pos + json_idx];
                                         reasoning_content.push_str(reasoning);
@@ -893,7 +946,9 @@ impl Backend {
                                         }
                                         current_pos += json_idx;
                                         continue;
-                                    } else if let Some(json_idx) = text[current_pos..].find("{\"tool\":") {
+                                    } else if let Some(json_idx) =
+                                        text[current_pos..].find("{\"tool\":")
+                                    {
                                         // FAILSAFE: Implicit end of thinking block via raw tool call JSON
                                         let reasoning = &text[current_pos..current_pos + json_idx];
                                         reasoning_content.push_str(reasoning);
@@ -1305,7 +1360,7 @@ impl Backend {
                     full_content.truncate(pos);
                 }
             }
-            Backend::Ollama(ollama) => {
+            Backend::Ollama(ollama, _) => {
                 let model_lower = request.model.to_lowercase();
                 let is_reasoning = model_lower.contains("r1")
                     || model_lower.contains("deepseek")
@@ -1323,7 +1378,7 @@ impl Backend {
                 }
 
                 let mut request_msg =
-                    ChatMessageRequest::new(request.model, history).options(options);
+                    ChatMessageRequest::new(request.model, history.clone()).options(options);
                 if let Some(registry) = request.tool_registry {
                     // DeepSeek R1/V3 on Ollama does not support native tools and throws 400
                     if !is_reasoning {
@@ -1353,17 +1408,18 @@ impl Backend {
                     }
                 }
                 let s = s.ok_or_else(|| miette!("Ollama chat stream failed"))?;
-                let mut stream = Box::pin(s.map(|res| res.map_err(|_| miette!("Ollama Stream Disconnected"))))
-                    as std::pin::Pin<
-                        Box<
-                            dyn futures::Stream<
-                                    Item = Result<
-                                        ollama_rs::generation::chat::ChatMessageResponse,
-                                        miette::Report,
-                                    >,
-                                > + Send,
-                        >,
-                    >;
+                let mut stream =
+                    Box::pin(s.map(|res| res.map_err(|_| miette!("Ollama Stream Disconnected"))))
+                        as std::pin::Pin<
+                            Box<
+                                dyn futures::Stream<
+                                        Item = Result<
+                                            ollama_rs::generation::chat::ChatMessageResponse,
+                                            miette::Report,
+                                        >,
+                                    > + Send,
+                            >,
+                        >;
 
                 let mut is_thinking = is_reasoning;
                 let mut first_token = true;
@@ -1374,6 +1430,8 @@ impl Backend {
 
                 let mut token_count = 0;
                 let start_time = std::time::Instant::now();
+
+                let mut final_metrics = None;
 
                 while let Some(res) = stream.next().await {
                     token_count += 1;
@@ -1394,6 +1452,9 @@ impl Backend {
                         break;
                     }
                     let chunk = res?;
+                    if let Some(final_data) = &chunk.final_data {
+                        final_metrics = Some(final_data.clone());
+                    }
 
                     let mut got_native_thinking = false;
                     let mut received_any_token = false;
@@ -1848,6 +1909,54 @@ impl Backend {
                     // The fallback extraction will catch any tool calls we might have missed.
                     // (Early break logic removed for Bridge backend - too aggressive)
                 }
+
+                if let Some(metrics) = final_metrics {
+                    let total_prompt_tokens = crate::context_manager::estimate_tokens(&history);
+                    let total_tokens = total_prompt_tokens.max(metrics.prompt_eval_count as usize);
+                    let cached_tokens =
+                        total_tokens.saturating_sub(metrics.prompt_eval_count as usize);
+                    let hit_pct = if total_tokens > 0 {
+                        (cached_tokens as f64 / total_tokens as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    let p_duration = std::time::Duration::from_nanos(metrics.prompt_eval_duration);
+                    let g_duration = std::time::Duration::from_nanos(metrics.eval_duration);
+
+                    let metric_msg = format!(
+                        "📊 [Ollama KV Cache]: {}/{} tokens cached ({:.1}% hit) | Prompt Eval: {} tok in {:.2}s ({:.1} t/s) | Gen: {} tok in {:.2}s ({:.1} t/s)",
+                        cached_tokens,
+                        total_tokens,
+                        hit_pct,
+                        metrics.prompt_eval_count,
+                        p_duration.as_secs_f64(),
+                        if p_duration.as_secs_f64() > 0.0 {
+                            metrics.prompt_eval_count as f64 / p_duration.as_secs_f64()
+                        } else {
+                            0.0
+                        },
+                        metrics.eval_count,
+                        g_duration.as_secs_f64(),
+                        if g_duration.as_secs_f64() > 0.0 {
+                            metrics.eval_count as f64 / g_duration.as_secs_f64()
+                        } else {
+                            0.0
+                        }
+                    );
+
+                    let tx_opt = request.event_tx.lock().clone();
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(AgentEvent::SystemUpdate(metric_msg)).await;
+                        let _ = tx
+                            .send(AgentEvent::ContextStatus {
+                                used: total_prompt_tokens,
+                                total: request.sampling.context_size,
+                                kv_cache_hit_pct: Some(hit_pct as f32),
+                            })
+                            .await;
+                    }
+                }
             }
             #[cfg(target_os = "macos")]
             Backend::MLX {
@@ -1862,6 +1971,7 @@ impl Backend {
                     let _ = tx.try_send(AgentEvent::ContextStatus {
                         used: est_tokens,
                         total: request.sampling.context_size,
+                        kv_cache_hit_pct: None,
                     });
                     let _ = tx.try_send(AgentEvent::SubagentStatus(Some(format!(
                         "⚡ MLX Engine: Dispatching request ({} history tokens)...",
@@ -1892,8 +2002,8 @@ impl Backend {
                 }
 
                 let model_lower = request.model.to_lowercase();
-                let is_reasoning_model =
-                    model_lower.contains("deepseek") || model_lower.contains("r1")
+                let is_reasoning_model = model_lower.contains("deepseek")
+                    || model_lower.contains("r1")
                     || model_lower.contains("deep-seek")
                     || model_lower.contains("qwq")
                     || model_lower.contains("centurion")
@@ -2897,7 +3007,10 @@ impl Backend {
         }
 
         // --- 🛡️ STREAM END FALLBACK: Recover empty content from reasoning ---
-        if full_content.trim().is_empty() && !reasoning_content.trim().is_empty() && native_tool_calls.is_empty() {
+        if full_content.trim().is_empty()
+            && !reasoning_content.trim().is_empty()
+            && native_tool_calls.is_empty()
+        {
             full_content = reasoning_content.clone();
             if let Some(tx) = request.event_tx.lock().clone() {
                 let _ = tx.try_send(AgentEvent::StreamToken(full_content.clone()));
@@ -2914,7 +3027,7 @@ impl Backend {
     pub async fn shutdown(&self, model: String) {
         kill_all_spawned_processes();
         match self {
-            Backend::Ollama(ollama) => {
+            Backend::Ollama(ollama, _) => {
                 let options = ModelOptions::default().num_ctx(1).temperature(0.1);
 
                 let request = GenerationRequest::new(model, "".to_string())
@@ -2925,7 +3038,7 @@ impl Backend {
                     });
 
                 let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(200),
+                    tokio::time::Duration::from_millis(1000),
                     ollama.generate(request),
                 )
                 .await;
@@ -2945,10 +3058,10 @@ impl Backend {
 
     pub async fn generate_embeddings(&self, text: &str) -> Result<Vec<f32>> {
         match self {
-            Backend::Ollama(ollama) => {
+            Backend::Ollama(ollama, embedding_model) => {
                 let req =
                     ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                        "all-minilm".to_string(),
+                        embedding_model.clone(),
                         text.to_string().into(),
                     );
                 let res = ollama
@@ -2961,6 +3074,7 @@ impl Backend {
             Backend::MLX {
                 embedder,
                 ollama_fallback,
+                embedding_model,
                 ..
             } => {
                 if let Some(embed) = embedder {
@@ -2974,7 +3088,7 @@ impl Backend {
                 } else if let Some(ollama) = ollama_fallback {
                     let req =
                         ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
-                            "all-minilm".to_string(),
+                            embedding_model.clone(),
                             text.to_string().into(),
                         );
                     let res = ollama
@@ -3132,8 +3246,7 @@ impl EmbeddingModel for Backend {
     }
 }
 
-
-fn normalize_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
+fn normalize_history(history: &[ChatMessage], use_native_tools: bool) -> Vec<ChatMessage> {
     if history.is_empty() {
         return Vec::new();
     }
@@ -3147,10 +3260,26 @@ fn normalize_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
                 if idx == 0 {
                     MessageRole::System // Keep the initial system instructions
                 } else {
-                    MessageRole::User // Convert mid-history system observations to User
+                    // Smart detection: if it's a tool observation system message, map it to Tool to match native tool call
+                    if use_native_tools
+                        && (msg
+                            .content
+                            .starts_with("=== SYSTEM OBSERVATION ===\nTool: ")
+                            || msg.content.starts_with("=== SYSTEM ERROR ===\nTool: "))
+                    {
+                        MessageRole::Tool
+                    } else {
+                        MessageRole::User // Convert mid-history system observations to User
+                    }
                 }
             }
-            MessageRole::Tool => MessageRole::User, // Convert tool results to User for universal compatibility
+            MessageRole::Tool => {
+                if use_native_tools {
+                    MessageRole::Tool
+                } else {
+                    MessageRole::User
+                }
+            }
             other => other.clone(),
         };
 
@@ -3174,14 +3303,19 @@ fn normalize_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
                 });
                 if let Ok(json_str) = serde_json::to_string(&json_val) {
                     let name_present = content.contains(&call.function.name)
-                        || msg.thinking.as_ref().is_some_and(|t| t.contains(&call.function.name));
-                    
+                        || msg
+                            .thinking
+                            .as_ref()
+                            .is_some_and(|t| t.contains(&call.function.name));
+
                     let already_formatted = content.contains(&json_str)
                         || msg.thinking.as_ref().is_some_and(|t| t.contains(&json_str))
-                        || (name_present && (
-                            content.contains("arguments")
-                            || msg.thinking.as_ref().is_some_and(|t| t.contains("arguments"))
-                        ));
+                        || (name_present
+                            && (content.contains("arguments")
+                                || msg
+                                    .thinking
+                                    .as_ref()
+                                    .is_some_and(|t| t.contains("arguments"))));
 
                     if !already_formatted {
                         if !content.ends_with('\n') && !content.is_empty() {
@@ -3241,7 +3375,8 @@ fn normalize_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
     merged
 }
 
-static SPAWNED_PROCESSES: std::sync::OnceLock<std::sync::Mutex<Vec<tokio::process::Child>>> = std::sync::OnceLock::new();
+static SPAWNED_PROCESSES: std::sync::OnceLock<std::sync::Mutex<Vec<tokio::process::Child>>> =
+    std::sync::OnceLock::new();
 
 pub fn register_spawned_process(child: tokio::process::Child) {
     SPAWNED_PROCESSES

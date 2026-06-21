@@ -1,15 +1,15 @@
-use std::sync::Arc;
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use parking_lot::Mutex;
+use std::sync::Arc;
 use tempest_ai::agent::{Agent, AgentConfig};
 use tempest_ai::inference::AgentMode;
-use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_in_memory_state_store() {
     let memory_store = Arc::new(Mutex::new(
         tempest_ai::memory::MemoryStore::new("test-passphrase".to_string()).unwrap(),
     ));
-    
+
     // Create agent with ":memory:" path
     let agent = Agent::new(
         AgentMode::Ollama,
@@ -20,6 +20,7 @@ async fn test_in_memory_state_store() {
         "test-session-id".to_string(),
         memory_store,
         "test-sub-model".to_string(),
+        "test-embedding-model".to_string(),
         Arc::new(Mutex::new(None)),
         AgentConfig {
             planner_model: None,
@@ -48,12 +49,17 @@ async fn test_in_memory_state_store() {
             ollama_remote: None,
             tool_engine: "legacy".to_string(),
         },
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Verify state store is memory state store (we can test indirectly by saving/loading history)
     {
         let mut history = agent.history.lock();
-        history.push(ChatMessage::new(MessageRole::User, "Hello in-memory store".to_string()));
+        history.push(ChatMessage::new(
+            MessageRole::User,
+            "Hello in-memory store".to_string(),
+        ));
     }
 
     // Save history

@@ -65,10 +65,16 @@ interface TempestState {
   tps: string;
   ctxUsed: number;
   ctxTotal: number;
+  kvCacheHitPct: number | null;
+  planningDurationMs: number | null;
+  executingDurationMs: number | null;
+  verifyingDurationMs: number | null;
   setMetrics: (cpu: number, gpu: number, ram: string) => void;
   setTps: (tps: string) => void;
   setCtxUsed: (ctx: number) => void;
   setCtxTotal: (ctx: number) => void;
+  setKvCacheHitPct: (val: number | null) => void;
+  setPhaseDurations: (planning: number | null, executing: number | null, verifying: number | null) => void;
 
   // Agent Lifecycle
   agentPhase: AgentPhase;
@@ -175,10 +181,20 @@ export const useStore = create<TempestState>()(
   tps: 'idle',
   ctxUsed: 0,
   ctxTotal: 32768,
+  kvCacheHitPct: null,
+  planningDurationMs: null,
+  executingDurationMs: null,
+  verifyingDurationMs: null,
   setMetrics: (cpu, gpu, ram) => set({ cpu, gpu, ram }),
   setTps: (tps) => set({ tps }),
   setCtxUsed: (ctx) => set({ ctxUsed: ctx }),
   setCtxTotal: (ctx) => set({ ctxTotal: ctx }),
+  setKvCacheHitPct: (val) => set({ kvCacheHitPct: val }),
+  setPhaseDurations: (planning, executing, verifying) => set({
+    planningDurationMs: planning,
+    executingDurationMs: executing,
+    verifyingDurationMs: verifying,
+  }),
 
   agentPhase: 'Idle',
   currentTask: '--',
@@ -201,7 +217,13 @@ export const useStore = create<TempestState>()(
     }
     return { messages: newMsgs };
   }),
-  setStreaming: (val) => set({ isStreaming: val }),
+  setStreaming: (val) => set((state) => ({
+    isStreaming: val,
+    kvCacheHitPct: val ? null : state.kvCacheHitPct,
+    planningDurationMs: val ? null : state.planningDurationMs,
+    executingDurationMs: val ? null : state.executingDurationMs,
+    verifyingDurationMs: val ? null : state.verifyingDurationMs,
+  })),
   appendStreamContent: (chunk) => set((state) => ({ streamAccumulator: state.streamAccumulator + chunk })),
   commitStream: () => set((state) => {
     if (!state.streamAccumulator && !state.reasoningAccumulator && state.currentToolResults.length === 0) {

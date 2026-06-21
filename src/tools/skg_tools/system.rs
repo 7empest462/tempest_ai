@@ -27,14 +27,22 @@ pub async fn systemd_manager(
             }
             "start" | "stop" | "restart" | "status" | "enable" | "disable" => {
                 if unit_name.is_empty() {
-                    return Err(ToolError::ExecutionFailed("Unit name is required for this action.".to_string()));
+                    return Err(ToolError::ExecutionFailed(
+                        "Unit name is required for this action.".to_string(),
+                    ));
                 }
                 cmd.args([action.as_str(), unit_name]);
             }
-            _ => return Err(ToolError::ExecutionFailed(format!("Unsupported action '{}'.", action))),
+            _ => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Unsupported action '{}'.",
+                    action
+                )));
+            }
         }
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to run systemctl: {}", e)))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -49,7 +57,9 @@ pub async fn systemd_manager(
     {
         let _ = action;
         let _ = unit;
-        Ok(serde_json::Value::String("Systemd is only available on Linux system.".to_string()))
+        Ok(serde_json::Value::String(
+            "Systemd is only available on Linux system.".to_string(),
+        ))
     }
 }
 
@@ -59,9 +69,7 @@ pub async fn systemd_manager(
     name = "current_process_info",
     description = "Returns technical details about the agent's own process state (RAM, uptime)."
 )]
-pub async fn current_process_info(
-    _ctx: &ToolCallContext,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn current_process_info(_ctx: &ToolCallContext) -> Result<serde_json::Value, ToolError> {
     let mut sys = System::new_all();
     sys.refresh_all();
 

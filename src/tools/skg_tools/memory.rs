@@ -17,15 +17,20 @@ pub async fn store_memory(
     tags: Option<Vec<String>>,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
-        
+
     let memory_store = tool_ctx.memory_store.clone();
-    
-    memory_store.lock().store(&fact, &fact, tags)
+
+    memory_store
+        .lock()
+        .store(&fact, &fact, tags)
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to store memory: {}", e)))?;
-        
-    Ok(serde_json::Value::String("Fact stored successfully in long-term memory.".to_string()))
+
+    Ok(serde_json::Value::String(
+        "Fact stored successfully in long-term memory.".to_string(),
+    ))
 }
 
 // ── recall_memory ──────────────────────────────────────────────────────────────
@@ -38,16 +43,21 @@ pub async fn recall_memory(
     query: String,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
-        
+
     let memory_store = tool_ctx.memory_store.clone();
-    
-    let memories = memory_store.lock().recall(&query)
+
+    let memories = memory_store
+        .lock()
+        .recall(&query)
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to recall memory: {}", e)))?;
-        
+
     if memories.is_empty() {
-        Ok(serde_json::Value::String("No matching memories found.".to_string()))
+        Ok(serde_json::Value::String(
+            "No matching memories found.".to_string(),
+        ))
     } else {
         let mut out = String::from("Relevant memories discovered:\n");
         for (i, (topic, content)) in memories.iter().enumerate() {
@@ -67,16 +77,21 @@ pub async fn memory_search(
     query: String,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
-        
+
     let memory_store = tool_ctx.memory_store.clone();
-    
-    let memories = memory_store.lock().recall(&query)
+
+    let memories = memory_store
+        .lock()
+        .recall(&query)
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to search memory: {}", e)))?;
-        
+
     if memories.is_empty() {
-        Ok(serde_json::Value::String("No matching memories found in search.".to_string()))
+        Ok(serde_json::Value::String(
+            "No matching memories found in search.".to_string(),
+        ))
     } else {
         let mut out = String::from("Global memory search results:\n");
         for (i, (topic, content)) in memories.iter().enumerate() {

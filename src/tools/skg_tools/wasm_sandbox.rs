@@ -2,9 +2,9 @@
 // 🧪 SKG WASM SANDBOX TOOL — Native Skelegent Implementations
 // ==========================================
 
+use crate::wasm_engine::WasmSandboxEngine;
 use skg_tool::{ToolCallContext, ToolError};
 use skg_tool_macro::skg_tool;
-use crate::wasm_engine::WasmSandboxEngine;
 
 // ── wasm_safe_calc ─────────────────────────────────────────────────────────────
 
@@ -29,13 +29,14 @@ pub async fn wasm_safe_calc(
 
     if op_lower == "div" && rh == 0 {
         return Err(ToolError::ExecutionFailed(
-            "WASM Execution Error: Division by zero is prohibited.".to_string()
+            "WASM Execution Error: Division by zero is prohibited.".to_string(),
         ));
     }
 
     let engine = WasmSandboxEngine::new()
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to create WASM engine: {}", e)))?;
-    let res = engine.run_calculator(lh, rh, &op_lower)
+    let res = engine
+        .run_calculator(lh, rh, &op_lower)
         .map_err(|e| ToolError::ExecutionFailed(format!("WASM execution failed: {}", e)))?;
 
     Ok(serde_json::Value::String(format!(

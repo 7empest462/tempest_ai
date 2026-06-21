@@ -14,6 +14,7 @@ pub struct ToolContext {
     #[allow(dead_code)]
     pub model: String,
     pub sub_agent_model: String,
+    pub embedding_model: String,
     #[allow(dead_code)]
     pub history: Arc<Mutex<Vec<ChatMessage>>>,
 
@@ -56,6 +57,51 @@ pub trait AgentTool: Send + Sync {
     async fn get_approval_preview(&self, _args: &Value) -> Option<String> {
         None
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct GenericParams(pub Value);
+
+impl schemars::JsonSchema for GenericParams {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("GenericParams")
+    }
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        true.into()
+    }
+}
+
+#[macro_export]
+macro_rules! define_ollama_tool_adapter {
+    ($name:ident, $name_str:expr, $desc_str:expr) => {
+        pub struct $name {
+            pub tool: std::sync::Arc<dyn $crate::tools::AgentTool>,
+            pub context: $crate::tools::ToolContext,
+        }
+        impl ollama_rs::generation::tools::Tool for $name {
+            type Params = $crate::tools::GenericParams;
+            fn name() -> &'static str {
+                $name_str
+            }
+            fn description() -> &'static str {
+                $desc_str
+            }
+            fn call(
+                &mut self,
+                parameters: Self::Params,
+            ) -> impl std::future::Future<
+                Output = std::result::Result<String, Box<dyn std::error::Error + Send + Sync>>,
+            > + Send {
+                let tool = self.tool.clone();
+                let context = self.context.clone();
+                async move {
+                    tool.execute(&parameters.0, context)
+                        .await
+                        .map_err(|e| e.into())
+                }
+            }
+        }
+    };
 }
 
 pub mod agent_ops;

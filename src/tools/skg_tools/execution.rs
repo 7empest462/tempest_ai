@@ -28,11 +28,12 @@ pub async fn run_command(
     let timeout_secs = timeout_seconds.unwrap_or(30);
 
     // Check for elevated privileges via ToolContext deps injection
-    let is_elevated = if let Some(tool_ctx) = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>() {
-        tool_ctx.is_root.load(std::sync::atomic::Ordering::SeqCst)
-    } else {
-        false
-    };
+    let is_elevated =
+        if let Some(tool_ctx) = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>() {
+            tool_ctx.is_root.load(std::sync::atomic::Ordering::SeqCst)
+        } else {
+            false
+        };
 
     let final_cmd = if is_elevated && !command.starts_with("sudo ") {
         format!("sudo -n {}", command)
@@ -111,8 +112,7 @@ pub async fn run_tests(
         format!("cargo test {} -- --nocapture", filter)
     } else if std::path::Path::new("package.json").exists() {
         format!("npm test -- {}", filter)
-    } else if std::path::Path::new("pytest.ini").exists()
-        || std::path::Path::new("tests").exists()
+    } else if std::path::Path::new("pytest.ini").exists() || std::path::Path::new("tests").exists()
     {
         format!("pytest {}", filter)
     } else {
@@ -130,9 +130,7 @@ pub async fn run_tests(
     name = "build_project",
     description = "Builds the current project using the detected build system."
 )]
-pub async fn build_project(
-    ctx: &ToolCallContext,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn build_project(ctx: &ToolCallContext) -> Result<serde_json::Value, ToolError> {
     let cmd = if std::path::Path::new("Cargo.toml").exists() {
         "cargo build"
     } else if std::path::Path::new("package.json").exists() {

@@ -3,14 +3,14 @@
 // ==========================================
 // Replaces the legacy AgentTool terminal tools.
 
-use skg_tool::{ToolCallContext, ToolError, ToolDyn};
-use skg_tool_macro::skg_tool;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
-use uuid::Uuid;
+use skg_tool::{ToolCallContext, ToolDyn, ToolError};
+use skg_tool_macro::skg_tool;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use uuid::Uuid;
 
 pub struct TerminalSession {
     pub writer: Box<dyn Write + Send>,
@@ -29,11 +29,9 @@ fn terminal_registry() -> &'static Mutex<HashMap<String, TerminalSession>> {
     name = "terminal_spawn",
     description = "Spawns a new interactive pseudo-terminal (PTY) session. Returns a session_id. Use this to maintain persistent shell sessions, run REPLs, or execute commands that require state to be maintained between calls."
 )]
-pub async fn terminal_spawn(
-    shell: Option<String>,
-) -> Result<serde_json::Value, ToolError> {
-    let shell_cmd = shell
-        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "zsh".to_string()));
+pub async fn terminal_spawn(shell: Option<String>) -> Result<serde_json::Value, ToolError> {
+    let shell_cmd =
+        shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "zsh".to_string()));
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -73,9 +71,10 @@ pub async fn terminal_spawn(
         .master
         .try_clone_reader()
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to clone reader: {}", e)))?;
-    let writer = pair.master.take_writer().map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to take PTY writer: {}", e))
-    })?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to take PTY writer: {}", e)))?;
 
     let output_buffer = Arc::new(Mutex::new(String::new()));
     let buffer_clone = Arc::clone(&output_buffer);
@@ -173,20 +172,33 @@ impl ToolDyn for TerminalInputTool {
         &self,
         input_val: serde_json::Value,
         _ctx: &ToolCallContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, ToolError>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, ToolError>> + Send + '_>,
+    > {
         Box::pin(async move {
             let session_id: String = serde_json::from_value(
-                input_val.get("session_id").cloned().unwrap_or(serde_json::Value::Null)
-            ).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                input_val
+                    .get("session_id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
             let input: String = serde_json::from_value(
-                input_val.get("input").cloned().unwrap_or(serde_json::Value::Null)
-            ).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                input_val
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
             let wait_ms: Option<u64> = serde_json::from_value(
-                input_val.get("wait_ms").cloned().unwrap_or(serde_json::Value::Null)
-            ).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                input_val
+                    .get("wait_ms")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
             terminal_input_impl(session_id, input, wait_ms).await
         })
@@ -204,9 +216,9 @@ async fn terminal_input_impl(
         let mut registry = terminal_registry()
             .lock()
             .map_err(|_| ToolError::ExecutionFailed("Registry poisoned".to_string()))?;
-        let session = registry
-            .get_mut(&session_id)
-            .ok_or_else(|| ToolError::ExecutionFailed(format!("Invalid session_id: {}", session_id)))?;
+        let session = registry.get_mut(&session_id).ok_or_else(|| {
+            ToolError::ExecutionFailed(format!("Invalid session_id: {}", session_id))
+        })?;
 
         // Clear buffer BEFORE sending input so we only capture new output
         if let Ok(mut buf) = session.output_buffer.lock() {
@@ -217,10 +229,9 @@ async fn terminal_input_impl(
             .writer
             .write_all(input.as_bytes())
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write PTY input: {}", e)))?;
-        session
-            .writer
-            .flush()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to flush PTY writer: {}", e)))?;
+        session.writer.flush().map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to flush PTY writer: {}", e))
+        })?;
 
         Arc::clone(&session.output_buffer)
     };
@@ -252,16 +263,14 @@ async fn terminal_input_impl(
     name = "terminal_read",
     description = "Reads any accumulated output from a terminal session without sending new input."
 )]
-pub async fn terminal_read(
-    session_id: String,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn terminal_read(session_id: String) -> Result<serde_json::Value, ToolError> {
     let output = {
         let mut registry = terminal_registry()
             .lock()
             .map_err(|_| ToolError::ExecutionFailed("Registry poisoned".to_string()))?;
-        let session = registry
-            .get_mut(&session_id)
-            .ok_or_else(|| ToolError::ExecutionFailed(format!("Invalid session_id: {}", session_id)))?;
+        let session = registry.get_mut(&session_id).ok_or_else(|| {
+            ToolError::ExecutionFailed(format!("Invalid session_id: {}", session_id))
+        })?;
 
         let mut buf = session
             .output_buffer
@@ -273,7 +282,9 @@ pub async fn terminal_read(
     };
 
     if output.is_empty() {
-        Ok(serde_json::Value::String("No new output available.".to_string()))
+        Ok(serde_json::Value::String(
+            "No new output available.".to_string(),
+        ))
     } else {
         Ok(serde_json::Value::String(output))
     }
@@ -285,9 +296,7 @@ pub async fn terminal_read(
     name = "terminal_close",
     description = "Closes an active terminal session."
 )]
-pub async fn terminal_close(
-    session_id: String,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn terminal_close(session_id: String) -> Result<serde_json::Value, ToolError> {
     let mut registry = terminal_registry()
         .lock()
         .map_err(|_| ToolError::ExecutionFailed("Registry poisoned".to_string()))?;

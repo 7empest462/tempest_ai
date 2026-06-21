@@ -95,17 +95,19 @@ impl Actor for TelemetryActor {
                     let mut mem = process.memory();
                     #[cfg(target_os = "macos")]
                     {
-                        if let Some(meta) = tempest_monitor::macos_helper::get_process_metadata(pid) {
+                        if let Some(meta) = tempest_monitor::macos_helper::get_process_metadata(pid)
+                        {
                             mem += meta.compressed;
                         }
                     }
 
-                    if name.contains("tempest_ai")
-                        || name.contains("tempest-ai")
-                        || pid == self_pid
+                    if name.contains("tempest_ai") || name.contains("tempest-ai") || pid == self_pid
                     {
                         tempest_mem_bytes += mem;
-                    } else if name.contains("ollama") || name.contains("llama-server") {
+                    } else if name.contains("ollama")
+                        || name.contains("llama-server")
+                        || name.contains("llama_server")
+                    {
                         ollama_mem_bytes += mem;
                     } else if name.contains("lm studio")
                         || name.contains("lmstudio")

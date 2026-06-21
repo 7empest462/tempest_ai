@@ -1554,7 +1554,9 @@ impl OverwatchEngine {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        score.recent_intercepts.retain(|&t| now.saturating_sub(t) < 60);
+        score
+            .recent_intercepts
+            .retain(|&t| now.saturating_sub(t) < 60);
         if score.recent_intercepts.len() > 5 {
             return OverwatchVerdict::Intercept {
                 correction: "🛑 [OVERWATCH - RATE LIMIT]: Too many consecutive intercepts. \
@@ -1653,7 +1655,8 @@ impl OverwatchEngine {
                         let parent_str = parent.to_string_lossy();
                         if !parent_str.is_empty() && parent_str != "." && parent_str != "./" {
                             is_root = false;
-                            if parent_str == "src" || parent_str == "./src" || parent_str == "src/" {
+                            if parent_str == "src" || parent_str == "./src" || parent_str == "src/"
+                            {
                                 is_in_src = true;
                             }
                         }
@@ -1770,7 +1773,8 @@ impl OverwatchEngine {
                         let parent_str = parent.to_string_lossy();
                         if !parent_str.is_empty() && parent_str != "." && parent_str != "./" {
                             is_root = false;
-                            if parent_str == "src" || parent_str == "./src" || parent_str == "src/" {
+                            if parent_str == "src" || parent_str == "./src" || parent_str == "src/"
+                            {
                                 is_in_src = true;
                             }
                         }

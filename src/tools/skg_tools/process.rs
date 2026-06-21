@@ -23,9 +23,7 @@ fn process_registry() -> &'static Mutex<HashMap<String, ProcessLogs>> {
     name = "run_background",
     description = "Spawns a long-running bash/zsh command in the background (like starting a web server). Returns a process_id immediately. Use read_process_logs to check its output."
 )]
-pub async fn run_background(
-    command: String,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn run_background(command: String) -> Result<serde_json::Value, ToolError> {
     let current_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
 
@@ -97,9 +95,7 @@ pub async fn run_background(
     name = "read_process_logs",
     description = "Reads the stdout and stderr of a background process using its process_id."
 )]
-pub async fn read_process_logs(
-    process_id: String,
-) -> Result<serde_json::Value, ToolError> {
+pub async fn read_process_logs(process_id: String) -> Result<serde_json::Value, ToolError> {
     let registry = process_registry()
         .lock()
         .map_err(|_| ToolError::ExecutionFailed("Registry Poisoned".to_string()))?;
@@ -111,7 +107,9 @@ pub async fn read_process_logs(
             .clone();
 
         if log_text.is_empty() {
-            Ok(serde_json::Value::String("Process has produced no output yet.".to_string()))
+            Ok(serde_json::Value::String(
+                "Process has produced no output yet.".to_string(),
+            ))
         } else {
             let max_len = 4000;
             if log_text.len() > max_len {

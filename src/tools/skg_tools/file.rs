@@ -112,9 +112,8 @@ pub async fn write_file(
                 ToolError::ExecutionFailed(format!("Failed to create directory: {}", e))
             })?;
         }
-        fs::write(&path_clone, &content_clone).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to write file: {}", e))
-        })?;
+        fs::write(&path_clone, &content_clone)
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
         Ok(())
     })
     .await
@@ -128,10 +127,7 @@ pub async fn write_file(
 
 // ── list_dir ───────────────────────────────────────────────────────────────────
 
-#[skg_tool(
-    name = "list_dir",
-    description = "Lists directory contents."
-)]
+#[skg_tool(name = "list_dir", description = "Lists directory contents.")]
 pub async fn list_dir(
     path: Option<String>,
     _ctx: &ToolCallContext,
@@ -267,7 +263,9 @@ pub async fn diff_files(
     }
 
     if diff_str.is_empty() {
-        Ok(serde_json::Value::String("Files are identical.".to_string()))
+        Ok(serde_json::Value::String(
+            "Files are identical.".to_string(),
+        ))
     } else {
         Ok(serde_json::Value::String(format!(
             "Unified Diff between {} and {}:\n\n{}",
@@ -571,9 +569,10 @@ pub async fn extract_and_write(
     path: String,
     ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
-    let tool_ctx = ctx.deps::<std::sync::Arc<crate::tools::ToolContext>>()
+    let tool_ctx = ctx
+        .deps::<std::sync::Arc<crate::tools::ToolContext>>()
         .ok_or_else(|| ToolError::ExecutionFailed("Missing ToolContext dependency".to_string()))?;
-        
+
     let path_owned = shellexpand::tilde(&path).to_string();
     let history = tool_ctx.history.lock();
 
@@ -594,8 +593,9 @@ pub async fn extract_and_write(
                         .unwrap_or(&PathBuf::from(".")),
                 )
                 .map_err(|e| ToolError::ExecutionFailed(format!("Failed to create dir: {}", e)))?;
-                fs::write(&path_owned, content)
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
+                fs::write(&path_owned, content).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to write file: {}", e))
+                })?;
                 return Ok(serde_json::Value::String(format!(
                     "Successfully extracted content from Markdown block and wrote to {}",
                     path_owned
@@ -615,8 +615,9 @@ pub async fn extract_and_write(
                         .unwrap_or(&PathBuf::from(".")),
                 )
                 .map_err(|e| ToolError::ExecutionFailed(format!("Failed to create dir: {}", e)))?;
-                fs::write(&path_owned, content)
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
+                fs::write(&path_owned, content).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to write file: {}", e))
+                })?;
                 return Ok(serde_json::Value::String(format!(
                     "Successfully recovered content from raw JSON metadata and wrote to {}",
                     path_owned
@@ -630,4 +631,3 @@ pub async fn extract_and_write(
         path_owned
     )))
 }
-
