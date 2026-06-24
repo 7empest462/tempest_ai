@@ -24,13 +24,20 @@ fn process_registry() -> &'static Mutex<HashMap<String, ProcessLogs>> {
     description = "Spawns a long-running bash/zsh command in the background (like starting a web server). Returns a process_id immediately. Use read_process_logs to check its output."
 )]
 pub async fn run_background(command: String) -> Result<serde_json::Value, ToolError> {
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
+    let mut child_cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(&command);
+        c
+    } else {
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
+        let mut c = Command::new("sh");
+        c.env("PATH", new_path);
+        c.arg("-c").arg(&command);
+        c
+    };
 
-    let mut child = Command::new("sh")
-        .env("PATH", new_path)
-        .arg("-c")
-        .arg(&command)
+    let mut child = child_cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -148,10 +155,17 @@ pub async fn kill_process(
     let signal_owned = signal.unwrap_or_else(|| "TERM".to_string());
     let signal_str = signal_owned.as_str();
 
+    #[cfg(unix)]
     let output = std::process::Command::new("kill")
         .args([&format!("-{}", signal_str), &pid])
         .output()
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to run kill command: {}", e)))?;
+
+    #[cfg(not(unix))]
+    let output = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid])
+        .output()
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to run taskkill: {}", e)))?;
 
     if output.status.success() {
         process_registry()
@@ -217,11 +231,16 @@ pub async fn watch_directory(
                     if let notify::EventKind::Modify(_) = event.kind
                         && last_trigger.elapsed() > std::time::Duration::from_millis(1500)
                     {
-                        let _ = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(&trigger_command)
-                            .current_dir(&path_expanded)
-                            .spawn();
+                        let mut trigger_cmd = if cfg!(target_os = "windows") {
+                            let mut c = std::process::Command::new("cmd");
+                            c.arg("/C").arg(&trigger_command);
+                            c
+                        } else {
+                            let mut c = std::process::Command::new("sh");
+                            c.arg("-c").arg(&trigger_command);
+                            c
+                        };
+                        let _ = trigger_cmd.current_dir(&path_expanded).spawn();
                         last_trigger = std::time::Instant::now();
                     }
                 }
@@ -232,4 +251,69 @@ pub async fn watch_directory(
     });
 
     Ok(serde_json::Value::String(success_msg))
+}
+
+// ── list_processes ────────────────────────────────────────────────────────────
+
+#[skg_tool(
+    name = "list_processes",
+    description = "Lists running system processes with PID, name, CPU usage, and memory. Supports an optional filter."
+)]
+pub async fn list_processes(filter: Option<String>) -> Result<serde_json::Value, ToolError> {
+    let filter_lower = filter.map(|f| f.to_lowercase());
+
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_all();
+
+    let mut processes: Vec<_> = sys.processes().values().collect();
+    processes.sort_by(|a, b| {
+        b.cpu_usage()
+            .partial_cmp(&a.cpu_usage())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name().cmp(b.name()))
+    });
+
+    let mut table = String::new();
+    table.push_str("| PID | Name | CPU (%) | Memory (MB) |\n");
+    table.push_str("|---|---|---|---|\n");
+
+    let mut count = 0;
+    for proc in processes {
+        let name = proc.name().to_string_lossy();
+        if let Some(f) = &filter_lower
+            && !name.to_lowercase().contains(f)
+        {
+            continue;
+        }
+
+        let mem_mb = proc.memory() as f64 / 1024.0 / 1024.0;
+        table.push_str(&format!(
+            "| {} | {} | {:.1}% | {:.1} MB |\n",
+            proc.pid(),
+            name,
+            proc.cpu_usage(),
+            mem_mb
+        ));
+        count += 1;
+
+        if filter_lower.is_none() && count >= 50 {
+            table.push_str(&format!("| ... | and {} more processes. Use the 'filter' parameter to narrow down. | ... | ... |\n", sys.processes().len() - 50));
+            break;
+        }
+    }
+
+    if count == 0 {
+        if let Some(f) = &filter_lower {
+            Ok(serde_json::Value::String(format!(
+                "No processes found matching filter: '{}'",
+                f
+            )))
+        } else {
+            Ok(serde_json::Value::String(
+                "No running processes found.".to_string(),
+            ))
+        }
+    } else {
+        Ok(serde_json::Value::String(table))
+    }
 }

@@ -10,7 +10,7 @@ fn language_for_extension(ext: &str) -> Option<arborium::tree_sitter::Language> 
         "yaml" | "yml" => "yaml",
         "java" => "java",
         "cpp" | "cc" | "cxx" | "hpp" => "cpp",
-        "sh" | "bash" | "zsh" => "bash",
+        "sh" | "bash" => "bash",
         "cs" | "csharp" => "c-sharp",
         "html" | "htm" => "html",
         "css" => "css",
@@ -33,6 +33,12 @@ fn language_for_extension(ext: &str) -> Option<arborium::tree_sitter::Language> 
         "vue" => "vue",
         "dockerfile" | "docker" => "dockerfile",
         "zig" => "zig",
+        "zsh" => "zsh",
+        "sshconfig" | "ssh-config" | "ssh" => "ssh-config",
+        "md" | "markdown" => "markdown",
+        "cmake" => "cmake",
+        "fish" => "fish",
+        "asm" | "s" | "assembly" => "asm",
         other => other,
     };
     arborium::get_language(lang_name)
@@ -53,4 +59,12 @@ fn test_arborium_lang_mapping() {
     assert!(language_for_extension("cs").is_some());
     assert!(language_for_extension("toml").is_some());
     assert!(language_for_extension("zig").is_some());
+    assert!(language_for_extension("zsh").is_some());
+    assert!(language_for_extension("ssh-config").is_some());
+    assert!(language_for_extension("md").is_some());
+    assert!(language_for_extension("markdown").is_some());
+    assert!(language_for_extension("cmake").is_some());
+    assert!(language_for_extension("fish").is_some());
+    assert!(language_for_extension("asm").is_some());
+    assert!(language_for_extension("s").is_some());
 }

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStore } from '../store';
 import { MessageCircleQuestion, Send } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { playApprovalSound } from '../utils/audio';
 
 export function AskUserModal() {
   const { askUserRequest, setAskUserRequest } = useStore();
@@ -11,6 +12,7 @@ export function AskUserModal() {
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    playApprovalSound();
     // @ts-ignore
     if (window.sendNexus) {
       // @ts-ignore
@@ -34,7 +36,9 @@ export function AskUserModal() {
             <MessageCircleQuestion className="drop-shadow-[0_0_8px_rgba(0,242,255,0.3)]" />
             <div>
               <h3 className="font-semibold text-sm tracking-wider">AGENT QUESTION</h3>
-              <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest mt-0.5">Clarification Required</p>
+              <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest mt-0.5">
+                Clarification Required
+              </p>
             </div>
           </div>
         </div>
@@ -43,7 +47,9 @@ export function AskUserModal() {
         <div className="flex-1 p-6 flex flex-col gap-4">
           {/* Question */}
           <div className="bg-white/5 border border-white/5 p-4 rounded-xl">
-            <p className="text-sm leading-relaxed text-white whitespace-pre-wrap">{askUserRequest.question}</p>
+            <p className="text-sm leading-relaxed text-white whitespace-pre-wrap">
+              {askUserRequest.question}
+            </p>
           </div>
 
           {/* Form */}

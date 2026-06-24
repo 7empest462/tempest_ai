@@ -53,42 +53,43 @@ impl TempestEffectExecutor {
                 content,
                 force_overwrite,
             } => {
+                let content = crate::tools::file::normalize_escaped_file_content(content);
                 let path_expanded = shellexpand::tilde(&path).to_string();
                 let path_buf = std::path::PathBuf::from(&path_expanded);
 
-                // Destructive write check (if file exists)
-                if path_buf.exists() && !force_overwrite {
-                    let old_metadata = fs::metadata(&path_buf)
-                        .map_err(|e| miette!("Failed to read metadata for {}: {}", path, e))?;
-                    let old_len = old_metadata.len();
-                    let new_len = content.len() as u64;
-
-                    let old_content_res = fs::read_to_string(&path_buf);
-                    let old_line_count = old_content_res
-                        .as_ref()
-                        .map(|s| s.lines().count())
-                        .unwrap_or(0);
-                    let new_line_count = content.lines().count();
-
-                    let is_destructive = (old_len > 100 && new_len < old_len / 2)
-                        || (old_line_count > 5 && new_line_count == 1);
-
-                    if is_destructive {
-                        return Err(miette!(
-                            "🛑 [DESTRUCTIVE WRITE BLOCKED]: This write would TRUNCATE '{}' from {} to {} bytes ({} to {} lines). \
-                            This looks like an accidental overwrite. If this is intentional, re-call write_file with force_overwrite: true. \
-                            For targeted edits, use edit_file_with_diff instead.",
-                            path,
-                            old_len,
-                            new_len,
-                            old_line_count,
-                            new_line_count
-                        ));
-                    }
-                }
-
                 let p_clone = path.clone();
                 tokio::task::spawn_blocking(move || {
+                    // Destructive write check (if file exists)
+                    if path_buf.exists() && !force_overwrite {
+                        let old_metadata = fs::metadata(&path_buf)
+                            .map_err(|e| miette!("Failed to read metadata for {}: {}", p_clone, e))?;
+                        let old_len = old_metadata.len();
+                        let new_len = content.len() as u64;
+
+                        let old_content_res = fs::read_to_string(&path_buf);
+                        let old_line_count = old_content_res
+                            .as_ref()
+                            .map(|s| s.lines().count())
+                            .unwrap_or(0);
+                        let new_line_count = content.lines().count();
+
+                        let is_destructive = (old_len > 100 && new_len < old_len / 2)
+                            || (old_line_count > 5 && new_line_count == 1);
+
+                        if is_destructive {
+                            return Err(miette!(
+                                "🛑 [DESTRUCTIVE WRITE BLOCKED]: This write would TRUNCATE '{}' from {} to {} bytes ({} to {} lines). \
+                                This looks like an accidental overwrite. If this is intentional, re-call write_file with force_overwrite: true. \
+                                For targeted edits, use edit_file_with_diff instead.",
+                                p_clone,
+                                old_len,
+                                new_len,
+                                old_line_count,
+                                new_line_count
+                            ));
+                        }
+                    }
+
                     if let Some(parent) = path_buf.parent() {
                         fs::create_dir_all(parent).map_err(|e| {
                             miette!("Failed to create parent directory for {}: {}", p_clone, e)
@@ -126,11 +127,23 @@ impl TempestEffectExecutor {
                 if output.status.success() {
                     Ok(stdout)
                 } else {
-                    Err(miette!(
-                        "Command failed with exit code: {:?}\nError: {}",
-                        output.status.code(),
-                        stderr
-                    ))
+                    let exit_desc = match output.status.code() {
+                        Some(code) => format!("exit code: {}", code),
+                        None => "terminated by signal".to_string(),
+                    };
+                    let err_msg = if !stderr.is_empty() && !stdout.is_empty() {
+                        format!(
+                            "Command failed ({}).\nSTDOUT:\n{}\nSTDERR:\n{}",
+                            exit_desc, stdout, stderr
+                        )
+                    } else if !stderr.is_empty() {
+                        format!("Command failed ({}).\nSTDERR:\n{}", exit_desc, stderr)
+                    } else if !stdout.is_empty() {
+                        format!("Command failed ({}).\nSTDOUT:\n{}", exit_desc, stdout)
+                    } else {
+                        format!("Command failed ({}) with no output.", exit_desc)
+                    };
+                    Err(miette!("{}", err_msg))
                 }
             }
         }

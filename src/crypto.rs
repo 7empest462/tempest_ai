@@ -12,7 +12,7 @@ const SALT: &[u8] = b"tempest_ai_v1_salt";
 const NONCE_SIZE: usize = 12;
 
 /// Derive a 256-bit key from a passphrase using Argon2id
-fn derive_key(passphrase: &str) -> Zeroizing<[u8; 32]> {
+pub fn derive_key(passphrase: &str) -> Zeroizing<[u8; 32]> {
     let mut key = Zeroizing::new([0u8; 32]);
     Argon2::default()
         .hash_password_into(passphrase.as_bytes(), SALT, key.as_mut())
@@ -20,11 +20,10 @@ fn derive_key(passphrase: &str) -> Zeroizing<[u8; 32]> {
     key
 }
 
-/// Encrypt data using AES-256-GCM with an Argon2-derived key
-pub fn encrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
-    let key = derive_key(passphrase);
-    let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-        .map_err(|e| miette!("Cipher init failed: {}", e))?;
+/// Encrypt data using AES-256-GCM with a pre-derived 256-bit key
+pub fn encrypt_history_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| miette!("Cipher init failed: {}", e))?;
 
     // Generate a random nonce
     let nonce_bytes: [u8; NONCE_SIZE] = {
@@ -46,15 +45,14 @@ pub fn encrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     Ok(result)
 }
 
-/// Decrypt data using AES-256-GCM with an Argon2-derived key
-pub fn decrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+/// Decrypt data using AES-256-GCM with a pre-derived 256-bit key
+pub fn decrypt_history_with_key(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     if data.len() < NONCE_SIZE {
         return Err(miette!("Encrypted data too short to contain nonce"));
     }
 
-    let key = derive_key(passphrase);
-    let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-        .map_err(|e| miette!("Cipher init failed: {}", e))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| miette!("Cipher init failed: {}", e))?;
 
     let nonce = Nonce::from_slice(&data[..NONCE_SIZE]);
     let ciphertext = &data[NONCE_SIZE..];
@@ -64,4 +62,16 @@ pub fn decrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
         .map_err(|e| miette!("Decryption failed (wrong passphrase?): {}", e))?;
 
     Ok(plaintext)
+}
+
+/// Encrypt data using AES-256-GCM with an Argon2-derived key
+pub fn encrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    let key = derive_key(passphrase);
+    encrypt_history_with_key(data, &key)
+}
+
+/// Decrypt data using AES-256-GCM with an Argon2-derived key
+pub fn decrypt_history(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    let key = derive_key(passphrase);
+    decrypt_history_with_key(data, &key)
 }

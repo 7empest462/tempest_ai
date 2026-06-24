@@ -3,17 +3,22 @@ use miette::Result;
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::models::ModelOptions;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 // SKG types
 use skg_context_engine::{Context, Rule};
 
 pub struct ContextLimit(pub usize);
 
+static TOKENIZER: OnceLock<&'static tiktoken::CoreBpe> = OnceLock::new();
+
 /// Count tokens for a single string using the cached BPE tokenizer.
 pub fn count_tokens(text: &str) -> usize {
-    let enc = tiktoken::get_encoding("qwen2")
-        .or(tiktoken::get_encoding("deepseek_v3"))
-        .unwrap_or(tiktoken::get_encoding("cl100k_base").unwrap());
+    let enc = TOKENIZER.get_or_init(|| {
+        tiktoken::get_encoding("qwen2")
+            .or_else(|| tiktoken::get_encoding("deepseek_v3"))
+            .unwrap_or_else(|| tiktoken::get_encoding("cl100k_base").unwrap())
+    });
     enc.count(text)
 }
 
@@ -22,6 +27,14 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     let mut total = 0;
     for msg in messages {
         total += count_tokens(&msg.content);
+        if let Some(ref thinking) = msg.thinking {
+            total += count_tokens(thinking);
+        }
+        if !msg.tool_calls.is_empty()
+            && let Ok(serialized) = serde_json::to_string(&msg.tool_calls)
+        {
+            total += count_tokens(&serialized);
+        }
         total += 4;
     }
     total
@@ -51,7 +64,19 @@ pub fn to_layer0_messages(messages: &[ChatMessage]) -> Vec<layer0::context::Mess
             let content = if msg.role == MessageRole::Tool {
                 format!("[TOOL RESULT]: {}", msg.content)
             } else {
-                msg.content.clone()
+                let mut c = msg.content.clone();
+                if let Some(ref thinking) = msg.thinking
+                    && !thinking.is_empty()
+                    && !c.contains("<think>")
+                {
+                    c = format!("<think>\n{}\n</think>\n{}", thinking, c);
+                }
+                if !msg.tool_calls.is_empty()
+                    && let Ok(serialized) = serde_json::to_string(&msg.tool_calls)
+                {
+                    c = format!("<tool_calls>\n{}\n</tool_calls>\n{}", serialized, c);
+                }
+                c
             };
             layer0::context::Message::new(role, layer0::content::Content::text(content))
         })
@@ -76,12 +101,45 @@ pub fn to_chat_messages(messages: &[layer0::context::Message]) -> Vec<ChatMessag
             } else {
                 role
             };
+
+            let mut tool_calls = Vec::new();
+            if let Some(start_idx) = content.find("<tool_calls>\n")
+                && let Some(end_idx) = content.find("\n</tool_calls>\n")
+                && start_idx < end_idx
+            {
+                let json_str = &content[start_idx + "<tool_calls>\n".len()..end_idx];
+                if let Ok(parsed) =
+                    serde_json::from_str::<Vec<ollama_rs::generation::tools::ToolCall>>(json_str)
+                {
+                    tool_calls = parsed;
+                    content = format!(
+                        "{}{}",
+                        &content[..start_idx],
+                        &content[end_idx + "\n</tool_calls>\n".len()..]
+                    );
+                }
+            }
+
+            let mut thinking = None;
+            if let Some(start_idx) = content.find("<think>\n")
+                && let Some(end_idx) = content.find("\n</think>\n")
+                && start_idx < end_idx
+            {
+                let think_str = &content[start_idx + "<think>\n".len()..end_idx];
+                thinking = Some(think_str.to_string());
+                content = format!(
+                    "{}{}",
+                    &content[..start_idx],
+                    &content[end_idx + "\n</think>\n".len()..]
+                );
+            }
+
             ChatMessage {
                 role: final_role,
                 content,
                 images: None,
-                tool_calls: Vec::new(),
-                thinking: None,
+                tool_calls,
+                thinking,
             }
         })
         .collect()
@@ -90,7 +148,11 @@ pub fn to_chat_messages(messages: &[layer0::context::Message]) -> Vec<ChatMessag
 /// Returns true if the estimated token count exceeds the trigger threshold.
 pub fn needs_compaction(messages: &[ChatMessage], ctx_limit: u64) -> bool {
     let estimated = estimate_tokens(messages);
-    let focal_cap = 20000;
+    let focal_cap = if ctx_limit > 100_000 {
+        (ctx_limit as f64 * 0.85) as usize
+    } else {
+        20000
+    };
     let threshold = ((ctx_limit as f64 * 0.85) as usize).min(focal_cap);
     estimated > threshold
 }
@@ -152,7 +214,11 @@ impl skg_context_engine::ContextOp for VectorCompactionOp {
             .unwrap_or(20000);
         let current_tokens = estimate_tokens_layer0(&ctx.messages);
 
-        let focal_cap = 20000;
+        let focal_cap = if limit > 100_000 {
+            (limit as f64 * 0.85) as usize
+        } else {
+            20000
+        };
         let threshold = ((limit as f64 * 0.85) as usize).min(focal_cap);
 
         if current_tokens <= threshold {

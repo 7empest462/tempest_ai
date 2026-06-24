@@ -1,6 +1,7 @@
 import { useStore } from '../store';
 import { ShieldAlert, Check, X } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { playApprovalSound } from '../utils/audio';
 
 export function SafeModeModal() {
   const { safeModeRequest, setSafeModeRequest } = useStore();
@@ -8,6 +9,7 @@ export function SafeModeModal() {
   if (!safeModeRequest) return null;
 
   const handleApprove = () => {
+    playApprovalSound();
     // @ts-ignore
     if (window.sendNexus) {
       // @ts-ignore
@@ -39,7 +41,9 @@ export function SafeModeModal() {
             <ShieldAlert className="drop-shadow-[0_0_8px_rgba(251,191,36,0.3)]" />
             <div>
               <h3 className="font-semibold text-sm tracking-wider">APPROVAL REQUIRED</h3>
-              <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest mt-0.5">Safe Mode Sentinel Gate</p>
+              <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest mt-0.5">
+                Safe Mode Sentinel Gate
+              </p>
             </div>
           </div>
         </div>
@@ -48,19 +52,24 @@ export function SafeModeModal() {
         <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4 min-h-0">
           {/* Rationale */}
           <div className="bg-white/5 border border-white/5 p-4 rounded-xl">
-            <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-1">Proposed Rationale</h4>
+            <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-1">
+              Proposed Rationale
+            </h4>
             <p className="text-sm leading-relaxed text-white">{safeModeRequest.rationale}</p>
           </div>
 
           {/* Diff */}
           <div className="flex-1 flex flex-col gap-1 min-h-0">
-            <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-1">Code Diff</h4>
+            <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-1">
+              Code Diff
+            </h4>
             <div className="flex-1 bg-black/40 border border-border/50 rounded-xl overflow-auto p-4 max-h-[45vh] font-mono text-xs select-text leading-relaxed">
               {safeModeRequest.diff ? (
                 safeModeRequest.diff.split('\n').map((line, idx) => {
                   let lineClass = 'text-muted-foreground/80';
                   if (line.startsWith('+')) {
-                    lineClass = 'text-green-400 bg-green-500/10 px-1.5 rounded-sm block w-full py-0.5';
+                    lineClass =
+                      'text-green-400 bg-green-500/10 px-1.5 rounded-sm block w-full py-0.5';
                   } else if (line.startsWith('-')) {
                     lineClass = 'text-red-400 bg-red-500/10 px-1.5 rounded-sm block w-full py-0.5';
                   } else if (line.startsWith('@@')) {
@@ -73,7 +82,9 @@ export function SafeModeModal() {
                   );
                 })
               ) : (
-                <span className="italic text-muted-foreground">No diff payload provided (Permission Escalation)</span>
+                <span className="italic text-muted-foreground">
+                  No diff payload provided (Permission Escalation)
+                </span>
               )}
             </div>
           </div>

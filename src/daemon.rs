@@ -144,4 +144,8 @@ WantedBy=multi-user.target"#;
         println!("✅ Installed to {}", service_path);
         println!("🚀 Background persistence engaged via systemctl.");
     }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        println!("❌ Background daemon installation is not supported on this platform yet.");
+    }
 }

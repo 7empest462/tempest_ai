@@ -190,7 +190,7 @@ impl AgentTool for ReadUrlTool {
         let html_bytes = res.bytes().await.into_diagnostic()?;
 
         // Use html2text to strip HTML tags and present clean text
-        let text = html2text::from_read(html_bytes.as_ref(), 100);
+        let text = html2text::from_read(html_bytes.as_ref(), 100).unwrap_or_else(|_| String::new());
 
         let max_len = 15000;
         let mut truncated = text;

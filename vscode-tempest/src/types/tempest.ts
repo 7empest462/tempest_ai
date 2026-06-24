@@ -13,7 +13,12 @@ export interface TempestChatParams {
 }
 
 export interface TempestRequest {
-  method: 'tempest/chat' | 'tempest/status' | 'tempest/switch_backend' | 'tempest/clear_history' | 'tempest/get_state';
+  method:
+    | 'tempest/chat'
+    | 'tempest/status'
+    | 'tempest/switch_backend'
+    | 'tempest/clear_history'
+    | 'tempest/get_state';
   params?: any;
 }
 

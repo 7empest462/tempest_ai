@@ -126,12 +126,12 @@ impl AgentTool for NotifyTool {
                 .arg(&script)
                 .output()
                 .into_diagnostic()?;
-            if output.status.success() {
+            return if output.status.success() {
                 Ok(format!("🔔 Notification sent: {} — {}", title, message))
             } else {
                 let err = String::from_utf8_lossy(&output.stderr);
                 Err(miette!("Failed to send notification: {}", err))
-            }
+            };
         }
 
         #[cfg(target_os = "linux")]
@@ -140,7 +140,7 @@ impl AgentTool for NotifyTool {
                 .arg(&title)
                 .arg(&message)
                 .output();
-            match output {
+            return match output {
                 Ok(o) if o.status.success() => {
                     Ok(format!("🔔 Notification sent: {} — {}", title, message))
                 }
@@ -154,7 +154,7 @@ impl AgentTool for NotifyTool {
                 Err(_) => Err(miette!(
                     "notify-send not found. Install with: sudo apt install libnotify-bin"
                 )),
-            }
+            };
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -280,20 +280,31 @@ impl AgentTool for ChmodTool {
         let path = shellexpand::tilde(&typed_args.path).to_string();
         let mode = typed_args.mode;
 
-        let output = Command::new("chmod")
-            .arg(&mode)
-            .arg(&path)
-            .output()
-            .into_diagnostic()?;
+        #[cfg(unix)]
+        {
+            let output = Command::new("chmod")
+                .arg(&mode)
+                .arg(&path)
+                .output()
+                .into_diagnostic()?;
 
-        if output.status.success() {
-            Ok(format!(
-                "✅ Changed permissions of '{}' to '{}'",
-                path, mode
+            if output.status.success() {
+                Ok(format!(
+                    "✅ Changed permissions of '{}' to '{}'",
+                    path, mode
+                ))
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr);
+                Err(miette!("chmod failed: {}", err.trim()))
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = mode;
+            let _ = path;
+            Err(miette!(
+                "chmod is not supported on Windows. Use Windows-native tools or cmdlets to adjust ACLs."
             ))
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            Err(miette!("chmod failed: {}", err.trim()))
         }
     }
 }

@@ -59,6 +59,7 @@ struct PlannerOutput {
         ollama_rs::generation::tools::ToolCall,
         (String, String, bool),
     )>,
+    kv_cache_hit_pct: Option<f32>,
 }
 
 static TOOL_BLOCK_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -177,6 +178,10 @@ pub struct Agent {
     pub tool_time_ms: Arc<std::sync::atomic::AtomicU64>,
     pub total_tokens: Arc<std::sync::atomic::AtomicU64>,
     pub tool_engine: String,
+    pub temp_override: Arc<Mutex<Option<f32>>>,
+    pub ctx_override: Arc<Mutex<Option<u64>>>,
+    pub role_override: Arc<Mutex<Option<String>>>,
+    pub kv_cache_hit_history: Arc<Mutex<Vec<f32>>>,
 }
 
 pub struct AgentStream<'a> {
@@ -298,6 +303,9 @@ impl<'a> AgentStream<'a> {
                 self.agent.switch_phase(run_phase.clone()).await?;
 
                 let planner_output = self.agent.planner_turn(self.stop.clone()).await?;
+                if let Some(hit) = planner_output.kv_cache_hit_pct {
+                    self.decomposer.kv_cache_hit_pct = Some(hit);
+                }
 
                 // Update state with new reasoning
                 self.state = AgentStreamState::Thinking {
@@ -457,6 +465,9 @@ impl<'a> AgentStream<'a> {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                         let mut output = self.agent.planner_turn(self.stop.clone()).await?;
+                        if let Some(hit) = output.kv_cache_hit_pct {
+                            self.decomposer.kv_cache_hit_pct = Some(hit);
+                        }
 
                         // If the first handover turn returns nothing, try one more time
                         if output.content.trim().is_empty()
@@ -469,6 +480,9 @@ impl<'a> AgentStream<'a> {
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             output = self.agent.planner_turn(self.stop.clone()).await?;
+                            if let Some(hit) = output.kv_cache_hit_pct {
+                                self.decomposer.kv_cache_hit_pct = Some(hit);
+                            }
                         }
 
                         let mut all_tool_calls = Vec::new();
@@ -1478,6 +1492,7 @@ impl Agent {
             )),
             Arc::new(crate::tools::system::SystemdManagerTool),
             Arc::new(crate::tools::system::CurrentProcessTool),
+            Arc::new(crate::tools::process::ListProcessesTool),
             Arc::new(crate::tools::privilege::RequestPrivilegesTool),
             Arc::new(crate::tools::rust::CargoAddTool),
             Arc::new(crate::tools::rust::CrateSearchTool),
@@ -1616,6 +1631,9 @@ impl Agent {
         ));
         tool_registry_skg.register(Arc::new(
             crate::tools::skg_tools::process::WatchDirectoryTool::new(),
+        ));
+        tool_registry_skg.register(Arc::new(
+            crate::tools::skg_tools::process::ListProcessesTool::new(),
         ));
 
         tool_registry_skg.register(Arc::new(
@@ -1798,7 +1816,16 @@ impl Agent {
             rules: crate::rules::RuleEngine::new(),
             recent_failures: Arc::new(DashMap::new()),
             telemetry: Arc::new(Mutex::new(String::new())),
-            is_root: Arc::new(AtomicBool::new(nix::unistd::getuid().is_root())),
+            is_root: Arc::new(AtomicBool::new({
+                #[cfg(unix)]
+                {
+                    nix::unistd::getuid().is_root()
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            })),
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(5)),
             event_tx,
             tool_rx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -1843,6 +1870,9 @@ impl Agent {
             memory_store,
             mcp_clients: Arc::new(DashMap::new()),
             tool_registry_skg,
+            temp_override: Arc::new(Mutex::new(None)),
+            ctx_override: Arc::new(Mutex::new(None)),
+            role_override: Arc::new(Mutex::new(None)),
             vram_time_sharing: config.vram_time_sharing,
             session_id,
             start_time,
@@ -1850,6 +1880,7 @@ impl Agent {
             tool_time_ms,
             total_tokens,
             tool_engine: config.tool_engine.clone(),
+            kv_cache_hit_history: Arc::new(Mutex::new(Vec::new())),
             system_prompt: {
                 let mut final_system_prompt = system_prompt.clone();
                 if mode == AgentMode::MLX {
@@ -2669,6 +2700,16 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
 
             if prompt_trimmed == "/compact" {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::AgentStateChange(
+                        "Compacting".to_string(),
+                    ));
+                    let _ = tx.try_send(crate::tui::AgentEvent::Thinking(Some(
+                        "agent is compacting history. Please wait one moment.".to_string(),
+                    )));
+                }
+
                 let history_to_compact = self.history.lock().clone();
                 let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
 
@@ -2684,13 +2725,13 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 )
                 .await;
 
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
-                    match result {
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::Thinking(None));
+                    let _ =
+                        tx.try_send(crate::tui::AgentEvent::AgentStateChange("Done".to_string()));
+                    match &result {
                         Ok(new_history) => {
-                            let after_count = crate::context_manager::estimate_tokens(&new_history);
-                            *self.history.lock() = new_history;
-                            let _ = self.save_history();
+                            let after_count = crate::context_manager::estimate_tokens(new_history);
                             let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
                                 "🌪️ [CONTEXT COMPACTION]: Successfully condensed history ({} -> {} tokens)",
                                 before_count, after_count
@@ -2703,6 +2744,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                             )));
                         }
                     }
+                }
+                if let Ok(new_history) = result {
+                    *self.history.lock() = new_history;
+                    let _ = self.save_history();
                 }
                 return Ok(());
             }
@@ -2923,12 +2968,64 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
         full_system_prompt.push_str("\n\n[TOOL_SCHEMA_PLACEHOLDER]");
 
         // 4. ACTIVE PROJECT RULES (Contextual)
-        let active_rules = self.rules.get_active_rules(&[]);
+        let mut active_files = std::collections::HashSet::new();
+        {
+            let history = self.history.lock();
+            let re_file = regex::Regex::new(r"(?i)[a-zA-Z0-9_\-\./]+\.[a-zA-Z]{2,6}").ok();
+            for msg in history.iter() {
+                for call in &msg.tool_calls {
+                    for key in ["path", "file_path", "TargetFile", "TargetDirectory"] {
+                        if let Some(val) = call.function.arguments.get(key)
+                            && let Some(path_str) = val.as_str()
+                        {
+                            active_files.insert(path_str.to_string());
+                        }
+                    }
+                }
+                if let Some(ref re) = re_file {
+                    for mat in re.find_iter(&msg.content) {
+                        active_files.insert(mat.as_str().to_string());
+                    }
+                }
+            }
+        }
+        let files_list: Vec<String> = active_files.into_iter().collect();
+        let active_rules = self.rules.get_active_rules(&files_list);
+
         if !active_rules.is_empty() {
             full_system_prompt.push_str("\n\n[ACTIVE PROJECT RULES]\n");
             for rule in active_rules {
                 full_system_prompt
                     .push_str(&format!("### Rule: {}\n{}\n\n", rule.name, rule.content));
+            }
+        }
+
+        if let Some(ref role) = *self.role_override.lock() {
+            let role_instruction = match role.as_str() {
+                "senior-editor" => {
+                    "\n\n🎓 ROLE: Senior Editor\n\
+                     Your core objective is code quality, clear structure, clean architecture, and strict professional design guidelines. \
+                     Focus heavily on readability, modularity, comments, and eliminating code duplication."
+                }
+                "security-auditor" => {
+                    "\n\n🛡️ ROLE: Security Auditor\n\
+                     Your core objective is finding and fixing vulnerabilities. Perform rigorous input validation, check buffer boundaries, \
+                     hunt for race conditions, verify permissions, and eliminate security flaws."
+                }
+                "code-poet" => {
+                    "\n\n✍️ ROLE: Code Poet\n\
+                     Your core objective is writing beautifully structured, highly expressive, and artistic code. Use elegant comments, clear naming conventions, \
+                     and make the code feel crafted like poetry."
+                }
+                "refactor-ninja" => {
+                    "\n\n🥷 ROLE: Refactor Ninja\n\
+                     Your core objective is refactoring and optimization. Eliminate duplication, decrease cognitive load, simplify logic, \
+                     and improve performance while making minimal, surgical changes."
+                }
+                _ => "",
+            };
+            if !role_instruction.is_empty() {
+                full_system_prompt.push_str(role_instruction);
             }
         }
 
@@ -3072,6 +3169,16 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             }
 
             if action.needs_compaction {
+                let tx_opt = self.event_tx.lock().clone();
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::AgentStateChange(
+                        "Compacting".to_string(),
+                    ));
+                    let _ = tx.try_send(crate::tui::AgentEvent::Thinking(Some(
+                        "agent is compacting history. Please wait one moment.".to_string(),
+                    )));
+                }
+
                 let history_to_compact = self.history.lock().clone();
                 let before_count = crate::context_manager::estimate_tokens(&history_to_compact);
 
@@ -3090,8 +3197,11 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 *self.history.lock() = new_history;
                 let _ = self.save_history();
 
-                let tx_opt = self.event_tx.lock().clone();
-                if let Some(tx) = tx_opt {
+                if let Some(ref tx) = tx_opt {
+                    let _ = tx.try_send(crate::tui::AgentEvent::Thinking(None));
+                    let _ = tx.try_send(crate::tui::AgentEvent::AgentStateChange(
+                        "Thinking".to_string(),
+                    ));
                     let _ = tx.try_send(crate::tui::AgentEvent::SystemUpdate(format!(
                         "🌪️ [CONTEXT COMPACTION]: Successfully condensed history ({} -> {} tokens)",
                         before_count, after_count
@@ -3330,11 +3440,11 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
 
         let sampling = if is_planning {
             crate::inference::SamplingConfig {
-                temperature: if is_mlx {
+                temperature: (*self.temp_override.lock()).unwrap_or(if is_mlx {
                     self.mlx_temp_planning.unwrap_or(0.6)
                 } else {
                     self.temp_planning
-                },
+                }),
                 top_p: if is_mlx {
                     self.mlx_top_p_planning.unwrap_or(0.95)
                 } else {
@@ -3345,15 +3455,15 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 } else {
                     self.repeat_penalty_planning
                 },
-                context_size: self.ctx_planning,
+                context_size: (*self.ctx_override.lock()).unwrap_or(self.ctx_planning),
             }
         } else {
             crate::inference::SamplingConfig {
-                temperature: if is_mlx {
+                temperature: (*self.temp_override.lock()).unwrap_or(if is_mlx {
                     self.mlx_temp_execution.unwrap_or(0.2)
                 } else {
                     self.temp_execution
-                },
+                }),
                 top_p: if is_mlx {
                     self.mlx_top_p_execution.unwrap_or(0.9)
                 } else {
@@ -3364,7 +3474,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                 } else {
                     self.repeat_penalty_execution
                 },
-                context_size: self.ctx_execution,
+                context_size: (*self.ctx_override.lock()).unwrap_or(self.ctx_execution),
             }
         };
 
@@ -3607,6 +3717,10 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             self.auto_prune_history_for_kalosm().await;
         }
 
+        if let Some(hit) = output.kv_cache_hit_pct {
+            self.kv_cache_hit_history.lock().push(hit);
+        }
+
         Ok(PlannerOutput {
             content: full_content,
             reasoning: reasoning_content,
@@ -3614,6 +3728,7 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
             executed_mid_stream: Arc::try_unwrap(executed_mid_stream)
                 .map(|m| m.into_inner())
                 .unwrap_or_default(),
+            kv_cache_hit_pct: output.kv_cache_hit_pct,
         })
     }
 
@@ -4928,16 +5043,22 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                                         Err(e) => format!("⚠️ Tool '{}' Error:\n{}", tool_name, e),
                                     };
                                     let _ =
-                                        tx.send(crate::tui::AgentEvent::SystemUpdate(output)).await;
+                                        tx.send(crate::tui::AgentEvent::StreamToken(output)).await;
+                                    let _ = tx
+                                        .send(crate::tui::AgentEvent::StreamToken(String::new()))
+                                        .await;
                                 }
                             } else {
                                 let tx_opt = self.event_tx.lock().clone();
                                 if let Some(tx) = tx_opt {
                                     let _ = tx
-                                        .send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                        .send(crate::tui::AgentEvent::StreamToken(format!(
                                             "⚠️ Tool '{}' not found in registry.",
                                             tool_name
                                         )))
+                                        .await;
+                                    let _ = tx
+                                        .send(crate::tui::AgentEvent::StreamToken(String::new()))
                                         .await;
                                 }
                             }
@@ -4946,10 +5067,13 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                             let tx_opt = self.event_tx.lock().clone();
                             if let Some(tx) = tx_opt {
                                 let _ = tx
-                                    .send(crate::tui::AgentEvent::SystemUpdate(format!(
+                                    .send(crate::tui::AgentEvent::StreamToken(format!(
                                         "⚠️ Invalid JSON arguments: {}",
                                         e
                                     )))
+                                    .await;
+                                let _ = tx
+                                    .send(crate::tui::AgentEvent::StreamToken(String::new()))
                                     .await;
                             }
                         }
@@ -4958,9 +5082,12 @@ VERIFICATION CYCLE: No task is complete until verified. Use `read_file` or `run_
                     let tx_opt = self.event_tx.lock().clone();
                     if let Some(tx) = tx_opt {
                         let _ = tx
-                            .send(crate::tui::AgentEvent::SystemUpdate(
+                            .send(crate::tui::AgentEvent::StreamToken(
                                 "⚠️ Usage: /tool <tool_name> <json_args>".to_string(),
                             ))
+                            .await;
+                        let _ = tx
+                            .send(crate::tui::AgentEvent::StreamToken(String::new()))
                             .await;
                     }
                 }
@@ -5537,16 +5664,15 @@ The user is asking me to list the contents of the `./src/` directory."#;
 
                 if brace_count == 0 {
                     let json_str: String = chars[start_idx..=end_idx].iter().collect();
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                        if let Some(obj) = val.as_object()
-                            && (obj.contains_key("tool")
-                                || obj.contains_key("name")
-                                || obj.contains_key("function_name")
-                                || obj.contains_key("function")
-                                || obj.contains_key("action"))
-                        {
-                            calls.push(val);
-                        }
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str)
+                        && let Some(obj) = val.as_object()
+                        && (obj.contains_key("tool")
+                            || obj.contains_key("name")
+                            || obj.contains_key("function_name")
+                            || obj.contains_key("function")
+                            || obj.contains_key("action"))
+                    {
+                        calls.push(val);
                     }
                     i = end_idx;
                 }
@@ -5555,5 +5681,75 @@ The user is asking me to list the contents of the `./src/` directory."#;
         }
 
         assert_eq!(calls.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_overrides() {
+        let memory_store = Arc::new(Mutex::new(
+            crate::memory::MemoryStore::new("test-passphrase".to_string()).unwrap(),
+        ));
+        let agent = Agent::new(
+            crate::inference::AgentMode::Ollama,
+            "test-model".to_string(),
+            "Q4_K_M".to_string(),
+            "test-prompt".to_string(),
+            "/tmp/tempest_test_history_overrides.json".to_string(),
+            "test-session-id-overrides".to_string(),
+            memory_store,
+            "test-sub-model".to_string(),
+            "test-embedding-model".to_string(),
+            Arc::new(Mutex::new(None)),
+            AgentConfig {
+                planner_model: None,
+                executor_model: None,
+                verifier_model: None,
+                mlx_presets: std::collections::HashMap::new(),
+                temp_planning: 0.05,
+                temp_execution: 0.25,
+                top_p_planning: 0.95,
+                top_p_execution: 0.92,
+                repeat_penalty_planning: 1.18,
+                repeat_penalty_execution: 1.12,
+                ctx_planning: 16384,
+                ctx_execution: 32768,
+                mlx_temp_planning: None,
+                mlx_temp_execution: None,
+                mlx_top_p_planning: None,
+                mlx_top_p_execution: None,
+                mlx_repeat_penalty_planning: None,
+                mlx_repeat_penalty_execution: None,
+                paged_attn: false,
+                planning_enabled: true,
+                lmstudio_url: None,
+                pa_memory_mb: None,
+                vram_time_sharing: false,
+                ollama_remote: None,
+                tool_engine: "legacy".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // 1. Verify defaults are None
+        assert!(agent.temp_override.lock().is_none());
+        assert!(agent.ctx_override.lock().is_none());
+        assert!(agent.role_override.lock().is_none());
+
+        // 2. Set overrides
+        *agent.temp_override.lock() = Some(0.85);
+        *agent.ctx_override.lock() = Some(8192);
+        *agent.role_override.lock() = Some("security-auditor".to_string());
+
+        // Verify values
+        assert_eq!(*agent.temp_override.lock(), Some(0.85));
+        assert_eq!(*agent.ctx_override.lock(), Some(8192));
+        assert_eq!(
+            agent.role_override.lock().as_deref(),
+            Some("security-auditor")
+        );
+
+        // 3. Test that system prompt includes role information
+        let system_prompt = agent.build_system_prompt(AgentPhase::Execution, "test-model");
+        assert!(system_prompt.contains("ROLE: Security Auditor"));
     }
 }

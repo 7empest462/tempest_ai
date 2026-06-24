@@ -88,6 +88,15 @@ fn tool_dyn_to_info(tool: &dyn skg_tool::ToolDyn) -> ToolInfo {
 }
 
 impl ToolVectorIndex {
+    pub fn normalize_vector(v: &mut [f32]) {
+        let norm: f32 = v.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
+        }
+    }
+
     /// Build the index from a set of tools by generating embeddings for each tool's
     /// `"{name}: {description}"` string.
     ///
@@ -120,43 +129,55 @@ impl ToolVectorIndex {
             }
         }
 
-        // Embed all tool descriptions (including always-on, for ranking visibility)
-        let mut embed_failures = 0usize;
+        // Gather all descriptions for batch embedding
+        let mut embed_texts = Vec::with_capacity(tools.len());
         for tool in tools {
-            let embed_text = format!("search_document: {}: {}", tool.name(), tool.description());
+            embed_texts.push(format!(
+                "search_document: {}: {}",
+                tool.name(),
+                tool.description()
+            ));
+        }
 
-            // Categorize tools for telemetry
+        // Query batch embeddings
+        let batch_res = backend.generate_batch_embeddings(&embed_texts).await;
+
+        let mut embeddings = match batch_res {
+            Ok(embeds) if embeds.len() == tools.len() => embeds,
+            _ => {
+                // Sequential fallback in case of errors
+                let mut fallback_embeds = Vec::with_capacity(tools.len());
+                for embed_text in &embed_texts {
+                    match generate_tool_embedding(backend, embed_text).await {
+                        Ok(emb) => fallback_embeds.push(emb),
+                        Err(_) => fallback_embeds.push(Vec::new()),
+                    }
+                }
+                fallback_embeds
+            }
+        };
+
+        let mut embed_failures = 0usize;
+        for (i, tool) in tools.iter().enumerate() {
+            let mut embedding = std::mem::take(&mut embeddings[i]);
             let category = categorize_tool(tool.name());
-
             let tool_info = tool_dyn_to_info(tool.as_ref());
 
-            match generate_tool_embedding(backend, &embed_text).await {
-                Ok(embedding) => {
-                    entries.push(ToolVectorEntry {
-                        descriptor: ToolDescriptor {
-                            name: tool.name().to_string(),
-                            description: tool.description().to_string(),
-                            category,
-                        },
-                        embedding,
-                        tool_info,
-                    });
-                }
-                Err(_) => {
-                    embed_failures += 1;
-                    // If embedding fails, still track the tool but with an empty vector
-                    // (it won't be retrievable via similarity, but always-on will cover essentials)
-                    entries.push(ToolVectorEntry {
-                        descriptor: ToolDescriptor {
-                            name: tool.name().to_string(),
-                            description: tool.description().to_string(),
-                            category,
-                        },
-                        embedding: Vec::new(),
-                        tool_info,
-                    });
-                }
+            if embedding.is_empty() {
+                embed_failures += 1;
+            } else {
+                Self::normalize_vector(&mut embedding);
             }
+
+            entries.push(ToolVectorEntry {
+                descriptor: ToolDescriptor {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    category,
+                },
+                embedding,
+                tool_info,
+            });
         }
 
         if let Some(tx) = event_tx.lock().clone() {
@@ -215,13 +236,41 @@ impl ToolVectorIndex {
         let query_text = format!("search_query: {}", prompt);
         let query_vec = generate_tool_embedding(backend, &query_text).await?;
 
+        if query_vec.is_empty() || self.entries.is_empty() {
+            let mut result: Vec<ToolInfo> = Vec::new();
+            for info in self.always_on.values() {
+                result.push(info.clone());
+            }
+            return Ok((result, Vec::new()));
+        }
+
+        // Calculate the norm of the query vector once
+        let query_norm: f32 = query_vec.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            let mut result: Vec<ToolInfo> = Vec::new();
+            for info in self.always_on.values() {
+                result.push(info.clone());
+            }
+            return Ok((result, Vec::new()));
+        }
+
         // Score all entries by cosine similarity
         let mut scored: Vec<(&ToolVectorEntry, f32)> = self
             .entries
             .iter()
             .filter(|e| !e.embedding.is_empty())
             .map(|entry| {
-                let sim = cosine_similarity(&query_vec, &entry.embedding);
+                if entry.embedding.len() != query_vec.len() {
+                    return (entry, 0.0);
+                }
+                let dot_product: f32 = entry
+                    .embedding
+                    .iter()
+                    .zip(query_vec.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                // Since entry.embedding is pre-normalized, its norm is 1.0.
+                let sim = dot_product / query_norm;
                 (entry, sim)
             })
             .collect();

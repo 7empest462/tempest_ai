@@ -129,6 +129,7 @@ pub struct App {
     pub pending_privilege_request: Option<(String, tokio::sync::mpsc::Sender<ToolResponse>)>,
     pub context_used: usize,
     pub context_total: u64,
+    pub kv_cache_hit_pct: Option<f32>,
     pub active_sentinels: Vec<String>,
     pub sentinel_log: Vec<String>,
     pub engine_status: Option<String>,
@@ -196,6 +197,7 @@ impl App {
             pending_privilege_request: None,
             context_used: 0,
             context_total: 0,
+            kv_cache_hit_pct: None,
             active_sentinels: Vec::new(),
             sentinel_log: Vec::new(),
             engine_status: None,
@@ -1689,10 +1691,13 @@ pub async fn run_tui(
                 AgentEvent::ContextStatus {
                     used,
                     total,
-                    kv_cache_hit_pct: _,
+                    kv_cache_hit_pct,
                 } => {
                     app.context_used = used;
                     app.context_total = total;
+                    if let Some(hit) = kv_cache_hit_pct {
+                        app.kv_cache_hit_pct = Some(hit);
+                    }
                 }
                 AgentEvent::EditorEdit { path, .. } => {
                     app.push_message(format!("📝 [EDITOR SYNC]: Applied changes to {}", path));
@@ -1711,6 +1716,8 @@ pub async fn run_tui(
                 AgentEvent::AgentStateChange(state) => {
                     if state == "Done" {
                         app.agent_mode = "IDLE".to_string();
+                    } else if state == "Compacting" {
+                        app.agent_mode = "COMPACTING".to_string();
                     }
                 }
                 AgentEvent::ActiveTools(_) | AgentEvent::TaskUpdate(_) => {}
@@ -2611,6 +2618,17 @@ fn ui(f: &mut Frame, app: &mut App) {
                 app.context_total / 1024
             )),
         ]));
+        if let Some(hit) = app.kv_cache_hit_pct {
+            status_lines.push(Line::from(vec![
+                Span::raw("⚡ KV Hit: "),
+                Span::styled(
+                    format!("{:.1}%", hit),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
     }
 
     // --- STATUS PANE LAYOUT (Split for Sparklines) ---

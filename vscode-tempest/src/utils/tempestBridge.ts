@@ -5,7 +5,6 @@
  */
 
 // src/utils/tempestBridge.ts
-import * as vscode from 'vscode';
 import { TempestRequest, TempestResponse, TempestChatChunk } from '../types/tempest';
 
 declare const acquireVsCodeApi: any;
@@ -19,9 +18,9 @@ export class TempestBridge {
 
   constructor() {
     try {
-        this.vscodeApi = acquireVsCodeApi();
-    } catch (e) {
-        // Not in webview context
+      this.vscodeApi = acquireVsCodeApi();
+    } catch {
+      // Not in webview context
     }
   }
 
@@ -38,7 +37,7 @@ export class TempestBridge {
   async sendRequest<T extends TempestResponse>(request: TempestRequest): Promise<T> {
     const id = ++this.messageId;
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       this.callbacks.set(id, (response) => {
         this.callbacks.delete(id);
         this.streamListeners.delete(id);
@@ -48,7 +47,7 @@ export class TempestBridge {
       this.vscodeApi.postMessage({
         type: 'tempest-request',
         id,
-        payload: request
+        payload: request,
       });
     });
   }
@@ -66,7 +65,7 @@ export class TempestBridge {
 
     this.streamListeners.set(id, onChunk);
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       this.callbacks.set(id, (finalResponse: any) => {
         this.callbacks.delete(id);
         this.streamListeners.delete(id);
@@ -78,8 +77,8 @@ export class TempestBridge {
         id,
         payload: {
           method: 'tempest/chat',
-          params: { message, mode, backend }
-        }
+          params: { message, mode, backend },
+        },
       });
     });
   }
@@ -104,8 +103,8 @@ export class TempestBridge {
     const callback = this.callbacks.get(id);
     if (callback) {
       if (payload.method === 'tempest/chat' && !payload.payload.done) {
-          // Don't resolve the final promise until done: true
-          return;
+        // Don't resolve the final promise until done: true
+        return;
       }
       callback(payload);
     }

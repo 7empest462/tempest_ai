@@ -62,6 +62,7 @@ pub async fn write_file(
     force_overwrite: Option<bool>,
     _ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
+    let content = crate::tools::file::normalize_escaped_file_content(content);
     let force = force_overwrite.unwrap_or(false);
 
     if content.contains("...existing code...")
@@ -285,6 +286,7 @@ pub async fn append_file(
     content: String,
     _ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
+    let content = crate::tools::file::normalize_escaped_file_content(content);
     let path_owned = shellexpand::tilde(&path).to_string();
     let content_owned = content;
 
@@ -322,6 +324,7 @@ pub async fn patch_file(
     content: String,
     _ctx: &ToolCallContext,
 ) -> Result<serde_json::Value, ToolError> {
+    let content = crate::tools::file::normalize_escaped_file_content(content);
     if content.contains("...existing code...") || content.contains("// unchanged") {
         return Err(ToolError::ExecutionFailed(
             "Guardrail: Placeholder detected. Full content required.".to_string(),
@@ -603,12 +606,9 @@ pub async fn extract_and_write(
             }
 
             if let Some(cap) = re_json.captures(&msg.content) {
-                let content = cap
-                    .get(1)
-                    .unwrap()
-                    .as_str()
-                    .replace("\\n", "\n")
-                    .replace("\\\"", "\"");
+                let content = crate::tools::file::normalize_escaped_file_content(
+                    cap.get(1).unwrap().as_str().to_string(),
+                );
                 fs::create_dir_all(
                     PathBuf::from(&path_owned)
                         .parent()

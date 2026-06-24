@@ -7,28 +7,28 @@ import { DiffEditor } from '@monaco-editor/react';
 const getLanguageFromPath = (path: string): string => {
   const ext = path.split('.').pop()?.toLowerCase() || '';
   const extMap: Record<string, string> = {
-    'rs': 'rust',
-    'zig': 'zig',
-    'ts': 'typescript',
-    'tsx': 'typescript',
-    'js': 'javascript',
-    'jsx': 'javascript',
-    'sh': 'shell',
-    'bash': 'shell',
-    'nix': 'nix',
-    'toml': 'toml',
-    'lock': 'toml',
-    'md': 'markdown',
-    'json': 'json',
-    'html': 'html',
-    'css': 'css',
-    'py': 'python',
-    'yml': 'yaml',
-    'yaml': 'yaml',
-    'c': 'c',
-    'cpp': 'cpp',
-    'h': 'cpp',
-    'txt': 'plaintext'
+    rs: 'rust',
+    zig: 'zig',
+    ts: 'typescript',
+    tsx: 'typescript',
+    js: 'javascript',
+    jsx: 'javascript',
+    sh: 'shell',
+    bash: 'shell',
+    nix: 'nix',
+    toml: 'toml',
+    lock: 'toml',
+    md: 'markdown',
+    json: 'json',
+    html: 'html',
+    css: 'css',
+    py: 'python',
+    yml: 'yaml',
+    yaml: 'yaml',
+    c: 'c',
+    cpp: 'cpp',
+    h: 'cpp',
+    txt: 'plaintext',
   };
   return extMap[ext] || 'plaintext';
 };
@@ -89,13 +89,15 @@ export function TurnReviewModal() {
               <Code size={20} className="drop-shadow-[0_0_6px_rgba(0,242,255,0.4)]" />
             </div>
             <div>
-              <h3 className="font-semibold text-sm tracking-wider text-white">TURN COMPLETION REVIEW</h3>
+              <h3 className="font-semibold text-sm tracking-wider text-white">
+                TURN COMPLETION REVIEW
+              </h3>
               <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest mt-0.5">
                 Verify and commit code changes from the agent's turn
               </p>
             </div>
           </div>
-          
+
           <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-lg text-amber-400 font-mono text-[10px] uppercase">
             <AlertTriangle size={12} />
             <span>Workspace Changes Pending Approval</span>
@@ -127,14 +129,20 @@ export function TurnReviewModal() {
                         : 'bg-transparent border-transparent hover:bg-white/5 text-muted-foreground hover:text-white'
                     }`}
                   >
-                    <FileText size={16} className={`mt-0.5 ${isSelected ? 'text-accent' : 'text-muted-foreground/60'}`} />
+                    <FileText
+                      size={16}
+                      className={`mt-0.5 ${isSelected ? 'text-accent' : 'text-muted-foreground/60'}`}
+                    />
                     <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                       <span className="text-xs font-bold font-mono truncate">{fileName}</span>
                       {fileDir && (
                         <span className="text-[9px] font-mono opacity-50 truncate">{fileDir}</span>
                       )}
                     </div>
-                    <ChevronRight size={14} className={`mt-1 transition-transform ${isSelected ? 'text-accent translate-x-0.5' : 'opacity-0'}`} />
+                    <ChevronRight
+                      size={14}
+                      className={`mt-1 transition-transform ${isSelected ? 'text-accent translate-x-0.5' : 'opacity-0'}`}
+                    />
                   </button>
                 );
               })}

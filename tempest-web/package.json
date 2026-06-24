@@ -4,9 +4,14 @@
   "version": "0.3.7",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
+    "dev": "node --no-deprecation node_modules/vite/bin/vite.js",
+    "build": "tsc && node --no-deprecation node_modules/vite/bin/vite.js build",
+    "preview": "node --no-deprecation node_modules/vite/bin/vite.js preview",
+    "lint": "eslint src --ext .ts,.tsx --fix",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "lint:fix": "npm run lint && npm run format",
+    "check": "npm run format:check && npm run lint"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.0",
@@ -14,14 +19,23 @@
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^8.61.1",
+    "@typescript-eslint/parser": "^8.61.1",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.5.0",
     "esbuild": "^0.28.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "postcss": "^8.5.15",
+    "prettier": "^3.8.4",
     "rollup": "^4.60.3",
     "tailwindcss": "^4.3.0",
     "typescript": "~6.0.2",
+    "typescript-eslint": "^8.61.1",
     "vite": "^8.0.12",
+    "vite-plugin-static-copy": "^4.1.1",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
   },
@@ -34,6 +48,7 @@
     "cmdk": "^1.1.1",
     "framer-motion": "^12.40.0",
     "lucide-react": "^1.17.0",
+    "monaco-editor": "^0.55.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-resizable-panels": "^4.11.2",
@@ -42,5 +57,10 @@
     "tailwindcss-animate": "^1.0.7",
     "ws": "^8.21.0",
     "zustand": "^5.0.14"
+  },
+  "allowScripts": {
+    "@swc/core@1.15.33": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
   }
 }

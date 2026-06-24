@@ -23,8 +23,6 @@ use mistralrs::{
     PagedAttentionMetaBuilder, PagedCacheType, RequestBuilder, Response as MistralResponse,
     SamplingParams, TextMessageRole, TextModelBuilder, Tool, ToolChoice, ToolType,
 };
-use rig::completion::CompletionModel;
-use rig::embeddings::EmbeddingModel;
 #[cfg(target_os = "macos")]
 use sysinfo::System;
 use tool_parser::ToolParser;
@@ -82,6 +80,7 @@ pub struct InferenceOutput {
     pub content: String,
     pub reasoning: String,
     pub native_tool_calls: Vec<ollama_rs::generation::tools::ToolCall>,
+    pub kv_cache_hit_pct: Option<f32>,
 }
 
 #[derive(serde::Deserialize, Extract, Debug)]
@@ -683,6 +682,7 @@ impl Backend {
     }
 
     pub async fn stream_chat(&self, request: ChatRequest) -> Result<InferenceOutput> {
+        let mut kv_cache_hit_pct = None;
         let use_native_tools = match self {
             Backend::Ollama(_, _) => {
                 let model_lower = request.model.to_lowercase();
@@ -789,6 +789,7 @@ impl Backend {
                     content: full_content,
                     reasoning: reasoning_content,
                     native_tool_calls: vec![],
+                    kv_cache_hit_pct,
                 });
             }
             Backend::Bridge(bridge) => {
@@ -1126,8 +1127,9 @@ impl Backend {
                         continue;
                     }
 
+                    let escaped_args = crate::overwatch::escape_json_control_chars(&args_str);
                     // Try to parse as complete JSON first
-                    match serde_json::from_str::<serde_json::Value>(&args_str) {
+                    match serde_json::from_str::<serde_json::Value>(&escaped_args) {
                         Ok(args_val) => {
                             if idx < native_tool_calls.len() {
                                 native_tool_calls[idx].function.arguments = args_val;
@@ -1135,7 +1137,7 @@ impl Backend {
                         }
                         Err(_e) => {
                             // If JSON parsing fails, try to repair it
-                            let repaired = crate::overwatch::repair_json_str(&args_str);
+                            let repaired = crate::overwatch::repair_json_str(&escaped_args);
                             match serde_json::from_str::<serde_json::Value>(&repaired) {
                                 Ok(args_val) => {
                                     if idx < native_tool_calls.len() {
@@ -1222,10 +1224,13 @@ impl Backend {
                                 {
                                     name = stripped[end + 2..].to_string();
                                 }
+                                let escaped_args = crate::overwatch::escape_json_control_chars(
+                                    &call.function.arguments,
+                                );
                                 native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                                     function: ollama_rs::generation::tools::ToolCallFunction {
                                         name,
-                                        arguments: serde_json::from_str(&call.function.arguments)
+                                        arguments: serde_json::from_str(&escaped_args)
                                             .unwrap_or(serde_json::json!({})),
                                     },
                                 });
@@ -1920,6 +1925,7 @@ impl Backend {
                     } else {
                         0.0
                     };
+                    kv_cache_hit_pct = Some(hit_pct as f32);
 
                     let p_duration = std::time::Duration::from_nanos(metrics.prompt_eval_duration);
                     let g_duration = std::time::Duration::from_nanos(metrics.eval_duration);
@@ -2205,13 +2211,14 @@ impl Backend {
 
                                 for call in tool_calls {
                                     // Map mistralrs tool call to ollama_rs tool call
+                                    let escaped_args = crate::overwatch::escape_json_control_chars(
+                                        &call.function.arguments,
+                                    );
                                     let mapped_call = ollama_rs::generation::tools::ToolCall {
                                         function: ollama_rs::generation::tools::ToolCallFunction {
                                             name: call.function.name.clone(),
-                                            arguments: serde_json::from_str(
-                                                &call.function.arguments,
-                                            )
-                                            .unwrap_or(serde_json::json!({})),
+                                            arguments: serde_json::from_str(&escaped_args)
+                                                .unwrap_or(serde_json::json!({})),
                                         },
                                     };
                                     if let Some(ref tx) = on_tool_call {
@@ -2898,10 +2905,12 @@ impl Backend {
                             let absolute_end = 6 + end;
                             final_name = final_name[absolute_end + 2..].to_string();
                         }
+                        let escaped_args =
+                            crate::overwatch::escape_json_control_chars(&call.function.arguments);
                         native_tool_calls.push(ollama_rs::generation::tools::ToolCall {
                             function: ollama_rs::generation::tools::ToolCallFunction {
                                 name: final_name,
-                                arguments: serde_json::from_str(&call.function.arguments)
+                                arguments: serde_json::from_str(&escaped_args)
                                     .unwrap_or(serde_json::json!({})),
                             },
                         });
@@ -2949,8 +2958,10 @@ impl Backend {
 
                             if brace_count == 0 {
                                 let json_str: String = chars[start_idx..=end_idx].iter().collect();
+                                let escaped_json =
+                                    crate::overwatch::escape_json_control_chars(&json_str);
                                 let json_str_repaired =
-                                    crate::overwatch::repair_json_str(&json_str);
+                                    crate::overwatch::repair_json_str(&escaped_json);
                                 if let Ok(val) =
                                     serde_json::from_str::<serde_json::Value>(&json_str_repaired)
                                     && let Some(obj) = val.as_object()
@@ -3021,6 +3032,7 @@ impl Backend {
             content: full_content,
             reasoning: reasoning_content,
             native_tool_calls,
+            kv_cache_hit_pct,
         })
     }
 
@@ -3106,142 +3118,66 @@ impl Backend {
             Backend::Kalosm { .. } => Err(miette!("Embeddings not yet supported via Kalosm")),
         }
     }
-}
 
-// --- 🌪️ RIG-CORE INTEGRATION (Orchestration Layer) ---
-
-impl CompletionModel for Backend {
-    type Response = String;
-    type StreamingResponse = ();
-    type Client = ();
-
-    fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
-        unimplemented!("Backend is usually created via Backend::new")
-    }
-
-    fn completion(
-        &self,
-        request: rig::completion::CompletionRequest,
-    ) -> impl std::future::Future<
-        Output = std::result::Result<
-            rig::completion::CompletionResponse<Self::Response>,
-            rig::completion::CompletionError,
-        >,
-    > + rig::wasm_compat::WasmCompatSend {
-        let this = self.clone();
-        async move {
-            // Map rig::completion::CompletionRequest to our stream_chat parameters
-            let prompt = request
-                .chat_history
-                .iter()
-                .last()
-                .map(|m| match m {
-                    rig::message::Message::System { content } => content.clone(),
-                    rig::message::Message::User { content } => content
-                        .iter()
-                        .find_map(|c| match c {
-                            rig::message::UserContent::Text(t) => Some(t.text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default(),
-                    rig::message::Message::Assistant { content, .. } => content
-                        .iter()
-                        .find_map(|c| match c {
-                            rig::message::AssistantContent::Text(t) => Some(t.text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default(),
-                })
-                .unwrap_or_default();
-            let history = vec![ChatMessage::new(MessageRole::User, prompt)];
-
-            let sampling = SamplingConfig {
-                temperature: request.temperature.unwrap_or(0.1) as f32,
-                top_p: 0.9,
-                repeat_penalty: 1.1,
-                context_size: 8192,
-            };
-
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let event_tx = Arc::new(parking_lot::Mutex::new(None));
-
-            let output = this
-                .stream_chat(ChatRequest {
-                    model: request.model.unwrap_or_else(|| "default".to_string()),
-                    history,
-                    sampling,
-                    event_tx,
-                    stop,
-                    system_prompt: "".to_string(),
-                    on_tool_call: None,
-                    tool_registry: None,
-                })
-                .await
-                .map_err(|e| rig::completion::CompletionError::ProviderError(e.to_string()))?;
-
-            Ok(rig::completion::CompletionResponse {
-                choice: rig::OneOrMany::one(rig::message::AssistantContent::text(output.content)),
-                usage: rig::completion::Usage::new(),
-                raw_response: "".to_string(),
-                message_id: None,
-            })
+    pub async fn generate_batch_embeddings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
         }
-    }
-
-    #[allow(clippy::manual_async_fn)]
-    fn stream(
-        &self,
-        _request: rig::completion::CompletionRequest,
-    ) -> impl std::future::Future<
-        Output = std::result::Result<
-            rig::streaming::StreamingCompletionResponse<Self::StreamingResponse>,
-            rig::completion::CompletionError,
-        >,
-    > + rig::wasm_compat::WasmCompatSend {
-        async move {
-            Err(rig::completion::CompletionError::ProviderError(
-                "Streaming completion not yet implemented for rig-core wrapper".to_string(),
-            ))
-        }
-    }
-}
-
-impl EmbeddingModel for Backend {
-    const MAX_DOCUMENTS: usize = 100;
-    type Client = ();
-
-    fn make(_client: &Self::Client, _model: impl Into<String>, _dims: Option<usize>) -> Self {
-        unimplemented!("Backend is usually created via Backend::new")
-    }
-
-    fn ndims(&self) -> usize {
-        384 // MiniLM-L6-v2 dimensions
-    }
-
-    fn embed_texts(
-        &self,
-        texts: impl IntoIterator<Item = String> + rig::wasm_compat::WasmCompatSend,
-    ) -> impl std::future::Future<
-        Output = std::result::Result<
-            Vec<rig::embeddings::Embedding>,
-            rig::embeddings::EmbeddingError,
-        >,
-    > + rig::wasm_compat::WasmCompatSend {
-        let texts_vec: Vec<String> = texts.into_iter().collect();
-        let this = self.clone();
-        async move {
-            let mut results = Vec::new();
-            for text in texts_vec {
-                let emb = this
-                    .generate_embeddings(&text)
+        match self {
+            Backend::Ollama(ollama, embedding_model) => {
+                let req =
+                    ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                        embedding_model.clone(),
+                        texts.to_vec().into(),
+                    );
+                let res = ollama
+                    .generate_embeddings(req)
                     .await
-                    .map_err(|e| rig::embeddings::EmbeddingError::ProviderError(e.to_string()))?;
-                results.push(rig::embeddings::Embedding {
-                    document: text,
-                    vec: emb.into_iter().map(|f| f as f64).collect(),
-                });
+                    .map_err(|e| miette!("Ollama batch embedding failed: {}", e))?;
+                Ok(res.embeddings)
             }
-            Ok(results)
+            #[cfg(target_os = "macos")]
+            Backend::MLX {
+                embedder,
+                ollama_fallback,
+                embedding_model,
+                ..
+            } => {
+                if let Some(embed) = embedder {
+                    let mut builder = EmbeddingRequest::builder();
+                    for t in texts {
+                        builder = builder.add_prompt(format!("passage: {}", t));
+                    }
+                    let res = embed
+                        .generate_embeddings(builder)
+                        .await
+                        .map_err(|e| miette!("MLX batch embedding failed: {}", e))?;
+                    Ok(res)
+                } else if let Some(ollama) = ollama_fallback {
+                    let req =
+                        ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest::new(
+                            embedding_model.clone(),
+                            texts.to_vec().into(),
+                        );
+                    let res = ollama
+                        .generate_embeddings(req)
+                        .await
+                        .map_err(|e| miette!("Ollama batch embedding fallback failed: {}", e))?;
+                    Ok(res.embeddings)
+                } else {
+                    Err(miette!(
+                        "MLX Embedder not loaded and no Ollama fallback available"
+                    ))
+                }
+            }
+            Backend::Bridge(bridge) => {
+                let mut results = Vec::with_capacity(texts.len());
+                for t in texts {
+                    results.push(bridge.generate_embeddings(t.clone()).await?);
+                }
+                Ok(results)
+            }
+            Backend::Kalosm { .. } => Err(miette!("Embeddings not yet supported via Kalosm")),
         }
     }
 }

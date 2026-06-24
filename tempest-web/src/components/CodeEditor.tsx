@@ -1,5 +1,10 @@
-import Editor from '@monaco-editor/react';
+import Editor, { loader } from '@monaco-editor/react';
 import { useStore } from '../store';
+
+// Configure Monaco to load from local assets served by Vite
+loader.config({
+  paths: { vs: '/monaco-editor/min/vs' },
+});
 
 export function CodeEditor() {
   const { activeFile, setEditorFocused, isFileEditable } = useStore();
@@ -17,28 +22,37 @@ export function CodeEditor() {
 
   // Determine language by extension
   const extMap: Record<string, string> = {
-    'rs': 'rust',
-    'zig': 'zig',
-    'ts': 'typescript',
-    'tsx': 'typescript',
-    'js': 'javascript',
-    'jsx': 'javascript',
-    'sh': 'shell',
-    'bash': 'shell',
-    'nix': 'nix',
-    'toml': 'toml',
-    'lock': 'toml',
-    'md': 'markdown',
-    'json': 'json',
-    'html': 'html',
-    'css': 'css',
-    'py': 'python',
-    'yml': 'yaml',
-    'yaml': 'yaml',
-    'c': 'c',
-    'cpp': 'cpp',
-    'h': 'cpp',
-    'txt': 'plaintext'
+    rs: 'rust',
+    zig: 'zig',
+    ts: 'typescript',
+    tsx: 'typescript',
+    js: 'javascript',
+    jsx: 'javascript',
+    sh: 'shell',
+    bash: 'shell',
+    zsh: 'shell',
+    fish: 'shell',
+    nix: 'nix',
+    toml: 'toml',
+    lock: 'toml',
+    md: 'markdown',
+    markdown: 'markdown',
+    json: 'json',
+    html: 'html',
+    css: 'css',
+    py: 'python',
+    yml: 'yaml',
+    yaml: 'yaml',
+    c: 'c',
+    cpp: 'cpp',
+    h: 'cpp',
+    cmake: 'cmake',
+    sshconfig: 'ini',
+    'ssh-config': 'ini',
+    ssh: 'ini',
+    asm: 'assembly',
+    s: 'assembly',
+    txt: 'plaintext',
   };
 
   const language = extMap[activeFile.ext.toLowerCase()] || 'plaintext';
@@ -67,12 +81,15 @@ export function CodeEditor() {
                   [/\[[^\]]+\]/, 'metatag'],
                   [/[a-zA-Z0-9_-]+(?=\s*=)/, 'attribute.name'],
                   [/(=)/, 'operator'],
-                  [/[a-zA-Z_]\w*/, {
-                    cases: {
-                      '@keywords': 'keyword',
-                      '@default': 'identifier'
-                    }
-                  }],
+                  [
+                    /[a-zA-Z_]\w*/,
+                    {
+                      cases: {
+                        '@keywords': 'keyword',
+                        '@default': 'identifier',
+                      },
+                    },
+                  ],
                   [/#.*$/, 'comment'],
                   [/\d+(\.\d+)?/, 'number'],
                   [/"([^"\\]|\\.)*"/, 'string'],
@@ -89,9 +106,11 @@ export function CodeEditor() {
           fontFamily: '"JetBrains Mono", monospace',
           scrollBeyondLastLine: false,
           smoothScrolling: true,
-          cursorBlinking: "smooth",
+          cursorBlinking: 'smooth',
         }}
-        loading={<div className="text-accent animate-pulse font-mono text-sm p-4">Loading editor...</div>}
+        loading={
+          <div className="text-accent animate-pulse font-mono text-sm p-4">Loading editor...</div>
+        }
       />
     </div>
   );

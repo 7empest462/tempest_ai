@@ -1,19 +1,37 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '../store';
-import { Send, Square, GitCommitHorizontal, CheckCircle2, CircleDashed, Cpu, TerminalSquare, AlertCircle, RotateCcw } from 'lucide-react';
+import {
+  Send,
+  Square,
+  GitCommitHorizontal,
+  CheckCircle2,
+  CircleDashed,
+  Cpu,
+  TerminalSquare,
+  AlertCircle,
+  RotateCcw,
+} from 'lucide-react';
 
-function CollapsibleThought({ reasoning, title = "Thought Process", defaultOpen = false }: { reasoning: string; title?: string; defaultOpen?: boolean }) {
+function CollapsibleThought({
+  reasoning,
+  title = 'Thought Process',
+  defaultOpen = false,
+}: {
+  reasoning: string;
+  title?: string;
+  defaultOpen?: boolean;
+}) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   return (
     <div className="text-xs text-muted-foreground border-l-2 border-accent/50 pl-3 py-1">
-      <div 
+      <div
         onClick={() => setIsOpen(!isOpen)}
         className="cursor-pointer font-semibold select-none hover:text-white transition-colors flex items-center gap-2 w-max"
       >
         <GitCommitHorizontal size={14} className="text-accent" />
         <span>{title}</span>
-        <motion.span 
+        <motion.span
           animate={{ rotate: isOpen ? 90 : 0 }}
           transition={{ duration: 0.15 }}
           className="text-[10px] opacity-60 inline-block"
@@ -40,17 +58,23 @@ function CollapsibleThought({ reasoning, title = "Thought Process", defaultOpen 
   );
 }
 
-function CollapsibleTool({ tool, defaultOpen = false }: { tool: { name: string; args?: string; output?: string; success: boolean }; defaultOpen?: boolean }) {
+function CollapsibleTool({
+  tool,
+  defaultOpen = false,
+}: {
+  tool: { name: string; args?: string; output?: string; success: boolean };
+  defaultOpen?: boolean;
+}) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   return (
     <div className="bg-black/20 border border-white/5 rounded block overflow-hidden animate-in fade-in duration-300">
-      <div 
+      <div
         onClick={() => setIsOpen(!isOpen)}
         className="text-xs cursor-pointer select-none py-2 px-3 text-purple-400 font-semibold hover:bg-white/5 transition-colors flex items-center gap-2"
       >
         <TerminalSquare size={14} />
         <span>Executed: {tool.name}</span>
-        <motion.span 
+        <motion.span
           animate={{ rotate: isOpen ? 90 : 0 }}
           transition={{ duration: 0.15 }}
           className="text-[10px] opacity-60 inline-block"
@@ -106,7 +130,8 @@ function ParallelToolsDashboard() {
       <div className="flex items-center justify-between">
         <h4 className="text-xs font-bold text-accent uppercase tracking-wider flex items-center gap-2">
           <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping" />
-          Parallel Execution Streams ({activeToolExecutions.filter(e => e.status === 'running').length} Active)
+          Parallel Execution Streams (
+          {activeToolExecutions.filter((e) => e.status === 'running').length} Active)
         </h4>
         <div className="text-[10px] text-muted-foreground font-mono">
           Sync: Concurrent Threading
@@ -130,9 +155,15 @@ function ParallelToolsDashboard() {
             }`}
           >
             {/* Glowing Background Accent */}
-            <div className={`absolute top-0 right-0 w-24 h-24 rounded-full filter blur-[40px] opacity-10 pointer-events-none -mr-8 -mt-8 ${
-              exec.status === 'running' ? 'bg-blue-500' : exec.status === 'success' ? 'bg-green-500' : 'bg-red-500'
-            }`} />
+            <div
+              className={`absolute top-0 right-0 w-24 h-24 rounded-full filter blur-[40px] opacity-10 pointer-events-none -mr-8 -mt-8 ${
+                exec.status === 'running'
+                  ? 'bg-blue-500'
+                  : exec.status === 'success'
+                    ? 'bg-green-500'
+                    : 'bg-red-500'
+              }`}
+            />
 
             <div className="flex items-start justify-between">
               <div className="flex flex-col min-w-0">
@@ -140,16 +171,23 @@ function ParallelToolsDashboard() {
                   ⚙️ {exec.name}
                 </span>
                 {exec.args && (
-                  <span className="text-[9px] text-muted-foreground font-mono truncate max-w-[180px] mt-0.5" title={exec.args}>
+                  <span
+                    className="text-[9px] text-muted-foreground font-mono truncate max-w-[180px] mt-0.5"
+                    title={exec.args}
+                  >
                     {exec.args}
                   </span>
                 )}
               </div>
-              <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
-                exec.status === 'running' ? 'bg-blue-500/25 text-blue-400 animate-pulse' :
-                exec.status === 'success' ? 'bg-green-500/25 text-green-400' :
-                'bg-red-500/25 text-red-400'
-              }`}>
+              <span
+                className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
+                  exec.status === 'running'
+                    ? 'bg-blue-500/25 text-blue-400 animate-pulse'
+                    : exec.status === 'success'
+                      ? 'bg-green-500/25 text-green-400'
+                      : 'bg-red-500/25 text-red-400'
+                }`}
+              >
                 {exec.status}
               </span>
             </div>
@@ -189,7 +227,14 @@ function ParallelToolsDashboard() {
 }
 
 export function AgentTimeline() {
-  const { messages, isStreaming, addMessage, streamAccumulator, reasoningAccumulator, currentToolResults } = useStore();
+  const {
+    messages,
+    isStreaming,
+    addMessage,
+    streamAccumulator,
+    reasoningAccumulator,
+    currentToolResults,
+  } = useStore();
   const [input, setInput] = useState('');
   const [rollbackConfirmId, setRollbackConfirmId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -206,12 +251,27 @@ export function AgentTimeline() {
     // @ts-ignore
     if (window.sendNexus) {
       let editorContext = undefined;
-      const { activeFile } = useStore.getState();
+      const state = useStore.getState();
+      const { activeFile } = state;
       if (activeFile) {
         editorContext = `${activeFile.name}\n\nFile Contents:\n\`\`\`${activeFile.ext}\n${activeFile.content}\n\`\`\``;
       }
+
+      const calculatedTemp = Math.max(
+        0.01,
+        state.sliderCreativePrecise * 1.0 +
+          state.sliderAggressiveCareful * 0.6 +
+          state.sliderFastThorough * 0.4
+      );
+
       // @ts-ignore
-      window.sendNexus('Chat', { message: input, editor_context: editorContext });
+      window.sendNexus('Chat', {
+        message: input,
+        editor_context: editorContext,
+        temperature: calculatedTemp,
+        context_limit: state.contextLimit,
+        role: state.activeRole,
+      });
       useStore.getState().clearActiveToolExecutions();
       useStore.getState().setStreaming(true);
     }
@@ -228,16 +288,16 @@ export function AgentTimeline() {
   };
 
   const handleRollback = (targetMsg: any) => {
-    const userMessages = messages.filter(m => m.role === 'user');
-    const userMsgIndex = userMessages.findIndex(m => m.id === targetMsg.id);
-    
+    const userMessages = messages.filter((m) => m.role === 'user');
+    const userMsgIndex = userMessages.findIndex((m) => m.id === targetMsg.id);
+
     if (userMsgIndex !== -1) {
-      const targetIdx = messages.findIndex(m => m.id === targetMsg.id);
+      const targetIdx = messages.findIndex((m) => m.id === targetMsg.id);
       if (targetIdx !== -1) {
         const truncated = messages.slice(0, targetIdx + 1);
         useStore.getState().setMessages(truncated);
       }
-      
+
       // @ts-ignore
       if (window.sendNexus) {
         // @ts-ignore
@@ -249,10 +309,7 @@ export function AgentTimeline() {
 
   return (
     <div className="flex flex-col h-full w-full bg-background relative">
-      <div 
-        ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto p-6 flex flex-col relative"
-      >
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-6 flex flex-col relative">
         {/* The continuous vertical timeline line */}
         <div className="absolute left-10 top-6 bottom-6 w-0.5 bg-white/10 z-0"></div>
 
@@ -266,18 +323,27 @@ export function AgentTimeline() {
                 className="flex gap-4 relative group"
               >
                 {/* Timeline Node Icon */}
-                <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-background border-2 shadow-sm z-10 
+                <div
+                  className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-background border-2 shadow-sm z-10 
                   ${msg.role === 'user' ? 'border-blue-500 text-blue-500' : msg.role === 'system' ? 'border-accent text-accent' : 'border-green-500 text-green-500'}
-                `}>
-                  {msg.role === 'user' ? <CircleDashed size={16} /> : msg.role === 'system' ? <Cpu size={16} /> : <CheckCircle2 size={16} />}
+                `}
+                >
+                  {msg.role === 'user' ? (
+                    <CircleDashed size={16} />
+                  ) : msg.role === 'system' ? (
+                    <Cpu size={16} />
+                  ) : (
+                    <CheckCircle2 size={16} />
+                  )}
                 </div>
 
-                <div className={`flex-1 flex flex-col gap-2 relative ${msg.role === 'user' ? 'pt-1' : ''}`}>
-                  
+                <div
+                  className={`flex-1 flex flex-col gap-2 relative ${msg.role === 'user' ? 'pt-1' : ''}`}
+                >
                   {/* Rewind Action Hover Trigger */}
                   {msg.role === 'user' && msg.id !== 'init' && (
                     <div className="absolute top-1 right-2 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">
-                      <button 
+                      <button
                         onClick={() => setRollbackConfirmId(msg.id)}
                         className="flex items-center gap-1.5 px-2 py-1 bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded text-[10px] text-accent font-bold cursor-pointer transition-colors shadow-sm"
                         title="Rewind conversation to here"
@@ -295,13 +361,13 @@ export function AgentTimeline() {
                         <span>Rewind session to this prompt? (LLM context will be reset).</span>
                       </div>
                       <div className="flex gap-2">
-                        <button 
+                        <button
                           onClick={() => handleRollback(msg)}
                           className="bg-accent hover:bg-accent/90 text-background px-3 py-1 rounded text-xs font-bold transition-all cursor-pointer shadow-md"
                         >
                           CONFIRM
                         </button>
-                        <button 
+                        <button
                           onClick={() => setRollbackConfirmId(null)}
                           className="bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded text-xs font-bold transition-all cursor-pointer border border-white/10"
                         >
@@ -321,9 +387,7 @@ export function AgentTimeline() {
                     <div className="text-sm font-semibold text-accent">System</div>
                   )}
 
-                  {msg.reasoning && (
-                    <CollapsibleThought reasoning={msg.reasoning} />
-                  )}
+                  {msg.reasoning && <CollapsibleThought reasoning={msg.reasoning} />}
 
                   {msg.tools && msg.tools.length > 0 && (
                     <div className="flex flex-col gap-2 border-l-2 border-purple-500/50 pl-3 py-1">
@@ -334,11 +398,15 @@ export function AgentTimeline() {
                   )}
 
                   {msg.content && (
-                    <div className={`text-sm leading-relaxed whitespace-pre-wrap p-4 rounded-xl border ${
-                      msg.role === 'user' ? 'bg-blue-500/10 border-blue-500/20 text-white/90' :
-                      msg.role === 'system' ? 'bg-accent/10 border-accent/20 font-mono text-accent' :
-                      'bg-green-500/10 border-green-500/20 text-white/90'
-                    }`}>
+                    <div
+                      className={`text-sm leading-relaxed whitespace-pre-wrap p-4 rounded-xl border ${
+                        msg.role === 'user'
+                          ? 'bg-blue-500/10 border-blue-500/20 text-white/90'
+                          : msg.role === 'system'
+                            ? 'bg-accent/10 border-accent/20 font-mono text-accent'
+                            : 'bg-green-500/10 border-green-500/20 text-white/90'
+                      }`}
+                    >
                       {msg.content}
                     </div>
                   )}
@@ -358,10 +426,16 @@ export function AgentTimeline() {
                 <Cpu size={16} />
               </div>
               <div className="flex-1 flex flex-col gap-2">
-                <div className="text-sm font-semibold text-accent animate-pulse">Tempest Agent (Active)</div>
-                
+                <div className="text-sm font-semibold text-accent animate-pulse">
+                  Tempest Agent (Active)
+                </div>
+
                 {reasoningAccumulator && (
-                  <CollapsibleThought reasoning={reasoningAccumulator} title="Thinking..." defaultOpen={true} />
+                  <CollapsibleThought
+                    reasoning={reasoningAccumulator}
+                    title="Thinking..."
+                    defaultOpen={true}
+                  />
                 )}
 
                 <ParallelToolsDashboard />
@@ -387,7 +461,7 @@ export function AgentTimeline() {
 
       <div className="p-4 bg-black/20 border-t border-border/50 relative z-20">
         <div className="flex gap-3">
-          <input 
+          <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
@@ -395,11 +469,11 @@ export function AgentTimeline() {
             placeholder="Enter objective..."
             disabled={isStreaming}
           />
-          <button 
+          <button
             onClick={isStreaming ? handleStop : handleSend}
             disabled={!isStreaming && !input}
             className={`font-bold px-6 py-3 rounded-lg flex items-center justify-center transition-all shadow-lg hover:-translate-y-0.5 active:translate-y-0 ${
-              isStreaming 
+              isStreaming
                 ? 'bg-destructive hover:bg-destructive/90 text-white'
                 : 'bg-accent hover:bg-accent/90 text-background'
             }`}

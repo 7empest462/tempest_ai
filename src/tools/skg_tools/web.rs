@@ -114,7 +114,7 @@ pub async fn read_url(url: String, _ctx: &ToolCallContext) -> Result<serde_json:
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read bytes: {}", e)))?;
 
-    let text = html2text::from_read(html_bytes.as_ref(), 100);
+    let text = html2text::from_read(html_bytes.as_ref(), 100).unwrap_or_else(|_| String::new());
 
     let max_len = 15000;
     let mut truncated = text;

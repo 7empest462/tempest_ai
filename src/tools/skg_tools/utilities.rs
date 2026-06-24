@@ -172,23 +172,35 @@ pub async fn env_var(action: String, name: Option<String>) -> Result<serde_json:
 pub async fn chmod(path: String, mode: String) -> Result<serde_json::Value, ToolError> {
     let path_expanded = shellexpand::tilde(&path).to_string();
 
-    let output = Command::new("chmod")
-        .arg(&mode)
-        .arg(&path_expanded)
-        .output()
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to run chmod: {}", e)))?;
+    #[cfg(unix)]
+    {
+        let output = Command::new("chmod")
+            .arg(&mode)
+            .arg(&path_expanded)
+            .output()
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to run chmod: {}", e)))?;
 
-    if output.status.success() {
-        Ok(serde_json::Value::String(format!(
-            "✅ Changed permissions of '{}' to '{}'",
-            path_expanded, mode
-        )))
-    } else {
-        let err = String::from_utf8_lossy(&output.stderr);
-        Err(ToolError::ExecutionFailed(format!(
-            "chmod failed: {}",
-            err.trim()
-        )))
+        if output.status.success() {
+            Ok(serde_json::Value::String(format!(
+                "✅ Changed permissions of '{}' to '{}'",
+                path_expanded, mode
+            )))
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(ToolError::ExecutionFailed(format!(
+                "chmod failed: {}",
+                err.trim()
+            )))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        let _ = path_expanded;
+        Err(ToolError::ExecutionFailed(
+            "chmod is not supported on Windows. Use Windows-native tools to adjust permissions."
+                .to_string(),
+        ))
     }
 }
 

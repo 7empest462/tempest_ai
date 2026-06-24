@@ -2,7 +2,18 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useStore } from '../store';
 import type { AgentPhase, WebMemoryItem } from '../store';
-import { Brain, ClipboardList, Wrench, Search, RefreshCw, ChevronDown, Calendar, Tag, Copy, Check } from 'lucide-react';
+import {
+  Brain,
+  ClipboardList,
+  Wrench,
+  Search,
+  RefreshCw,
+  ChevronDown,
+  Calendar,
+  Tag,
+  Copy,
+  Check,
+} from 'lucide-react';
 
 const phases = [
   { id: 'Thinking' as AgentPhase, icon: Brain, label: 'Thinking' },
@@ -30,7 +41,10 @@ function getFriendlyTitle(topic: string): string {
   }
 
   // 2. Clean up "File `src/skills.rs` indexed successfully..." -> "Index: src/skills.rs"
-  if (topic.toLowerCase().startsWith('file ') && topic.toLowerCase().includes('indexed successfully')) {
+  if (
+    topic.toLowerCase().startsWith('file ') &&
+    topic.toLowerCase().includes('indexed successfully')
+  ) {
     const match = topic.match(/`([^`]+)`/);
     if (match) {
       return `Index: ${match[1]}`;
@@ -88,8 +102,11 @@ function MemoryCard({ mem }: { mem: WebMemoryItem }) {
 
   return (
     <div
-      className={`shrink-0 bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden hover:bg-white/[0.04] transition-all duration-200 border-l-2 ${isOpen ? 'border-l-accent bg-white/[0.04] shadow-[0_0_15px_rgba(0,242,255,0.05)]' : 'border-l-purple-500/30'
-        }`}
+      className={`shrink-0 bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden hover:bg-white/[0.04] transition-all duration-200 border-l-2 ${
+        isOpen
+          ? 'border-l-accent bg-white/[0.04] shadow-[0_0_15px_rgba(0,242,255,0.05)]'
+          : 'border-l-purple-500/30'
+      }`}
     >
       {/* Card Header (Clickable Tab) */}
       <div
@@ -115,8 +132,11 @@ function MemoryCard({ mem }: { mem: WebMemoryItem }) {
 
           {mem.tags && (
             <div className="flex flex-wrap gap-1 mt-0.5">
-              {mem.tags.split(',').map(tag => (
-                <span key={tag} className="text-[8px] font-mono bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+              {mem.tags.split(',').map((tag) => (
+                <span
+                  key={tag}
+                  className="text-[8px] font-mono bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 rounded-full flex items-center gap-0.5"
+                >
                   <Tag size={8} /> {tag.trim()}
                 </span>
               ))}
@@ -134,8 +154,9 @@ function MemoryCard({ mem }: { mem: WebMemoryItem }) {
 
       {/* Card Body (CSS Grid Transition for reliable height expansion) */}
       <div
-        className={`grid transition-all duration-200 ease-in-out ${isOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0 pointer-events-none'
-          }`}
+        className={`grid transition-all duration-200 ease-in-out ${
+          isOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+        }`}
       >
         <div className="overflow-hidden">
           <div className="px-3.5 pb-3.5 border-t border-white/5 bg-black/25 flex flex-col gap-3 text-xs font-mono select-text">
@@ -172,14 +193,8 @@ function MemoryCard({ mem }: { mem: WebMemoryItem }) {
   );
 }
 
-
 export function MissionControl() {
-  const {
-    agentPhase,
-    currentTask,
-    activeTools,
-    memories,
-  } = useStore();
+  const { agentPhase, currentTask, activeTools, memories } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
 
   const isActive = (phaseId: AgentPhase) => {
@@ -196,10 +211,11 @@ export function MissionControl() {
     }
   };
 
-  const filteredMemories = memories.filter(m =>
-    m.topic.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    m.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (m.tags && m.tags.toLowerCase().includes(searchQuery.toLowerCase()))
+  const filteredMemories = memories.filter(
+    (m) =>
+      m.topic.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      m.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (m.tags && m.tags.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   return (
@@ -214,14 +230,19 @@ export function MissionControl() {
               <motion.div
                 animate={{
                   scale: active ? 1.15 : 1,
-                  boxShadow: active ? '0 0 15px rgba(0,242,255,0.4)' : 'none'
+                  boxShadow: active ? '0 0 15px rgba(0,242,255,0.4)' : 'none',
                 }}
-                className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${active ? 'bg-accent text-background' : 'glass-panel border border-border text-muted-foreground'
-                  }`}
+                className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
+                  active
+                    ? 'bg-accent text-background'
+                    : 'glass-panel border border-border text-muted-foreground'
+                }`}
               >
                 <phase.icon size={18} />
               </motion.div>
-              <span className={`text-[10px] uppercase font-bold tracking-wider ${active ? 'text-accent' : 'text-muted-foreground'}`}>
+              <span
+                className={`text-[10px] uppercase font-bold tracking-wider ${active ? 'text-accent' : 'text-muted-foreground'}`}
+              >
                 {phase.label}
               </span>
             </div>
@@ -229,21 +250,26 @@ export function MissionControl() {
         })}
       </div>
 
-
       {/* Task */}
       {currentTask !== '--' && (
         <div className="bg-white/5 border border-white/10 p-3 rounded-lg flex-none">
-          <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-1">Current Task</h4>
+          <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-1">
+            Current Task
+          </h4>
           <p className="text-xs font-mono text-white leading-normal">{currentTask}</p>
         </div>
       )}
 
       {/* Active Tools */}
       <div className="flex-none">
-        <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-2">Active Tools</h4>
+        <h4 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground mb-2">
+          Active Tools
+        </h4>
         <div className="flex flex-col gap-2">
           {activeTools.length === 0 ? (
-            <span className="text-xs italic text-muted-foreground border border-transparent p-1">No tools running</span>
+            <span className="text-xs italic text-muted-foreground border border-transparent p-1">
+              No tools running
+            </span>
           ) : (
             activeTools.map((tool, idx) => (
               <motion.div
@@ -280,7 +306,10 @@ export function MissionControl() {
 
         {/* Search */}
         <div className="relative flex-none">
-          <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Search
+            size={12}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -296,9 +325,7 @@ export function MissionControl() {
               No memories found matching filter.
             </div>
           ) : (
-            filteredMemories.map((mem) => (
-              <MemoryCard key={mem.topic} mem={mem} />
-            ))
+            filteredMemories.map((mem) => <MemoryCard key={mem.topic} mem={mem} />)
           )}
         </div>
       </div>

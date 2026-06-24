@@ -103,9 +103,19 @@ impl RuleEngine {
         for line in yaml.lines() {
             let line = line.trim();
             if let Some(stripped) = line.strip_prefix("name:") {
-                name = stripped.trim().to_string();
+                name = stripped
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
             } else if let Some(stripped) = line.strip_prefix("description:") {
-                description = Some(stripped.trim().to_string());
+                description = Some(
+                    stripped
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string(),
+                );
             } else if let Some(stripped) = line.strip_prefix("globs:") {
                 let glob_str = stripped.trim();
                 if glob_str.starts_with('[') && glob_str.ends_with(']') {
@@ -163,5 +173,69 @@ impl RuleEngine {
         }
 
         active
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_rule() {
+        let content = r#"---
+name: "Rust Guidelines"
+description: 'Rules for Rust projects'
+globs: ["*.rs", "src/**/*.rs"]
+always_apply: false
+---
+Use standard formatting and Clippy.
+"#;
+        let engine = RuleEngine::new();
+        let rule = engine.parse_rule(content).unwrap();
+        assert_eq!(rule.name, "Rust Guidelines");
+        assert_eq!(rule.description.as_deref(), Some("Rules for Rust projects"));
+        assert_eq!(
+            rule.globs,
+            Some(vec!["*.rs".to_string(), "src/**/*.rs".to_string()])
+        );
+        assert_eq!(rule.always_apply, Some(false));
+        assert_eq!(rule.content, "Use standard formatting and Clippy.");
+    }
+
+    #[test]
+    fn test_get_active_rules() {
+        let mut engine = RuleEngine { rules: Vec::new() };
+        engine.rules.push(Rule {
+            name: "Always Apply Rule".to_string(),
+            description: None,
+            globs: None,
+            always_apply: Some(true),
+            content: "Always".to_string(),
+        });
+        engine.rules.push(Rule {
+            name: "Rust Rule".to_string(),
+            description: None,
+            globs: Some(vec!["*.rs".to_string()]),
+            always_apply: Some(false),
+            content: "Rust".to_string(),
+        });
+        engine.rules.push(Rule {
+            name: "Python Rule".to_string(),
+            description: None,
+            globs: Some(vec!["*.py".to_string()]),
+            always_apply: Some(false),
+            content: "Python".to_string(),
+        });
+
+        // Test with empty active files
+        let active = engine.get_active_rules(&[]);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "Always Apply Rule");
+
+        // Test with rust active files
+        let active = engine.get_active_rules(&["src/main.rs".to_string()]);
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|r| r.name == "Always Apply Rule"));
+        assert!(active.iter().any(|r| r.name == "Rust Rule"));
     }
 }

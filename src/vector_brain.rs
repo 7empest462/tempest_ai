@@ -28,13 +28,23 @@ impl VectorBrain {
         }
     }
 
+    pub fn normalize_vector(v: &mut [f32]) {
+        let norm: f32 = v.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
+        }
+    }
+
     pub fn add_entry(
         &mut self,
         text: String,
-        embedding: Vec<f32>,
+        mut embedding: Vec<f32>,
         source: String,
         metadata: HashMap<String, String>,
     ) {
+        Self::normalize_vector(&mut embedding);
         let entry = VectorEntry {
             text,
             embedding,
@@ -68,11 +78,31 @@ impl VectorBrain {
     }
 
     pub fn search(&self, query_vector: &[f32], top_k: usize) -> Vec<(VectorEntry, f32)> {
+        if query_vector.is_empty() || self.entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Calculate the norm of the query vector once
+        let query_norm: f32 = query_vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            return Vec::new();
+        }
+
         let mut results: Vec<(VectorEntry, f32)> = self
             .entries
             .iter()
             .map(|entry| {
-                let sim = Self::cosine_similarity(&entry.embedding, query_vector);
+                if entry.embedding.len() != query_vector.len() {
+                    return (entry.clone(), 0.0);
+                }
+                let dot_product: f32 = entry
+                    .embedding
+                    .iter()
+                    .zip(query_vector.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                // Since entry.embedding is pre-normalized to unit length, its norm is 1.0.
+                let sim = dot_product / query_norm;
                 (entry.clone(), sim)
             })
             .collect();
@@ -117,6 +147,10 @@ impl VectorBrain {
             String::from_utf8(bytes).into_diagnostic()?
         };
         let mut brain: VectorBrain = serde_json::from_str(&json_str).into_diagnostic()?;
+        // Pre-normalize all loaded legacy/stored vectors
+        for entry in &mut brain.entries {
+            Self::normalize_vector(&mut entry.embedding);
+        }
         brain.passphrase = passphrase.map(|s| s.to_string());
         Ok(brain)
     }

@@ -33,6 +33,70 @@ pub struct ListDirArgs {
     pub path: Option<String>,
 }
 
+pub(crate) fn normalize_escaped_file_content(mut content: String) -> String {
+    if content.trim_end().contains('\n') || !has_escaped_line_break(&content) {
+        return content;
+    }
+
+    // Some models emit file bodies as if the JSON string were still escaped.
+    // Decode the common escapes once, preferring double-escaped line separators.
+    content = content
+        .replace("\\\\r\\\\n", "\n")
+        .replace("\\r\\n", "\n")
+        .replace("\\\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\\\r", "\r")
+        .replace("\\r", "\r")
+        .replace("\\\\t", "\t")
+        .replace("\\t", "\t")
+        .replace("\\\\\"", "\"")
+        .replace("\\\"", "\"")
+        .replace("\\\\\\\\", "\\")
+        .replace("\\\\", "\\");
+
+    content
+}
+
+fn has_escaped_line_break(content: &str) -> bool {
+    content.contains("\\n")
+        || content.contains("\\\\n")
+        || content.contains("\\r")
+        || content.contains("\\\\r")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_escaped_file_content;
+
+    #[test]
+    fn normalizes_single_escaped_multiline_content() {
+        let input = r#"fn main() {\n    println!(\"hi\");\n}\n"#.to_string();
+
+        assert_eq!(
+            normalize_escaped_file_content(input),
+            "fn main() {\n    println!(\"hi\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn normalizes_double_escaped_multiline_content() {
+        let input =
+            r#"#!/usr/bin/env rustc\\nfn main() {\\n    println!(\\"hi\\");\\n}\\n"#.to_string();
+
+        assert_eq!(
+            normalize_escaped_file_content(input),
+            "#!/usr/bin/env rustc\nfn main() {\n    println!(\"hi\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn leaves_already_multiline_content_unchanged() {
+        let input = "fn main() {\n    let literal = \"keep \\n literal\";\n}\n".to_string();
+
+        assert_eq!(normalize_escaped_file_content(input.clone()), input);
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct SearchFilesArgs {
     /// Search pattern for filenames
@@ -149,7 +213,7 @@ impl AgentTool for WriteFileTool {
 
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: WriteFileArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
-        let content = typed_args.content;
+        let content = normalize_escaped_file_content(typed_args.content);
         let path_owned = shellexpand::tilde(&typed_args.path).to_string();
         let path = PathBuf::from(&path_owned);
 
@@ -402,7 +466,7 @@ impl AgentTool for AppendFileTool {
     async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
         let typed_args: AppendFileArgs = serde_json::from_value(args.clone()).into_diagnostic()?;
         let path = shellexpand::tilde(&typed_args.path).to_string();
-        let content = typed_args.content;
+        let content = normalize_escaped_file_content(typed_args.content);
 
         let result = tokio::task::spawn_blocking(move || {
             use std::io::Write;
@@ -479,7 +543,7 @@ impl AgentTool for PatchFileTool {
         let path_owned = shellexpand::tilde(&typed_args.file_path).to_string();
         let start_line = typed_args.start_line;
         let end_line = typed_args.end_line;
-        let content = typed_args.content;
+        let content = normalize_escaped_file_content(typed_args.content);
 
         if content.contains("...existing code...") || content.contains("// unchanged") {
             return Err(miette!(
@@ -835,12 +899,8 @@ impl AgentTool for ExtractAndWriteTool {
                 }
 
                 if let Some(cap) = re_json.captures(&msg.content) {
-                    let content = cap
-                        .get(1)
-                        .unwrap()
-                        .as_str()
-                        .replace("\\n", "\n")
-                        .replace("\\\"", "\"");
+                    let content =
+                        normalize_escaped_file_content(cap.get(1).unwrap().as_str().to_string());
                     fs::create_dir_all(
                         PathBuf::from(&path_owned)
                             .parent()

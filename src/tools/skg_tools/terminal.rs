@@ -30,8 +30,13 @@ fn terminal_registry() -> &'static Mutex<HashMap<String, TerminalSession>> {
     description = "Spawns a new interactive pseudo-terminal (PTY) session. Returns a session_id. Use this to maintain persistent shell sessions, run REPLs, or execute commands that require state to be maintained between calls."
 )]
 pub async fn terminal_spawn(shell: Option<String>) -> Result<serde_json::Value, ToolError> {
-    let shell_cmd =
-        shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "zsh".to_string()));
+    let shell_cmd = shell.unwrap_or_else(|| {
+        if cfg!(target_os = "windows") {
+            "powershell.exe".to_string()
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "zsh".to_string())
+        }
+    });
 
     let pty_system = native_pty_system();
     let pair = pty_system

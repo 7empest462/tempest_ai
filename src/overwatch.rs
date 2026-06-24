@@ -626,6 +626,41 @@ pub fn is_complete_tool_json(text: &str) -> bool {
     false
 }
 
+/// Helper to escape raw control characters inside JSON string literals in a JSON document.
+/// Leaves any control characters outside string literals (such as format-indentation newlines)
+/// untouched.
+pub fn escape_json_control_chars(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut backslash_count = 0;
+
+    for c in s.chars() {
+        if c == '"' {
+            if backslash_count % 2 == 0 {
+                in_string = !in_string;
+            }
+            backslash_count = 0;
+            result.push(c);
+        } else if c == '\\' {
+            backslash_count += 1;
+            result.push(c);
+        } else {
+            backslash_count = 0;
+            if in_string && (c as u32) < 32 {
+                match c {
+                    '\n' => result.push_str("\\n"),
+                    '\r' => result.push_str("\\r"),
+                    '\t' => result.push_str("\\t"),
+                    _ => result.push_str(&format!("\\u{:04x}", c as u32)),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+    }
+    result
+}
+
 /// Helper to repair unescaped nested double quotes in JSON values before parsing.
 /// It scans for key-value starts like `"command": "` and escapes any unescaped double quotes
 /// in the value before the matching closing quote (which is followed by a JSON delimiter).
@@ -1604,6 +1639,7 @@ impl OverwatchEngine {
         let critical_files = [
             "Cargo.toml",
             "Cargo.lock",
+            "config.toml",
             "Package.json",
             "package-lock.json",
             "Makefile",
@@ -1744,6 +1780,7 @@ impl OverwatchEngine {
         let critical_files = [
             "Cargo.toml",
             "Cargo.lock",
+            "config.toml",
             "Package.json",
             "package-lock.json",
             "Makefile",
@@ -2575,6 +2612,23 @@ mod tests {
             overwatch.validate_effects(&tiny_critical_write, Some("create Cargo.toml hello world")),
             OverwatchVerdict::Pass
         );
+
+        let tiny_config_write = vec![crate::effects::TempestEffect::WriteFile {
+            path: "config.toml".to_string(),
+            content: "small content".to_string(),
+            force_overwrite: false,
+        }];
+        // Without user intent, it should be intercepted
+        assert_matches!(
+            overwatch.validate_effects(&tiny_config_write, Some("hello")),
+            OverwatchVerdict::Intercept { .. }
+        );
+
+        // With user intent, it should pass
+        assert_matches!(
+            overwatch.validate_effects(&tiny_config_write, Some("create config.toml hello world")),
+            OverwatchVerdict::Pass
+        );
     }
 
     #[test]
@@ -2591,5 +2645,29 @@ mod tests {
         let repaired_escaped = repair_json_str(already_escaped);
         assert_eq!(repaired_escaped, already_escaped);
         assert!(serde_json::from_str::<serde_json::Value>(&repaired_escaped).is_ok());
+    }
+
+    #[test]
+    fn test_escape_json_control_chars() {
+        // Raw newline in string value
+        let input_raw_nl = "{\n  \"content\": \"line 1\nline 2\"\n}";
+        let escaped = escape_json_control_chars(input_raw_nl);
+        assert_eq!(escaped, "{\n  \"content\": \"line 1\\nline 2\"\n}");
+        assert!(serde_json::from_str::<serde_json::Value>(&escaped).is_ok());
+
+        // Already escaped newlines should not be doubled
+        let input_escaped = "{\n  \"content\": \"line 1\\nline 2\"\n}";
+        let escaped_escaped = escape_json_control_chars(input_escaped);
+        assert_eq!(escaped_escaped, input_escaped);
+        assert!(serde_json::from_str::<serde_json::Value>(&escaped_escaped).is_ok());
+
+        // Mixed content
+        let input_mixed = "{\n  \"content\": \"line 1\nline 2\\nline 3\"\n}";
+        let escaped_mixed = escape_json_control_chars(input_mixed);
+        assert_eq!(
+            escaped_mixed,
+            "{\n  \"content\": \"line 1\\nline 2\\nline 3\"\n}"
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&escaped_mixed).is_ok());
     }
 }

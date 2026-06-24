@@ -22,9 +22,9 @@ pub fn get_env() -> &'static Environment<'static> {
 - CURSOR LINE: {{ cursor_line }}
 - STATUS: {{ status_type }} contains {{ lines_count }} lines of code
 
-```{{ language }}
+{{ fence }}{{ language }}
 {{ visible_code }}
-```
+{{ fence }}
 ### [END EDITOR CONTEXT] ###
 
 "#
@@ -77,6 +77,23 @@ pub fn render_editor_context(
     } else {
         "VISIBLE CODE"
     };
+
+    // Calculate maximum sequence of consecutive backticks in visible_code
+    let mut max_backticks = 0;
+    let mut current_backticks = 0;
+    for c in visible_code.chars() {
+        if c == '`' {
+            current_backticks += 1;
+            if current_backticks > max_backticks {
+                max_backticks = current_backticks;
+            }
+        } else {
+            current_backticks = 0;
+        }
+    }
+    let fence_len = std::cmp::max(3, max_backticks + 1);
+    let fence = "`".repeat(fence_len);
+
     tmpl.render(context! {
         file_name => file_name,
         file_path => file_path,
@@ -85,6 +102,7 @@ pub fn render_editor_context(
         status_type => status_type,
         lines_count => lines_count,
         visible_code => visible_code,
+        fence => fence,
     })
 }
 
@@ -122,6 +140,23 @@ mod tests {
         assert!(rendered.contains("- ACTIVE FILE: main.rs"));
         assert!(rendered.contains("STATUS: VISIBLE CODE contains 2 lines"));
         assert!(rendered.contains("```rust\nfn main() {\n}\n```"));
+    }
+
+    #[test]
+    fn test_editor_context_fence_escaping() {
+        let code_with_backticks = "fn main() {\n    // Some code with ``` backticks\n}";
+        let rendered = render_editor_context(
+            "main.rs",
+            "/src/main.rs",
+            "rust",
+            42,
+            false,
+            3,
+            code_with_backticks,
+        )
+        .unwrap();
+        assert!(rendered.contains("````rust"));
+        assert!(rendered.contains("````\n### [END EDITOR CONTEXT] ###"));
     }
 
     #[test]

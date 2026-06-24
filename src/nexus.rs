@@ -14,16 +14,28 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use sysinfo::System;
 use tower_http::cors::CorsLayer;
+use ts_rs::TS;
 
 static WEB_DIR: Dir<'_> = include_dir!("tempest-web/dist");
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(tag = "type", content = "payload")]
 pub enum NexusRequest {
     Chat {
         message: String,
         #[serde(default)]
+        #[ts(optional)]
         editor_context: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        temperature: Option<f32>,
+        #[serde(default)]
+        #[ts(optional)]
+        context_limit: Option<u64>,
+        #[serde(default)]
+        #[ts(optional)]
+        role: Option<String>,
     },
     ListFiles {
         path: String,
@@ -75,7 +87,8 @@ pub enum NexusRequest {
     ReviewReject {},
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(tag = "type", content = "payload")]
 pub enum NexusResponse {
     Token {
@@ -130,12 +143,26 @@ pub enum NexusResponse {
         token: String,
     },
     InferenceMetrics {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         tps: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         ctx_used: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         ctx_total: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         kv_cache_hit_pct: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         planning_duration_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         executing_duration_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         verifying_duration_ms: Option<u64>,
     },
     SentinelLog {
@@ -144,7 +171,9 @@ pub enum NexusResponse {
     },
     ToolResult {
         name: String,
+        #[ts(optional)]
         args: Option<String>,
+        #[ts(optional)]
         output: Option<String>,
         success: bool,
     },
@@ -159,6 +188,7 @@ pub enum NexusResponse {
     },
     ToolStart {
         name: String,
+        #[ts(optional)]
         args: Option<String>,
     },
     TurnReviewRequest {
@@ -167,36 +197,45 @@ pub enum NexusResponse {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
+#[ts(export)]
 pub struct WebMemoryItem {
     pub topic: String,
     pub content: String,
+    #[ts(optional)]
     pub tags: Option<String>,
     pub updated_at: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
+#[ts(export)]
 pub struct WebFileDiff {
     pub path: String,
     pub original: String,
     pub modified: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
+#[ts(export)]
 pub struct WebChatMessage {
     pub id: String,
     pub role: String, // "system" | "ai" | "user"
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub tools: Option<Vec<WebToolCallResult>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
+#[ts(export)]
 pub struct WebToolCallResult {
     pub name: String,
+    #[ts(optional)]
     pub args: Option<String>,
+    #[ts(optional)]
     pub output: Option<String>,
     pub success: bool,
 }
@@ -362,13 +401,15 @@ pub fn reconstruct_web_history(history: &[ChatMessage]) -> Vec<WebChatMessage> {
     web_msgs
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct FileItem {
     pub name: String,
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct SearchMatch {
     pub file: String,
     pub line: u32,
@@ -668,28 +709,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
             let used_ram = sys.used_memory() / 1024 / 1024;
             let total_ram = sys.total_memory() / 1024 / 1024;
 
-            let gpu = {
-                #[cfg(target_os = "macos")]
-                {
-                    tokio::task::spawn_blocking(|| {
-                        tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32
-                    })
-                    .await
-                    .unwrap_or(0.0)
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    tokio::task::spawn_blocking(|| {
-                        tempest_monitor::linux_helper::collect_gpu_telemetry().usage_pct as f32
-                    })
-                    .await
-                    .unwrap_or(0.0)
-                }
-                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                {
-                    0.0
-                }
-            };
+            #[cfg(target_os = "macos")]
+            let gpu = tokio::task::spawn_blocking(|| {
+                tempest_monitor::macos_helper::get_macos_gpu_info(false).usage_pct as f32
+            })
+            .await
+            .unwrap_or(0.0);
+            #[cfg(target_os = "linux")]
+            let gpu = tokio::task::spawn_blocking(|| {
+                tempest_monitor::linux_helper::collect_gpu_telemetry().usage_pct as f32
+            })
+            .await
+            .unwrap_or(0.0);
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            let gpu = 0.0;
 
             let res = NexusResponse::Telemetry {
                 cpu,
@@ -723,7 +756,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                     NexusRequest::Chat {
                         message,
                         editor_context,
+                        temperature,
+                        context_limit,
+                        role,
                     } => {
+                        // Set overrides on agent before running
+                        *agent.temp_override.lock() = temperature;
+                        *agent.ctx_override.lock() = context_limit;
+                        *agent.role_override.lock() = role;
+
                         // Abort any previous active runs gracefully by setting the stop flag
                         state
                             .stop_flag
@@ -834,6 +875,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                         }
                     }
                     NexusRequest::ListFiles { path } => {
+                        println!("📁 [NEXUS]: ListFiles requested for path: {:?}", path);
                         let dir_path = if path.is_empty() || path == "." {
                             "."
                         } else {
@@ -846,16 +888,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                             .to_string_lossy()
                             .to_string();
 
-                        if let Ok(entries) = std::fs::read_dir(dir_path) {
-                            for entry in entries.flatten() {
-                                if let Ok(name) = entry.file_name().into_string()
-                                    && !name.starts_with('.')
-                                {
-                                    items.push(FileItem {
-                                        name,
-                                        is_dir: entry.path().is_dir(),
-                                    });
+                        println!("📁 [NEXUS]: Resolved path to: {:?}", current_path);
+
+                        match std::fs::read_dir(dir_path) {
+                            Ok(entries) => {
+                                for entry in entries.flatten() {
+                                    if let Ok(name) = entry.file_name().into_string()
+                                        && !name.starts_with('.')
+                                    {
+                                        items.push(FileItem {
+                                            name,
+                                            is_dir: entry.path().is_dir(),
+                                        });
+                                    }
                                 }
+                                println!(
+                                    "📁 [NEXUS]: Read dir success, found {} items",
+                                    items.len()
+                                );
+                            }
+                            Err(e) => {
+                                println!("📁 [NEXUS]: Read dir failed for {:?}: {:?}", dir_path, e);
                             }
                         }
                         let res = NexusResponse::FileTree {
@@ -1004,8 +1057,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
 
                         match pair {
                             Ok(pair) => {
-                                let mut cmd = CommandBuilder::new("zsh");
-                                cmd.arg("-l"); // Login shell
+                                let shell = if cfg!(target_os = "windows") {
+                                    "powershell.exe".to_string()
+                                } else if let Ok(s) = std::env::var("SHELL") {
+                                    s
+                                } else {
+                                    "zsh".to_string()
+                                };
+                                let mut cmd = CommandBuilder::new(&shell);
+                                if shell.ends_with("zsh") || shell.ends_with("bash") {
+                                    cmd.arg("-l"); // Login shell
+                                }
                                 cmd.cwd(
                                     std::env::current_dir()
                                         .unwrap_or_else(|_| std::path::PathBuf::from("/")),
@@ -1126,45 +1188,86 @@ async fn handle_socket(socket: WebSocket, state: Arc<NexusState>) {
                             };
                             let mut matches = Vec::new();
 
-                            // Use grep for fast search
-                            let output = std::process::Command::new("grep")
-                                .args([
-                                    "-rnI",
-                                    "--include=*.rs",
-                                    "--include=*.ts",
-                                    "--include=*.js",
-                                    "--include=*.json",
-                                    "--include=*.toml",
-                                    "--include=*.css",
-                                    "--include=*.html",
-                                    "--include=*.py",
-                                    "--include=*.sh",
-                                    "--include=*.md",
-                                    "--include=*.yaml",
-                                    "--include=*.yml",
-                                    "--include=*.zig",
-                                    "--include=*.nix",
-                                    "--include=*.c",
-                                    "--include=*.cpp",
-                                    "--include=*.h",
-                                    &query,
-                                    search_path,
-                                ])
-                                .output();
+                            // Fallback to native Rust search if grep is not available (like on Windows)
+                            let mut has_grep = false;
+                            #[cfg(unix)]
+                            {
+                                if let Ok(output) = std::process::Command::new("grep")
+                                    .args([
+                                        "-rnI",
+                                        "--include=*.rs",
+                                        "--include=*.ts",
+                                        "--include=*.js",
+                                        "--include=*.json",
+                                        "--include=*.toml",
+                                        "--include=*.css",
+                                        "--include=*.html",
+                                        "--include=*.py",
+                                        "--include=*.sh",
+                                        "--include=*.md",
+                                        "--include=*.yaml",
+                                        "--include=*.yml",
+                                        "--include=*.zig",
+                                        "--include=*.nix",
+                                        "--include=*.c",
+                                        "--include=*.cpp",
+                                        "--include=*.h",
+                                        &query,
+                                        search_path,
+                                    ])
+                                    .output()
+                                {
+                                    has_grep = true;
+                                    let stdout = String::from_utf8_lossy(&output.stdout);
+                                    for line in stdout.lines().take(100) {
+                                        // Format: file:line:content
+                                        let parts: Vec<&str> = line.splitn(3, ':').collect();
+                                        if parts.len() == 3
+                                            && let Ok(line_num) = parts[1].parse::<u32>()
+                                        {
+                                            matches.push(SearchMatch {
+                                                file: parts[0].to_string(),
+                                                line: line_num,
+                                                content: parts[2].trim().to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
 
-                            if let Ok(output) = output {
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                for line in stdout.lines().take(100) {
-                                    // Format: file:line:content
-                                    let parts: Vec<&str> = line.splitn(3, ':').collect();
-                                    if parts.len() == 3
-                                        && let Ok(line_num) = parts[1].parse::<u32>()
-                                    {
-                                        matches.push(SearchMatch {
-                                            file: parts[0].to_string(),
-                                            line: line_num,
-                                            content: parts[2].trim().to_string(),
-                                        });
+                            if !has_grep {
+                                // Rust-native walkdir search fallback
+                                let query_lower = query.to_lowercase();
+                                let walk = walkdir::WalkDir::new(search_path);
+                                for entry in walk.into_iter().flatten() {
+                                    if entry.file_type().is_file() {
+                                        let p = entry.path();
+                                        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                                            let valid_exts = [
+                                                "rs", "ts", "js", "json", "toml", "css", "html",
+                                                "py", "sh", "md", "yaml", "yml", "zig", "nix", "c",
+                                                "cpp", "h",
+                                            ];
+                                            if valid_exts.contains(&ext)
+                                                && let Ok(content) = std::fs::read_to_string(p)
+                                            {
+                                                for (idx, line) in content.lines().enumerate() {
+                                                    if line.to_lowercase().contains(&query_lower) {
+                                                        matches.push(SearchMatch {
+                                                            file: p.to_string_lossy().to_string(),
+                                                            line: (idx + 1) as u32,
+                                                            content: line.trim().to_string(),
+                                                        });
+                                                        if matches.len() >= 100 {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if matches.len() >= 100 {
+                                        break;
                                     }
                                 }
                             }
@@ -1320,17 +1423,20 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
                 .into_response()
         }
         None => {
-            // SPA Fallback: If file not found, serve index.html
-            if let Some(index) = WEB_DIR.get_file("index.html") {
-                (
+            // SPA Fallback: Only serve index.html for paths without a file extension
+            // (i.e. client-side routes like /settings, /chat). Paths with extensions
+            // (e.g. .js, .map, .css) are real asset requests and should 404 properly
+            // to avoid browsers parsing HTML as JavaScript/JSON.
+            let has_extension = path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
+            if !has_extension && let Some(index) = WEB_DIR.get_file("index.html") {
+                return (
                     axum::http::StatusCode::OK,
                     [(axum::http::header::CONTENT_TYPE, "text/html")],
                     index.contents(),
                 )
-                    .into_response()
-            } else {
-                axum::http::StatusCode::NOT_FOUND.into_response()
+                    .into_response();
             }
+            axum::http::StatusCode::NOT_FOUND.into_response()
         }
     }
 }

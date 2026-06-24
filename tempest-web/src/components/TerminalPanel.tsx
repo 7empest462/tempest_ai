@@ -23,14 +23,14 @@ export function TerminalPanel() {
       fontSize: 13,
       cursorBlink: true,
       scrollback: 5000,
-      convertEol: true
+      convertEol: true,
     });
 
     term.current.loadAddon(fitAddon.current);
     term.current.open(terminalRef.current);
     fitAddon.current.fit();
 
-    term.current.writeln("\x1b[1;36m🌪️ Terminal Subsystem Online.\x1b[0m");
+    term.current.writeln('\x1b[1;36m🌪️ Terminal Subsystem Online.\x1b[0m');
 
     // @ts-ignore
     if (window.sendNexus) {
@@ -58,10 +58,10 @@ export function TerminalPanel() {
       requestAnimationFrame(() => {
         try {
           fitAddon.current.fit();
-        } catch (e) {}
+        } catch {}
       });
     });
-    
+
     resizeObserver.observe(terminalRef.current);
 
     return () => {

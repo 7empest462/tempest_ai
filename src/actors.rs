@@ -122,29 +122,25 @@ impl Actor for TelemetryActor {
 
                 let ai_ram_mb = match state.mode {
                     crate::inference::AgentMode::MLX => {
+                        #[cfg(target_os = "macos")]
                         let vram_mb: u64 = {
-                            #[cfg(target_os = "macos")]
+                            if let Ok(output) = std::process::Command::new("ioreg")
+                                .args(["-r", "-d", "1", "-c", "AGXAccelerator"])
+                                .output()
                             {
-                                if let Ok(output) = std::process::Command::new("ioreg")
-                                    .args(["-r", "-d", "1", "-c", "AGXAccelerator"])
-                                    .output()
-                                {
-                                    let s = String::from_utf8_lossy(&output.stdout);
-                                    state
-                                        .vram_re
-                                        .captures_iter(&s)
-                                        .filter_map(|caps| caps.get(1))
-                                        .map(|m| {
-                                            m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024
-                                        })
-                                        .sum()
-                                } else {
-                                    0
-                                }
+                                let s = String::from_utf8_lossy(&output.stdout);
+                                state
+                                    .vram_re
+                                    .captures_iter(&s)
+                                    .filter_map(|caps| caps.get(1))
+                                    .map(|m| m.as_str().parse::<u64>().unwrap_or(0) / 1024 / 1024)
+                                    .sum()
+                            } else {
+                                0
                             }
-                            #[cfg(not(target_os = "macos"))]
-                            0
                         };
+                        #[cfg(not(target_os = "macos"))]
+                        let vram_mb: u64 = 0;
                         (tempest_mem_bytes / 1024 / 1024) + vram_mb
                     }
                     crate::inference::AgentMode::Ollama => {
@@ -167,20 +163,12 @@ impl Actor for TelemetryActor {
                     crate::inference::AgentMode::Kalosm => "(Kalosm Native)",
                 };
 
-                let gpu_load = {
-                    #[cfg(target_os = "macos")]
-                    {
-                        mac_gpu.usage_pct as i32
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        crate::hardware::get_linux_gpu_usage()
-                    }
-                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    {
-                        0
-                    }
-                };
+                #[cfg(target_os = "macos")]
+                let gpu_load = mac_gpu.usage_pct as i32;
+                #[cfg(target_os = "linux")]
+                let gpu_load = crate::hardware::get_linux_gpu_usage();
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                let gpu_load = 0;
 
                 let cpus = state.sys.cpus();
                 let mut total_cpu = 0.0;
@@ -218,7 +206,7 @@ impl Actor for TelemetryActor {
                 let mut total_rx = 0;
                 let mut total_tx = 0;
                 for (interface_name, data) in &state.networks {
-                    if interface_name == "en0"
+                    if interface_name.starts_with("en")
                         || interface_name.starts_with("eth")
                         || interface_name.starts_with("wlan")
                     {
@@ -288,7 +276,7 @@ impl Actor for TelemetryActor {
 
 ----------------------------------
 
-🛰️ NETWORK [en0]    : {} B ▼ | {} B ▲
+🛰️ NETWORK          : {} B ▼ | {} B ▲
 
 🌡️ AVG THERMALS   : {:.1} °C (Max: {:.1} °C)
 

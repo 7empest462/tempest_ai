@@ -1,4 +1,4 @@
-use crate::crypto::{decrypt_history, encrypt_history};
+use crate::crypto::{decrypt_history_with_key, derive_key, encrypt_history_with_key};
 use miette::{IntoDiagnostic, Result};
 use rusqlite::Connection;
 use std::fs;
@@ -15,6 +15,7 @@ pub struct MemoryRecord {
 pub struct MemoryStore {
     conn: Connection,
     passphrase: String,
+    derived_key: zeroize::Zeroizing<[u8; 32]>,
 }
 
 impl MemoryStore {
@@ -76,11 +77,16 @@ impl MemoryStore {
             let _ = conn.execute("ALTER TABLE memories ADD COLUMN tags TEXT", []);
         }
 
-        Ok(MemoryStore { conn, passphrase })
+        let derived_key = derive_key(&passphrase);
+        Ok(MemoryStore {
+            conn,
+            passphrase,
+            derived_key,
+        })
     }
 
     pub fn store(&self, topic: &str, content: &str, tags: Option<Vec<String>>) -> Result<()> {
-        let encrypted = encrypt_history(content.as_bytes(), &self.passphrase)?;
+        let encrypted = encrypt_history_with_key(content.as_bytes(), &self.derived_key)?;
         let tag_str = tags.map(|t| t.join(", "));
 
         self.conn.execute(
@@ -105,7 +111,7 @@ impl MemoryStore {
         let mut results = Vec::new();
         for r in rows {
             let (t, encrypted_data) = r.into_diagnostic()?;
-            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase)
+            if let Ok(decrypted) = decrypt_history_with_key(&encrypted_data, &self.derived_key)
                 && let Ok(content_str) = String::from_utf8(decrypted)
             {
                 results.push((t, content_str));
@@ -123,7 +129,7 @@ impl MemoryStore {
         if let Some(row) = rows.next().into_diagnostic()? {
             let topic: String = row.get(0).into_diagnostic()?;
             let encrypted_data: Vec<u8> = row.get(1).into_diagnostic()?;
-            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase)
+            if let Ok(decrypted) = decrypt_history_with_key(&encrypted_data, &self.derived_key)
                 && let Ok(content_str) = String::from_utf8(decrypted)
             {
                 return Ok(Some((topic, content_str)));
@@ -150,7 +156,7 @@ impl MemoryStore {
         let mut results = Vec::new();
         for r in rows {
             let (topic, encrypted_data, tags, updated_at) = r.into_diagnostic()?;
-            if let Ok(decrypted) = decrypt_history(&encrypted_data, &self.passphrase)
+            if let Ok(decrypted) = decrypt_history_with_key(&encrypted_data, &self.derived_key)
                 && let Ok(content_str) = String::from_utf8(decrypted)
             {
                 results.push(MemoryRecord {

@@ -1,0 +1,4 @@
+src/types/
+src/pkg/
+dist/
+node_modules/

@@ -68,9 +68,13 @@ impl AgentTool for TerminalSpawnTool {
         let typed_args: TerminalSpawnArgs =
             serde_json::from_value(args.clone()).into_diagnostic()?;
 
-        let shell = typed_args
-            .shell
-            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "zsh".to_string()));
+        let shell = typed_args.shell.unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                "powershell.exe".to_string()
+            } else {
+                std::env::var("SHELL").unwrap_or_else(|_| "zsh".to_string())
+            }
+        });
 
         let pty_system = native_pty_system();
         let pair = pty_system

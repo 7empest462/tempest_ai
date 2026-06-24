@@ -133,13 +133,13 @@ I'll read the `src/main.rs` file to understand the application's entry point.
 {"tool":"read_file","arguments":{"path":"src/main.rs"}}
 ```
 
-User: "Create a simple hello world app in Rust"
-I'll set up a new Rust project for you. I'm creating a `Cargo.toml` with basic metadata and a `src/main.rs` containing the hello world logic.
+User: "Set up a basic calculator project in Rust"
+I'll set up a new Rust project for you. I'm creating a `Cargo.toml` with basic metadata and a `src/main.rs` containing the calculator logic.
 ```json
-{"tool": "write_file", "arguments": {"path": "Cargo.toml", "content": "[package]\nname = \"hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]"}}
+{"tool": "write_file", "arguments": {"path": "Cargo.toml", "content": "[package]\nname = \"calc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]"}}
 ```
 ```json
-{"tool": "write_file", "arguments": {"path": "src/main.rs", "content": "fn main() {\n    println!(\"Hello, world!\");\n}"}}
+{"tool": "write_file", "arguments": {"path": "src/main.rs", "content": "fn main() {\n    println!(\"Calculator ready\");\n}"}}
 ```
 
 TASK COMPLETION: Once verified, output `DONE: The task is complete.` to break the loop.

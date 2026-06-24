@@ -1,16 +1,40 @@
-import './style.css'
-import * as wasm from './pkg/tempest_wasm.js'
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import '@xterm/xterm/css/xterm.css'
+import './style.css';
+import * as wasm from './pkg/tempest_wasm.js';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 
-declare var hljs: any;
+declare let hljs: any;
 
 const extensionMap: Record<string, string> = {
-  'rs': 'rust', 'ts': 'typescript', 'tsx': 'typescript', 'js': 'javascript', 'jsx': 'javascript', 'sh': 'bash',
-  'toml': 'toml', 'md': 'markdown', 'json': 'json', 'html': 'xml',
-  'css': 'css', 'py': 'python', 'yml': 'yaml', 'yaml': 'yaml',
-  'zig': 'zig', 'nix': 'nix', 'c': 'c', 'cpp': 'cpp', 'h': 'cpp'
+  rs: 'rust',
+  ts: 'typescript',
+  tsx: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  sh: 'bash',
+  zsh: 'bash',
+  fish: 'bash',
+  toml: 'toml',
+  md: 'markdown',
+  markdown: 'markdown',
+  json: 'json',
+  html: 'xml',
+  css: 'css',
+  py: 'python',
+  yml: 'yaml',
+  yaml: 'yaml',
+  zig: 'zig',
+  nix: 'nix',
+  c: 'c',
+  cpp: 'cpp',
+  h: 'cpp',
+  cmake: 'cmake',
+  sshconfig: 'properties',
+  'ssh-config': 'properties',
+  ssh: 'properties',
+  asm: 'x86asm',
+  s: 'x86asm',
 };
 
 async function startApp() {
@@ -18,7 +42,7 @@ async function startApp() {
   let dashboard: any = null;
   try {
     dashboard = await wasm.initialize_dashboard('vortex-canvas');
-    console.log("🌪️ WASM Dashboard Online");
+    console.log('🌪️ WASM Dashboard Online');
     window.addEventListener('resize', () => {
       const canvas = document.getElementById('vortex-canvas') as HTMLCanvasElement;
       if (canvas) {
@@ -28,7 +52,7 @@ async function startApp() {
       }
     });
   } catch (e) {
-    console.error("❌ Failed to load WASM:", e);
+    console.error('❌ Failed to load WASM:', e);
   }
 
   // 2. UI Elements
@@ -48,14 +72,16 @@ async function startApp() {
   const editBtn = document.getElementById('edit-btn');
   const backBtn = document.getElementById('back-btn');
   const pathLabel = document.getElementById('current-path-label');
-  
+
   // Mission Control Elements
   const stepThinking = document.getElementById('step-thinking');
   const stepPlanning = document.getElementById('step-planning');
   const stepExecuting = document.getElementById('step-executing');
 
   const updateStepper = (state: string) => {
-    [stepThinking, stepPlanning, stepExecuting].forEach(el => el?.classList.remove('active', 'pulse'));
+    [stepThinking, stepPlanning, stepExecuting].forEach((el) =>
+      el?.classList.remove('active', 'pulse')
+    );
     if (state === 'Thinking') {
       stepThinking?.classList.add('active', 'pulse');
     }
@@ -67,7 +93,7 @@ async function startApp() {
     }
   };
   const activeToolsList = document.getElementById('active-tools-list');
-  
+
   // Safe Mode Elements
   const safemodeModal = document.getElementById('safemode-modal');
   const safemodeRationale = document.getElementById('safemode-rationale');
@@ -130,7 +156,9 @@ async function startApp() {
   // Duration ticker
   setInterval(() => {
     const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
-    const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const mins = Math.floor(elapsed / 60)
+      .toString()
+      .padStart(2, '0');
     const secs = (elapsed % 60).toString().padStart(2, '0');
     if (ddDuration) ddDuration.innerText = `${mins}:${secs}`;
   }, 1000);
@@ -167,12 +195,12 @@ async function startApp() {
   const connect = () => {
     socket = new WebSocket('ws://localhost:8080/ws');
     socket.onopen = () => {
-      console.log("📡 [NEXUS]: Connection established.");
-      appendMessage('system', "📡 [NEXUS]: Neural link synchronized.");
+      console.log('📡 [NEXUS]: Connection established.');
+      appendMessage('system', '📡 [NEXUS]: Neural link synchronized.');
       fetchExplorer('.');
     };
     socket.onclose = () => {
-      console.log("❌ [NEXUS]: Connection lost. Retrying...");
+      console.log('❌ [NEXUS]: Connection lost. Retrying...');
       setTimeout(connect, 2000);
     };
     socket.onmessage = (event) => {
@@ -200,7 +228,7 @@ async function startApp() {
         codeDisplay.innerHTML = result.value;
         codeDisplay.className = `hljs ${result.language || ''}`;
       }
-    } catch (e) {
+    } catch {
       codeDisplay.innerText = content;
       codeDisplay.className = 'hljs plaintext';
     }
@@ -254,7 +282,13 @@ async function startApp() {
         renderSearchResults(msg.payload.matches);
         break;
       case 'BackendInfo': {
-        const names: Record<string, string> = { mlx: 'MLX (Metal)', ollama: 'Ollama', bridge: 'AI Bridge', lmstudio: 'LM Studio', kalosm: 'Kalosm (Native GPU)' };
+        const names: Record<string, string> = {
+          mlx: 'MLX (Metal)',
+          ollama: 'Ollama',
+          bridge: 'AI Bridge',
+          lmstudio: 'LM Studio',
+          kalosm: 'Kalosm (Native GPU)',
+        };
         if (engineStatus) {
           engineStatus.innerText = `Engine: ${names[msg.payload.backend] || msg.payload.backend}`;
         }
@@ -268,14 +302,19 @@ async function startApp() {
       case 'AgentStateChange': {
         const state = msg.payload.state;
         updateStepper(state);
-        
+
         if (state === 'Thinking' || state === 'Planning') {
           resetTurnState();
         }
-        
+
+        if (state === 'Compacting') {
+          appendMessage('system', 'agent is compacting history. Please wait one moment.');
+        }
+
         if (state === 'Done') {
-           // Turn off all
-           if (activeToolsList) activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
+          // Turn off all
+          if (activeToolsList)
+            activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
         }
         break;
       }
@@ -285,7 +324,7 @@ async function startApp() {
           if (tools.length === 0) {
             activeToolsList.innerHTML = '<li class="empty-tools">No tools running</li>';
           } else {
-            activeToolsList.innerHTML = tools.map(t => `<li>${t}</li>`).join('');
+            activeToolsList.innerHTML = tools.map((t) => `<li>${t}</li>`).join('');
           }
         }
         break;
@@ -355,37 +394,43 @@ async function startApp() {
         streamAccum += token;
 
         // If accumulator contains a leaked prompt echo, buffer until newline
-        if (streamAccum.includes('Human:') || streamAccum.includes('[EDITOR]') || streamAccum.includes('Assistant:')) {
+        if (
+          streamAccum.includes('Human:') ||
+          streamAccum.includes('[EDITOR]') ||
+          streamAccum.includes('Assistant:')
+        ) {
           if (!streamAccum.includes('\n')) {
             break;
           }
           streamAccum = streamAccum
             .split('\n')
-            .filter(line => {
+            .filter((line) => {
               const t = line.trim();
-              return !t.startsWith('Human:') &&
-                     !t.startsWith('[EDITOR]') &&
-                     !t.startsWith('Assistant:') &&
-                     t !== '';
+              return (
+                !t.startsWith('Human:') &&
+                !t.startsWith('[EDITOR]') &&
+                !t.startsWith('Assistant:') &&
+                t !== ''
+              );
             })
             .join('\n');
         }
 
         // Check if buffer ends with a partial pattern
         const partials = ['Human', 'Human:', '[EDITOR', '[EDITOR]', 'Assistant', 'Assistant:'];
-        if (partials.some(p => streamAccum.endsWith(p)) && streamAccum.length < 200) {
+        if (partials.some((p) => streamAccum.endsWith(p)) && streamAccum.length < 200) {
           break;
         }
 
         // Flush accumulator
         token = streamAccum;
-        
+
         // Strip again after buffering to catch split/partial template tokens!
         token = token.replace(/<｜begin of sentence｜>/g, '');
         token = token.replace(/<｜end of sentence｜>/g, '');
         token = token.replace(/<\|begin of sentence\|>/g, '');
         token = token.replace(/<\|end of sentence\|>/g, '');
-        
+
         streamAccum = '';
 
         if (token.trim().length === 0) break;
@@ -444,7 +489,7 @@ async function startApp() {
     let started = false;
     const startIdx = text.indexOf('{');
     if (startIdx === -1) return text;
-    
+
     for (let i = startIdx; i < text.length; i++) {
       const c = text[i];
       if (escape) {
@@ -468,7 +513,11 @@ async function startApp() {
           if (started && depth === 0) {
             const jsonPart = text.substring(startIdx, i + 1);
             const lower = jsonPart.toLowerCase();
-            if (lower.includes('"tool"') || lower.includes('"name"') || lower.includes('"is_valid"')) {
+            if (
+              lower.includes('"tool"') ||
+              lower.includes('"name"') ||
+              lower.includes('"is_valid"')
+            ) {
               return text.substring(0, i + 1);
             }
           }
@@ -544,7 +593,7 @@ async function startApp() {
   const toggleDropdown = (panel: HTMLElement | null) => {
     if (!panel) return;
     // Close all other dropdowns first
-    document.querySelectorAll('.dropdown-panel').forEach(p => {
+    document.querySelectorAll('.dropdown-panel').forEach((p) => {
       if (p !== panel) p.classList.remove('open');
     });
     panel.classList.toggle('open');
@@ -562,16 +611,16 @@ async function startApp() {
 
   // Close dropdowns on outside click
   document.addEventListener('click', () => {
-    document.querySelectorAll('.dropdown-panel').forEach(p => p.classList.remove('open'));
+    document.querySelectorAll('.dropdown-panel').forEach((p) => p.classList.remove('open'));
   });
 
   // Prevent clicks inside dropdowns from closing them
-  document.querySelectorAll('.dropdown-panel').forEach(panel => {
+  document.querySelectorAll('.dropdown-panel').forEach((panel) => {
     panel.addEventListener('click', (e) => e.stopPropagation());
   });
 
   // 9. File Explorer Logic
-  let selectedItem: { name: string, is_dir: boolean, path: string } | null = null;
+  let selectedItem: { name: string; is_dir: boolean; path: string } | null = null;
 
   const fetchExplorer = (path: string) => {
     selectedItem = null;
@@ -581,38 +630,42 @@ async function startApp() {
   const renderExplorer = (items: any[]) => {
     if (!fileExplorer) return;
     fileExplorer.innerHTML = '';
-    items.sort((a, b) => (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)).forEach(item => {
-      const div = document.createElement('div');
-      div.className = `explorer-item ${item.is_dir ? 'folder' : 'file'}`;
-      div.innerText = item.name;
-      const fullPath = `${currentPath}/${item.name}`;
+    items
+      .sort((a, b) => (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0))
+      .forEach((item) => {
+        const div = document.createElement('div');
+        div.className = `explorer-item ${item.is_dir ? 'folder' : 'file'}`;
+        div.innerText = item.name;
+        const fullPath = `${currentPath}/${item.name}`;
 
-      // Single click = select
-      div.onclick = (e) => {
-        e.stopPropagation();
-        document.querySelectorAll('.explorer-item').forEach(el => el.classList.remove('selected'));
-        div.classList.add('selected');
-        selectedItem = { name: item.name, is_dir: item.is_dir, path: fullPath };
-      };
+        // Single click = select
+        div.onclick = (e) => {
+          e.stopPropagation();
+          document
+            .querySelectorAll('.explorer-item')
+            .forEach((el) => el.classList.remove('selected'));
+          div.classList.add('selected');
+          selectedItem = { name: item.name, is_dir: item.is_dir, path: fullPath };
+        };
 
-      // Double click = open file or navigate folder
-      div.ondblclick = () => {
-        if (!item.is_dir) {
-          if (editorFilename) editorFilename.innerText = item.name;
-          currentFileExt = item.name.split('.').pop() || '';
-          currentOpenFile = fullPath;
-          sendNexus('ReadFile', { path: fullPath });
-        } else {
-          fetchExplorer(fullPath);
-        }
-      };
-      fileExplorer.appendChild(div);
-    });
+        // Double click = open file or navigate folder
+        div.ondblclick = () => {
+          if (!item.is_dir) {
+            if (editorFilename) editorFilename.innerText = item.name;
+            currentFileExt = item.name.split('.').pop() || '';
+            currentOpenFile = fullPath;
+            sendNexus('ReadFile', { path: fullPath });
+          } else {
+            fetchExplorer(fullPath);
+          }
+        };
+        fileExplorer.appendChild(div);
+      });
   };
 
   // Deselect on clicking empty explorer area
   fileExplorer?.addEventListener('click', () => {
-    document.querySelectorAll('.explorer-item').forEach(el => el.classList.remove('selected'));
+    document.querySelectorAll('.explorer-item').forEach((el) => el.classList.remove('selected'));
     selectedItem = null;
   });
 
@@ -686,12 +739,16 @@ async function startApp() {
       editBtn.innerText = 'SAVE';
       codeDisplay.focus();
       codeDisplay.className = 'hljs plaintext';
-      codeDisplay.innerText = codeDisplay.innerText;
+      const currentText = codeDisplay.innerText;
+      codeDisplay.innerText = currentText;
     } else {
       const content = codeDisplay.innerText;
       if (currentOpenFile) {
         sendNexus('WriteFile', { path: currentOpenFile, content });
-        appendMessage('system', `💾 [NEXUS]: Successfully saved ${editorFilename?.innerText} to disk.`);
+        appendMessage(
+          'system',
+          `💾 [NEXUS]: Successfully saved ${editorFilename?.innerText} to disk.`
+        );
       }
       codeDisplay.contentEditable = 'false';
       editBtn.innerText = 'EDIT';
@@ -754,18 +811,21 @@ async function startApp() {
   const doSearch = () => {
     const query = searchInput?.value.trim();
     if (!query) return;
-    if (searchResults) searchResults.innerHTML = '<div style="color: var(--text-secondary); padding: 12px; font-size: 0.8rem;">Searching...</div>';
+    if (searchResults)
+      searchResults.innerHTML =
+        '<div style="color: var(--text-secondary); padding: 12px; font-size: 0.8rem;">Searching...</div>';
     sendNexus('SearchFiles', { query, path: '.' });
   };
 
   const renderSearchResults = (matches: any[]) => {
     if (!searchResults) return;
     if (matches.length === 0) {
-      searchResults.innerHTML = '<div style="color: var(--text-secondary); padding: 12px; font-size: 0.8rem;">No results found.</div>';
+      searchResults.innerHTML =
+        '<div style="color: var(--text-secondary); padding: 12px; font-size: 0.8rem;">No results found.</div>';
       return;
     }
     searchResults.innerHTML = '';
-    matches.forEach(match => {
+    matches.forEach((match) => {
       const div = document.createElement('div');
       div.className = 'search-result';
       div.innerHTML = `
@@ -832,9 +892,9 @@ async function startApp() {
   });
 
   // Background options
-  document.querySelectorAll('.bg-option').forEach(btn => {
+  document.querySelectorAll('.bg-option').forEach((btn) => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.bg-option').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.bg-option').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       const bg = (btn as HTMLElement).dataset.bg;
       const vortexContainer = document.getElementById('vortex-container');
@@ -881,7 +941,7 @@ async function startApp() {
     if (!container) return;
     container.classList.toggle('diff-editable');
     const isEditable = container.classList.contains('diff-editable');
-    container.querySelectorAll('.diff-line-add .diff-line-content').forEach(el => {
+    container.querySelectorAll('.diff-line-add .diff-line-content').forEach((el) => {
       (el as HTMLElement).contentEditable = isEditable ? 'true' : 'false';
     });
     if (safemodeEdit) {
@@ -895,14 +955,14 @@ async function startApp() {
 
   document.getElementById('diff-view-unified')?.addEventListener('click', () => {
     currentDiffView = 'unified';
-    document.querySelectorAll('.diff-toggle-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.diff-toggle-btn').forEach((b) => b.classList.remove('active'));
     document.getElementById('diff-view-unified')?.classList.add('active');
     if (lastDiffRaw) renderDiff(lastDiffRaw);
   });
 
   document.getElementById('diff-view-split')?.addEventListener('click', () => {
     currentDiffView = 'split';
-    document.querySelectorAll('.diff-toggle-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.diff-toggle-btn').forEach((b) => b.classList.remove('active'));
     document.getElementById('diff-view-split')?.classList.add('active');
     if (lastDiffRaw) renderDiff(lastDiffRaw);
   });
@@ -929,8 +989,8 @@ async function startApp() {
     }
 
     // Determine badge type
-    const isCreate = lines.some(l => l.startsWith('--- /dev/null'));
-    const isDelete = lines.some(l => l.startsWith('+++ /dev/null'));
+    const isCreate = lines.some((l) => l.startsWith('--- /dev/null'));
+    const isDelete = lines.some((l) => l.startsWith('+++ /dev/null'));
     const badgeClass = isCreate ? 'created' : isDelete ? 'deleted' : 'modified';
     const badgeText = isCreate ? 'NEW' : isDelete ? 'DEL' : 'MOD';
 
@@ -969,8 +1029,13 @@ async function startApp() {
 
     for (const line of lines) {
       // Skip diff meta headers
-      if (line.startsWith('diff ') || line.startsWith('index ') || 
-          line.startsWith('--- ') || line.startsWith('+++ ')) continue;
+      if (
+        line.startsWith('diff ') ||
+        line.startsWith('index ') ||
+        line.startsWith('--- ') ||
+        line.startsWith('+++ ')
+      )
+        continue;
 
       // Hunk header
       if (line.startsWith('@@')) {
@@ -1026,8 +1091,13 @@ async function startApp() {
     let newLine = 0;
 
     for (const line of lines) {
-      if (line.startsWith('diff ') || line.startsWith('index ') || 
-          line.startsWith('--- ') || line.startsWith('+++ ')) continue;
+      if (
+        line.startsWith('diff ') ||
+        line.startsWith('index ') ||
+        line.startsWith('--- ') ||
+        line.startsWith('+++ ')
+      )
+        continue;
 
       if (line.startsWith('@@')) {
         const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);
@@ -1064,7 +1134,14 @@ async function startApp() {
           html += `<tr class="diff-hunk-header"><td colspan="3">${escapeHtml(ln.content)}</td></tr>`;
           continue;
         }
-        const cls = ln.type === 'add' ? 'diff-line-add' : ln.type === 'del' ? 'diff-line-del' : ln.type === 'empty' ? 'diff-line-ctx' : 'diff-line-ctx';
+        const cls =
+          ln.type === 'add'
+            ? 'diff-line-add'
+            : ln.type === 'del'
+              ? 'diff-line-del'
+              : ln.type === 'empty'
+                ? 'diff-line-ctx'
+                : 'diff-line-ctx';
         const prefix = ln.type === 'add' ? '+' : ln.type === 'del' ? '−' : ' ';
         html += `<tr class="${cls}">
           <td class="diff-line-num">${ln.num ?? ''}</td>
@@ -1089,7 +1166,12 @@ async function startApp() {
   };
 
   // 14. Resizable Panel Logic
-  const setupResize = (handleId: string, getLeft: () => HTMLElement | null, getRight: () => HTMLElement | null, minLeft: number) => {
+  const setupResize = (
+    handleId: string,
+    getLeft: () => HTMLElement | null,
+    getRight: () => HTMLElement | null,
+    minLeft: number
+  ) => {
     const handle = document.getElementById(handleId);
     if (!handle) return;
 
@@ -1121,7 +1203,7 @@ async function startApp() {
       const newLeftWidth = Math.max(minLeft, startLeftWidth + dx);
       left.style.width = `${newLeftWidth}px`;
       left.style.flex = `0 0 ${newLeftWidth}px`;
-      
+
       // We don't necessarily need to set the right width if it's the last element
       // but for middle elements like the chat, we might want to.
     });

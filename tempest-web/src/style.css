@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 @source "../index.html";
 @source "./**/*.{js,ts,jsx,tsx}";
 @layer base {
@@ -32,7 +32,7 @@
     --ring: 240 4.9% 83.9%;
 
     --radius: 0.5rem;
-    
+
     /* Tempest specific custom variables */
     --vortex-purple: #7000ff;
     --glass-blur: blur(12px);

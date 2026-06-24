@@ -20,6 +20,7 @@ pub struct TempestTurnDecomposer {
     pub planning_duration_ms: u64,
     pub executing_duration_ms: u64,
     pub verifying_duration_ms: u64,
+    pub kv_cache_hit_pct: Option<f32>,
 }
 
 impl Default for TempestTurnDecomposer {
@@ -37,6 +38,7 @@ impl TempestTurnDecomposer {
             planning_duration_ms: 0,
             executing_duration_ms: 0,
             verifying_duration_ms: 0,
+            kv_cache_hit_pct: None,
         }
     }
 
@@ -53,16 +55,15 @@ impl TempestTurnDecomposer {
             (TurnPhase::Planning, TurnPhase::Executing) => true,
             (TurnPhase::Planning, TurnPhase::Verifying) => true,
 
-            // Executing can transition to Verifying (normal) or back to Planning (re-planning/failure)
+            // Executing can transition to Verifying (normal), Planning (re-planning/failure), or Executing (multi-step loops)
             (TurnPhase::Executing, TurnPhase::Verifying) => true,
             (TurnPhase::Executing, TurnPhase::Planning) => true,
+            (TurnPhase::Executing, TurnPhase::Executing) => true,
 
-            // Verifying can transition to Planning (verification failed/re-plan) or loop in Verifying
+            // Verifying can transition to Planning (verification failed/re-plan), Verifying (loop), or Executing (recovery/new turn)
             (TurnPhase::Verifying, TurnPhase::Planning) => true,
             (TurnPhase::Verifying, TurnPhase::Verifying) => true,
-
-            // Other transitions are unexpected/invalid
-            _ => false,
+            (TurnPhase::Verifying, TurnPhase::Executing) => true,
         }
     }
 
@@ -102,10 +103,14 @@ impl TempestTurnDecomposer {
     }
 
     pub fn format_telemetry(&self) -> String {
-        format!(
+        let mut parts = vec![format!(
             "⏱️ Phase Durations: Planning: {}ms | Execution: {}ms | Verification: {}ms",
             self.planning_duration_ms, self.executing_duration_ms, self.verifying_duration_ms
-        )
+        )];
+        if let Some(hit_pct) = self.kv_cache_hit_pct {
+            parts.push(format!("KV Cache Hit: {:.1}%", hit_pct));
+        }
+        parts.join(" | ")
     }
 }
 
@@ -132,14 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_transitions() {
+    fn test_loop_and_recovery_transitions() {
         let decomposer = TempestTurnDecomposer::new();
 
-        // Executing -> Executing (Invalid)
-        assert!(!decomposer.is_valid_transition(&TurnPhase::Executing, &TurnPhase::Executing));
+        // Executing -> Executing (Valid loop)
+        assert!(decomposer.is_valid_transition(&TurnPhase::Executing, &TurnPhase::Executing));
 
-        // Verifying -> Executing (Invalid)
-        assert!(!decomposer.is_valid_transition(&TurnPhase::Verifying, &TurnPhase::Executing));
+        // Verifying -> Executing (Valid recovery or new execution turn)
+        assert!(decomposer.is_valid_transition(&TurnPhase::Verifying, &TurnPhase::Executing));
     }
 
     #[test]

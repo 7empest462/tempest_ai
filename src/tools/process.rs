@@ -56,13 +56,20 @@ impl AgentTool for RunBackgroundTool {
             serde_json::from_value(args.clone()).into_diagnostic()?;
         let cmd = &typed_args.command;
 
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
+        let mut child_cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(cmd);
+            c
+        } else {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("/opt/homebrew/bin:/usr/local/bin:{}", current_path);
+            let mut c = Command::new("sh");
+            c.env("PATH", new_path);
+            c.arg("-c").arg(cmd);
+            c
+        };
 
-        let mut child = Command::new("sh")
-            .env("PATH", new_path)
-            .arg("-c")
-            .arg(cmd)
+        let mut child = child_cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -232,8 +239,15 @@ impl AgentTool for KillProcessTool {
         let signal_owned = typed_args.signal.unwrap_or_else(|| "TERM".to_string());
         let signal = signal_owned.as_str();
 
+        #[cfg(unix)]
         let output = std::process::Command::new("kill")
             .args([&format!("-{}", signal), pid])
+            .output()
+            .into_diagnostic()?;
+
+        #[cfg(not(unix))]
+        let output = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", pid])
             .output()
             .into_diagnostic()?;
 
@@ -328,11 +342,16 @@ impl AgentTool for WatchDirectoryTool {
                         if let notify::EventKind::Modify(_) = event.kind
                             && last_trigger.elapsed() > std::time::Duration::from_millis(1500)
                         {
-                            let _ = std::process::Command::new("sh")
-                                .arg("-c")
-                                .arg(&cmd)
-                                .current_dir(&path)
-                                .spawn();
+                            let mut trigger_cmd = if cfg!(target_os = "windows") {
+                                let mut c = std::process::Command::new("cmd");
+                                c.arg("/C").arg(&cmd);
+                                c
+                            } else {
+                                let mut c = std::process::Command::new("sh");
+                                c.arg("-c").arg(&cmd);
+                                c
+                            };
+                            let _ = trigger_cmd.current_dir(&path).spawn();
                             last_trigger = std::time::Instant::now();
                         }
                     }
@@ -343,5 +362,94 @@ impl AgentTool for WatchDirectoryTool {
         });
 
         Ok(success_msg)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListProcessesArgs {
+    /// Optional filter string to only list processes matching this name (case-insensitive).
+    pub filter: Option<String>,
+}
+
+pub struct ListProcessesTool;
+
+#[async_trait]
+impl AgentTool for ListProcessesTool {
+    fn name(&self) -> &'static str {
+        "list_processes"
+    }
+    fn description(&self) -> &'static str {
+        "Lists running system processes with PID, name, CPU usage, and memory. Supports an optional filter."
+    }
+    fn tool_info(&self) -> ToolInfo {
+        let mut settings = schemars::generate::SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let generator = settings.into_generator();
+        let payload = generator.into_root_schema_for::<ListProcessesArgs>();
+
+        ToolInfo {
+            tool_type: ToolType::Function,
+            function: ToolFunctionInfo {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: payload,
+            },
+        }
+    }
+
+    async fn execute(&self, args: &Value, _context: ToolContext) -> Result<String> {
+        let typed_args: ListProcessesArgs =
+            serde_json::from_value(args.clone()).into_diagnostic()?;
+        let filter = typed_args.filter.map(|f| f.to_lowercase());
+
+        let mut sys = sysinfo::System::new_all();
+        sys.refresh_all();
+
+        let mut processes: Vec<_> = sys.processes().values().collect();
+        processes.sort_by(|a, b| {
+            b.cpu_usage()
+                .partial_cmp(&a.cpu_usage())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name().cmp(b.name()))
+        });
+
+        let mut table = String::new();
+        table.push_str("| PID | Name | CPU (%) | Memory (MB) |\n");
+        table.push_str("|---|---|---|---|\n");
+
+        let mut count = 0;
+        for proc in processes {
+            let name = proc.name().to_string_lossy();
+            if let Some(f) = &filter
+                && !name.to_lowercase().contains(f)
+            {
+                continue;
+            }
+
+            let mem_mb = proc.memory() as f64 / 1024.0 / 1024.0;
+            table.push_str(&format!(
+                "| {} | {} | {:.1}% | {:.1} MB |\n",
+                proc.pid(),
+                name,
+                proc.cpu_usage(),
+                mem_mb
+            ));
+            count += 1;
+
+            if filter.is_none() && count >= 50 {
+                table.push_str(&format!("| ... | and {} more processes. Use the 'filter' parameter to narrow down. | ... | ... |\n", sys.processes().len() - 50));
+                break;
+            }
+        }
+
+        if count == 0 {
+            if let Some(f) = &filter {
+                Ok(format!("No processes found matching filter: '{}'", f))
+            } else {
+                Ok("No running processes found.".to_string())
+            }
+        } else {
+            Ok(table)
+        }
     }
 }

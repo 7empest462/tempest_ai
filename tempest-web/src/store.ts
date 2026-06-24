@@ -1,7 +1,16 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type AgentPhase = 'Idle' | 'Thinking' | 'Planning' | 'Executing' | 'PendingTools' | 'ExecutingTools' | 'StreamingContent' | 'Done';
+export type AgentPhase =
+  | 'Idle'
+  | 'Thinking'
+  | 'Planning'
+  | 'Executing'
+  | 'PendingTools'
+  | 'ExecutingTools'
+  | 'StreamingContent'
+  | 'Compacting'
+  | 'Done';
 
 export interface ToolCallResult {
   name: string;
@@ -74,7 +83,11 @@ interface TempestState {
   setCtxUsed: (ctx: number) => void;
   setCtxTotal: (ctx: number) => void;
   setKvCacheHitPct: (val: number | null) => void;
-  setPhaseDurations: (planning: number | null, executing: number | null, verifying: number | null) => void;
+  setPhaseDurations: (
+    planning: number | null,
+    executing: number | null,
+    verifying: number | null
+  ) => void;
 
   // Agent Lifecycle
   agentPhase: AgentPhase;
@@ -106,7 +119,12 @@ interface TempestState {
   // Active Tool Executions
   activeToolExecutions: ActiveToolExecution[];
   addActiveToolExecution: (name: string, args?: string) => void;
-  updateActiveToolExecution: (name: string, args: string | undefined, status: 'success' | 'error', output?: string) => void;
+  updateActiveToolExecution: (
+    name: string,
+    args: string | undefined,
+    status: 'success' | 'error',
+    output?: string
+  ) => void;
   clearActiveToolExecutions: () => void;
 
   // Turn Review Request
@@ -119,12 +137,12 @@ interface TempestState {
   setExplorer: (path: string, items: FileItem[]) => void;
 
   // Editor Focus
-  activeFile: { name: string, content: string, ext: string } | null;
-  setActiveFile: (file: { name: string, content: string, ext: string } | null) => void;
+  activeFile: { name: string; content: string; ext: string } | null;
+  setActiveFile: (file: { name: string; content: string; ext: string } | null) => void;
   updateActiveFileContent: (content: string) => void;
   isFileEditable: boolean;
   setFileEditable: (val: boolean) => void;
-  
+
   // Layout States
   isEditorFocused: boolean;
   setEditorFocused: (val: boolean) => void;
@@ -134,6 +152,23 @@ interface TempestState {
   // Settings
   backgroundIntensity: BackgroundIntensity;
   setBackgroundIntensity: (intensity: BackgroundIntensity) => void;
+  sliderAggressiveCareful: number;
+  sliderCreativePrecise: number;
+  sliderFastThorough: number;
+  activeRole:
+    | 'pair-programmer'
+    | 'senior-editor'
+    | 'security-auditor'
+    | 'code-poet'
+    | 'refactor-ninja';
+  contextLimit: number;
+  setSliderAggressiveCareful: (val: number) => void;
+  setSliderCreativePrecise: (val: number) => void;
+  setSliderFastThorough: (val: number) => void;
+  setActiveRole: (
+    role: 'pair-programmer' | 'senior-editor' | 'security-auditor' | 'code-poet' | 'refactor-ninja'
+  ) => void;
+  setContextLimit: (val: number) => void;
 
   // Active Tab
   activeTab: 'files' | 'agent' | 'search' | 'settings';
@@ -156,194 +191,243 @@ interface TempestState {
   isSearching: boolean;
   setSearchResults: (results: any[]) => void;
   setSearching: (val: boolean) => void;
+  muteSounds: boolean;
+  setMuteSounds: (val: boolean) => void;
 }
 
 export const useStore = create<TempestState>()(
   persist(
     (set) => ({
-  isConnected: false,
-  engineStatus: 'Initializing...',
-  plannerModel: '--',
-  executorModel: '--',
-  verifierModel: '--',
-  setConnected: (val) => set({ isConnected: val }),
-  setEngineStatus: (status) => set({ engineStatus: status }),
-  setBackendInfo: (backend, planner, executor, verifier) => set({
-    engineStatus: backend,
-    plannerModel: planner,
-    executorModel: executor,
-    verifierModel: verifier
-  }),
+      isConnected: false,
+      engineStatus: 'Initializing...',
+      plannerModel: '--',
+      executorModel: '--',
+      verifierModel: '--',
+      setConnected: (val) => set({ isConnected: val }),
+      setEngineStatus: (status) => set({ engineStatus: status }),
+      setBackendInfo: (backend, planner, executor, verifier) =>
+        set({
+          engineStatus: backend,
+          plannerModel: planner,
+          executorModel: executor,
+          verifierModel: verifier,
+        }),
 
-  cpu: 0,
-  gpu: 0,
-  ram: '--',
-  tps: 'idle',
-  ctxUsed: 0,
-  ctxTotal: 32768,
-  kvCacheHitPct: null,
-  planningDurationMs: null,
-  executingDurationMs: null,
-  verifyingDurationMs: null,
-  setMetrics: (cpu, gpu, ram) => set({ cpu, gpu, ram }),
-  setTps: (tps) => set({ tps }),
-  setCtxUsed: (ctx) => set({ ctxUsed: ctx }),
-  setCtxTotal: (ctx) => set({ ctxTotal: ctx }),
-  setKvCacheHitPct: (val) => set({ kvCacheHitPct: val }),
-  setPhaseDurations: (planning, executing, verifying) => set({
-    planningDurationMs: planning,
-    executingDurationMs: executing,
-    verifyingDurationMs: verifying,
-  }),
+      cpu: 0,
+      gpu: 0,
+      ram: '--',
+      tps: 'idle',
+      ctxUsed: 0,
+      ctxTotal: 32768,
+      kvCacheHitPct: null,
+      planningDurationMs: null,
+      executingDurationMs: null,
+      verifyingDurationMs: null,
+      setMetrics: (cpu, gpu, ram) => set({ cpu, gpu, ram }),
+      setTps: (tps) => set({ tps }),
+      setCtxUsed: (ctx) => set({ ctxUsed: ctx }),
+      setCtxTotal: (ctx) => set({ ctxTotal: ctx }),
+      setKvCacheHitPct: (val) => set((state) => ({ kvCacheHitPct: val ?? state.kvCacheHitPct })),
+      setPhaseDurations: (planning, executing, verifying) =>
+        set((state) => ({
+          planningDurationMs: planning ?? state.planningDurationMs,
+          executingDurationMs: executing ?? state.executingDurationMs,
+          verifyingDurationMs: verifying ?? state.verifyingDurationMs,
+        })),
 
-  agentPhase: 'Idle',
-  currentTask: '--',
-  activeTools: [],
-  setAgentPhase: (phase) => set({ agentPhase: phase }),
-  setCurrentTask: (task) => set({ currentTask: task }),
-  setActiveTools: (tools) => set({ activeTools: tools }),
+      agentPhase: 'Idle',
+      currentTask: '--',
+      activeTools: [],
+      setAgentPhase: (phase) => set({ agentPhase: phase }),
+      setCurrentTask: (task) => set({ currentTask: task }),
+      setActiveTools: (tools) => set({ activeTools: tools }),
 
-  messages: [{ id: 'init', role: 'system', content: '🌪️ [SYSTEM]: Neural link established. Environment grounded.' }],
-  isStreaming: false,
-  streamAccumulator: '',
-  safeModeRequest: null,
-  askUserRequest: null,
-  addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
-  setMessages: (messages) => set({ messages }),
-  updateLastMessage: (content) => set((state) => {
-    const newMsgs = [...state.messages];
-    if (newMsgs.length > 0) {
-      newMsgs[newMsgs.length - 1].content = content;
-    }
-    return { messages: newMsgs };
-  }),
-  setStreaming: (val) => set((state) => ({
-    isStreaming: val,
-    kvCacheHitPct: val ? null : state.kvCacheHitPct,
-    planningDurationMs: val ? null : state.planningDurationMs,
-    executingDurationMs: val ? null : state.executingDurationMs,
-    verifyingDurationMs: val ? null : state.verifyingDurationMs,
-  })),
-  appendStreamContent: (chunk) => set((state) => ({ streamAccumulator: state.streamAccumulator + chunk })),
-  commitStream: () => set((state) => {
-    if (!state.streamAccumulator && !state.reasoningAccumulator && state.currentToolResults.length === 0) {
-      return { isStreaming: false };
-    }
-    return {
-      messages: [...state.messages, { 
-        id: Date.now().toString(), 
-        role: 'ai', 
-        content: state.streamAccumulator,
-        reasoning: state.reasoningAccumulator,
-        tools: state.currentToolResults 
-      }],
+      messages: [
+        {
+          id: 'init',
+          role: 'system',
+          content: '🌪️ [SYSTEM]: Neural link established. Environment grounded.',
+        },
+      ],
+      isStreaming: false,
       streamAccumulator: '',
+      safeModeRequest: null,
+      askUserRequest: null,
+      addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
+      setMessages: (messages) => set({ messages }),
+      updateLastMessage: (content) =>
+        set((state) => {
+          const newMsgs = [...state.messages];
+          if (newMsgs.length > 0) {
+            newMsgs[newMsgs.length - 1].content = content;
+          }
+          return { messages: newMsgs };
+        }),
+      setStreaming: (val) =>
+        set((state) => ({
+          isStreaming: val,
+          kvCacheHitPct: val ? state.kvCacheHitPct : state.kvCacheHitPct,
+          planningDurationMs: val ? state.planningDurationMs : state.planningDurationMs,
+          executingDurationMs: val ? state.executingDurationMs : state.executingDurationMs,
+          verifyingDurationMs: val ? state.verifyingDurationMs : state.verifyingDurationMs,
+        })),
+      appendStreamContent: (chunk) =>
+        set((state) => ({ streamAccumulator: state.streamAccumulator + chunk })),
+      commitStream: () =>
+        set((state) => {
+          if (
+            !state.streamAccumulator &&
+            !state.reasoningAccumulator &&
+            state.currentToolResults.length === 0
+          ) {
+            return { isStreaming: false };
+          }
+          return {
+            messages: [
+              ...state.messages,
+              {
+                id: Date.now().toString(),
+                role: 'ai',
+                content: state.streamAccumulator,
+                reasoning: state.reasoningAccumulator,
+                tools: state.currentToolResults,
+              },
+            ],
+            streamAccumulator: '',
+            reasoningAccumulator: '',
+            currentToolResults: [],
+            isStreaming: false,
+          };
+        }),
+      setSafeModeRequest: (req) => set({ safeModeRequest: req }),
+      setAskUserRequest: (req) => set({ askUserRequest: req }),
+
+      // Memories
+      memories: [],
+      setMemories: (memories) => set({ memories }),
+
+      // Active Tool Executions
+      activeToolExecutions: [],
+      addActiveToolExecution: (name, args) =>
+        set((state) => {
+          const id = `${name}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          const newExec: ActiveToolExecution = {
+            id,
+            name,
+            args,
+            status: 'running',
+            progress: 15,
+          };
+          return { activeToolExecutions: [...state.activeToolExecutions, newExec] };
+        }),
+      updateActiveToolExecution: (name, args, status, output) =>
+        set((state) => {
+          const executions = [...state.activeToolExecutions];
+          let idx = -1;
+          if (args) {
+            idx = executions.findIndex(
+              (e) => e.name === name && e.status === 'running' && e.args === args
+            );
+          }
+          if (idx === -1) {
+            idx = executions.findIndex((e) => e.name === name && e.status === 'running');
+          }
+          if (idx === -1) {
+            idx = executions.findIndex((e) => e.name === name);
+          }
+
+          if (idx !== -1) {
+            executions[idx] = {
+              ...executions[idx],
+              status,
+              output,
+              progress: 100,
+            };
+          } else {
+            executions.push({
+              id: `${name}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+              name,
+              args,
+              status,
+              output,
+              progress: 100,
+            });
+          }
+          return { activeToolExecutions: executions };
+        }),
+      clearActiveToolExecutions: () => set({ activeToolExecutions: [] }),
+
+      // Turn Review Request
+      turnReviewRequest: null,
+      setTurnReviewRequest: (req) => set({ turnReviewRequest: req }),
+
+      currentPath: '/',
+      fileItems: [],
+      setExplorer: (path, items) => set({ currentPath: path, fileItems: items }),
+
+      activeFile: null,
+      setActiveFile: (file) => set({ activeFile: file, isFileEditable: false }), // Reset editable state when changing files
+      updateActiveFileContent: (content) =>
+        set((state) => ({
+          activeFile: state.activeFile ? { ...state.activeFile, content } : null,
+        })),
+      isFileEditable: false,
+      setFileEditable: (val) => set({ isFileEditable: val }),
+
+      isEditorFocused: false,
+      setEditorFocused: (val) => set({ isEditorFocused: val }),
+
+      isTerminalOpen: false,
+      setTerminalOpen: (val) => set({ isTerminalOpen: val }),
+
+      backgroundIntensity: 'subtle',
+      setBackgroundIntensity: (intensity) => set({ backgroundIntensity: intensity }),
+      sliderAggressiveCareful: 0.3,
+      sliderCreativePrecise: 0.4,
+      sliderFastThorough: 0.3,
+      activeRole: 'pair-programmer',
+      contextLimit: 32768,
+      muteSounds: false,
+      setSliderAggressiveCareful: (val) => set({ sliderAggressiveCareful: val }),
+      setSliderCreativePrecise: (val) => set({ sliderCreativePrecise: val }),
+      setSliderFastThorough: (val) => set({ sliderFastThorough: val }),
+      setActiveRole: (role) => set({ activeRole: role }),
+      setContextLimit: (val) => set({ contextLimit: val }),
+      setMuteSounds: (val: boolean) => set({ muteSounds: val }),
+
+      activeTab: 'files',
+      setActiveTab: (tab) => set({ activeTab: tab }),
+
+      chatViewMode: 'timeline',
+      setChatViewMode: (mode) => set({ chatViewMode: mode }),
+
       reasoningAccumulator: '',
+      appendReasoningContent: (chunk) =>
+        set((state) => ({ reasoningAccumulator: state.reasoningAccumulator + chunk })),
+      clearReasoning: () => set({ reasoningAccumulator: '' }),
       currentToolResults: [],
-      isStreaming: false
-    };
-  }),
-  setSafeModeRequest: (req) => set({ safeModeRequest: req }),
-  setAskUserRequest: (req) => set({ askUserRequest: req }),
+      addToolResult: (res) =>
+        set((state) => ({ currentToolResults: [...state.currentToolResults, res] })),
+      clearToolResults: () => set({ currentToolResults: [] }),
 
-  // Memories
-  memories: [],
-  setMemories: (memories) => set({ memories }),
-
-  // Active Tool Executions
-  activeToolExecutions: [],
-  addActiveToolExecution: (name, args) => set((state) => {
-    const id = `${name}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const newExec: ActiveToolExecution = {
-      id,
-      name,
-      args,
-      status: 'running',
-      progress: 15,
-    };
-    return { activeToolExecutions: [...state.activeToolExecutions, newExec] };
-  }),
-  updateActiveToolExecution: (name, args, status, output) => set((state) => {
-    const executions = [...state.activeToolExecutions];
-    let idx = -1;
-    if (args) {
-      idx = executions.findIndex(e => e.name === name && e.status === 'running' && e.args === args);
-    }
-    if (idx === -1) {
-      idx = executions.findIndex(e => e.name === name && e.status === 'running');
-    }
-    if (idx === -1) {
-      idx = executions.findIndex(e => e.name === name);
-    }
-
-    if (idx !== -1) {
-      executions[idx] = {
-        ...executions[idx],
-        status,
-        output,
-        progress: 100,
-      };
-    } else {
-      executions.push({
-        id: `${name}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        name,
-        args,
-        status,
-        output,
-        progress: 100,
-      });
-    }
-    return { activeToolExecutions: executions };
-  }),
-  clearActiveToolExecutions: () => set({ activeToolExecutions: [] }),
-
-  // Turn Review Request
-  turnReviewRequest: null,
-  setTurnReviewRequest: (req) => set({ turnReviewRequest: req }),
-
-  currentPath: '/',
-  fileItems: [],
-  setExplorer: (path, items) => set({ currentPath: path, fileItems: items }),
-
-  activeFile: null,
-  setActiveFile: (file) => set({ activeFile: file, isFileEditable: false }), // Reset editable state when changing files
-  updateActiveFileContent: (content) => set((state) => ({ activeFile: state.activeFile ? { ...state.activeFile, content } : null })),
-  isFileEditable: false,
-  setFileEditable: (val) => set({ isFileEditable: val }),
-
-  isEditorFocused: false,
-  setEditorFocused: (val) => set({ isEditorFocused: val }),
-
-  isTerminalOpen: false,
-  setTerminalOpen: (val) => set({ isTerminalOpen: val }),
-
-  backgroundIntensity: 'subtle',
-  setBackgroundIntensity: (intensity) => set({ backgroundIntensity: intensity }),
-
-  activeTab: 'files',
-  setActiveTab: (tab) => set({ activeTab: tab }),
-
-  chatViewMode: 'timeline',
-  setChatViewMode: (mode) => set({ chatViewMode: mode }),
-
-  reasoningAccumulator: '',
-  appendReasoningContent: (chunk) => set((state) => ({ reasoningAccumulator: state.reasoningAccumulator + chunk })),
-  clearReasoning: () => set({ reasoningAccumulator: '' }),
-  currentToolResults: [],
-  addToolResult: (res) => set((state) => ({ currentToolResults: [...state.currentToolResults, res] })),
-  clearToolResults: () => set({ currentToolResults: [] }),
-
-  searchResults: [],
-  isSearching: false,
-  setSearchResults: (results) => set({ searchResults: results }),
-  setSearching: (val) => set({ isSearching: val })
+      searchResults: [],
+      isSearching: false,
+      setSearchResults: (results) => set({ searchResults: results }),
+      setSearching: (val) => set({ isSearching: val }),
     }),
     {
       name: 'tempest-settings',
-      partialize: (state) => ({
-        isTerminalOpen: state.isTerminalOpen,
-        backgroundIntensity: state.backgroundIntensity
-      }) as any,
+      partialize: (state) =>
+        ({
+          isTerminalOpen: state.isTerminalOpen,
+          backgroundIntensity: state.backgroundIntensity,
+          sliderAggressiveCareful: state.sliderAggressiveCareful,
+          sliderCreativePrecise: state.sliderCreativePrecise,
+          sliderFastThorough: state.sliderFastThorough,
+          activeRole: state.activeRole,
+          contextLimit: state.contextLimit,
+          muteSounds: state.muteSounds,
+        }) as any,
     }
   )
 );

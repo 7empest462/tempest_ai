@@ -15,308 +15,326 @@ let activeProvider: TempestChatViewProvider | undefined;
 let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Tempest AI is now active!');
+  console.log('Tempest AI is now active!');
 
-    activeProvider = new TempestChatViewProvider(context.extensionUri);
-    
-    // Initialize Status Bar
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.command = 'tempest.focus';
-    statusBarItem.text = '$(tornado) Tempest: Ready';
-    statusBarItem.tooltip = 'Click to open Tempest Chat';
-    statusBarItem.show();
-    context.subscriptions.push(statusBarItem);
+  activeProvider = new TempestChatViewProvider(context.extensionUri);
 
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(TempestChatViewProvider.viewType, activeProvider)
-    );
+  // Initialize Status Bar
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem.command = 'tempest.focus';
+  statusBarItem.text = '$(tornado) Tempest: Ready';
+  statusBarItem.tooltip = 'Click to open Tempest Chat';
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
 
-    context.subscriptions.push(
-        vscode.commands.registerCommand('tempest.focus', () => {
-            vscode.commands.executeCommand('tempest.chatView.focus');
-        })
-    );
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(TempestChatViewProvider.viewType, activeProvider)
+  );
 
-    context.subscriptions.push(
-        vscode.commands.registerCommand('tempest.clearHistory', async () => {
-            const historyPath = path.join(os.homedir(), 'Library', 'Application Support', 'tempest_ai', 'history.json');
-            
-            // 1. Wipe in-memory logs and kill process
-            if (activeProvider) {
-                activeProvider.refresh(); 
-            }
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tempest.focus', () => {
+      vscode.commands.executeCommand('tempest.chatView.focus');
+    })
+  );
 
-            // 2. Delete the physical file
-            if (fs.existsSync(historyPath)) {
-                try {
-                    fs.unlinkSync(historyPath);
-                    vscode.window.showInformationMessage('Tempest AI: History wiped and backend reset.');
-                } catch (e) {
-                    vscode.window.showErrorMessage(`Failed to delete history file: ${e}`);
-                }
-            } else {
-                vscode.window.showInformationMessage('Tempest AI: Backend reset (no history file found).');
-            }
-        })
-    );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tempest.clearHistory', async () => {
+      const historyPath = path.join(
+        os.homedir(),
+        'Library',
+        'Application Support',
+        'tempest_ai',
+        'history.json'
+      );
+
+      // 1. Wipe in-memory logs and kill process
+      if (activeProvider) {
+        activeProvider.refresh();
+      }
+
+      // 2. Delete the physical file
+      if (fs.existsSync(historyPath)) {
+        try {
+          fs.unlinkSync(historyPath);
+          vscode.window.showInformationMessage('Tempest AI: History wiped and backend reset.');
+        } catch (e) {
+          vscode.window.showErrorMessage(`Failed to delete history file: ${e}`);
+        }
+      } else {
+        vscode.window.showInformationMessage('Tempest AI: Backend reset (no history file found).');
+      }
+    })
+  );
 }
 
 export function deactivate() {
-    if (activeProvider) {
-        activeProvider.dispose();
-    }
+  if (activeProvider) {
+    activeProvider.dispose();
+  }
 }
 
 class TempestChatViewProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'tempest.chatView';
-    private _view?: vscode.WebviewView;
-    private _tempestProcess?: ChildProcess;
+  public static readonly viewType = 'tempest.chatView';
+  private _view?: vscode.WebviewView;
+  private _tempestProcess?: ChildProcess;
 
-    constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
-    private _disposables: vscode.Disposable[] = [];
-    
-    public dispose() {
-        if (this._tempestProcess) {
-            console.log('[Host] Killing Tempest process...');
-            this._tempestProcess.kill();
-            this._tempestProcess = undefined;
-        }
-        this._disposables.forEach(d => d.dispose());
-        this._disposables = [];
-        this._logHistory = [];
-        this._isWebviewReady = false;
+  private _disposables: vscode.Disposable[] = [];
+
+  public dispose() {
+    if (this._tempestProcess) {
+      console.log('[Host] Killing Tempest process...');
+      this._tempestProcess.kill();
+      this._tempestProcess = undefined;
+    }
+    this._disposables.forEach((d) => d.dispose());
+    this._disposables = [];
+    this._logHistory = [];
+    this._isWebviewReady = false;
+  }
+
+  public refresh() {
+    this._logHistory = [];
+    if (this._tempestProcess) {
+      this._tempestProcess.kill();
+      this._tempestProcess = undefined;
+    }
+    if (this._view) {
+      this._view.webview.html = this._getHtmlForWebview(this._view.webview);
+    }
+  }
+
+  private _getEditorContext(): any {
+    const editor = vscode.window.activeTextEditor;
+
+    if (!editor) {
+      return {
+        file_path: 'unknown',
+        language: 'unknown',
+        content: '',
+        cursor_line: 0,
+      };
     }
 
-    public refresh() {
-        this._logHistory = [];
-        if (this._tempestProcess) {
-            this._tempestProcess.kill();
-            this._tempestProcess = undefined;
-        }
-        if (this._view) {
-            this._view.webview.html = this._getHtmlForWebview(this._view.webview);
-        }
+    const document = editor.document;
+    const selection = editor.selection;
+
+    return {
+      file_name: path.basename(document.fileName),
+      file_path: document.fileName,
+      language_id: document.languageId,
+      content: document.getText(),
+      selected_text: document.getText(selection),
+      cursor_line: selection.active.line + 1,
+      cursor_column: selection.active.character + 1,
+      visible_code: document.getText(), // Map to visible_code for backend compatibility
+    };
+  }
+
+  private _pendingRequests = new Map<string | number, string>();
+  private _isWebviewReady = false;
+  private _logHistory: string[] = []; // PERSISTENT history
+
+  public resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ) {
+    this._view = webviewView;
+    this._isWebviewReady = false; // Reset for new view
+
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this._extensionUri],
+    };
+
+    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+    // Start backend if not already running
+    if (!this._tempestProcess) {
+      this._startTempest();
     }
 
-    private _getEditorContext(): any {
-        const editor = vscode.window.activeTextEditor;
-        
-        if (!editor) {
-            return {
-                file_path: "unknown",
-                language: "unknown",
-                content: "",
-                cursor_line: 0
-            };
+    // Attach message listener
+    this._disposables.push(
+      webviewView.webview.onDidReceiveMessage(async (data) => {
+        if (data.type === 'webview-ready') {
+          console.log('[Host] Webview signaled READY');
+          this._isWebviewReady = true;
+          if (this._logHistory.length > 0) {
+            this._logHistory.forEach((log) => {
+              webviewView.webview.postMessage({ type: 'tempestThought', value: log });
+            });
+          }
+          return;
         }
 
-        const document = editor.document;
-        const selection = editor.selection;
+        if (data.type === 'tempest-request' && data.id) {
+          const params = data.payload?.params || {};
+          const method = data.payload?.method || 'tempest/chat';
 
-        return {
-            file_name: path.basename(document.fileName),
-            file_path: document.fileName,
-            language_id: document.languageId,
-            content: document.getText(),
-            selected_text: document.getText(selection),
-            cursor_line: selection.active.line + 1,
-            cursor_column: selection.active.character + 1,
-            visible_code: document.getText() // Map to visible_code for backend compatibility
-        };
-    }
+          // === AUTO CONTEXT LOGIC ===
+          if (params.auto_context === true || method === 'tempest/chat') {
+            params.editor_context = this._getEditorContext();
+            console.log('[Host] Injected editor context');
+          }
 
-    private _pendingRequests = new Map<string | number, string>();
-    private _isWebviewReady = false;
-    private _logHistory: string[] = []; // PERSISTENT history
+          const rpcObj = {
+            jsonrpc: '2.0',
+            id: data.id,
+            method: method,
+            params: params,
+          };
 
-    public resolveWebviewView(
-        webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken,
-    ) {
-        this._view = webviewView;
-        this._isWebviewReady = false; // Reset for new view
+          this._pendingRequests.set(data.id, method);
 
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri]
-        };
-
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
-        
-        // Start backend if not already running
-        if (!this._tempestProcess) {
-            this._startTempest();
+          if (this._tempestProcess?.stdin?.writable) {
+            this._tempestProcess.stdin.write(JSON.stringify(rpcObj) + '\n');
+          } else {
+            console.error('[Host] Tempest process stdin not writable');
+          }
         }
+      })
+    );
+  }
 
-        // Attach message listener
-        this._disposables.push(
-            webviewView.webview.onDidReceiveMessage(async (data) => {
-                if (data.type === 'webview-ready') {
-                    console.log('[Host] Webview signaled READY');
-                    this._isWebviewReady = true;
-                    if (this._logHistory.length > 0) {
-                        this._logHistory.forEach(log => {
-                            webviewView.webview.postMessage({ type: 'tempestThought', value: log });
-                        });
-                    }
-                    return;
-                }
+  private _startTempest() {
+    const config = vscode.workspace.getConfiguration('tempest');
+    const binaryPath =
+      config.get<string>('binaryPath') ||
+      '/Volumes/Corsair_Lab/Home/Projects/tempest_ai/target/release/tempest_ai';
+    const useMlx = config.get<boolean>('useMlx') !== false; // Default to true if not set
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || '/tmp';
 
-                if (data.type === 'tempest-request' && data.id) {
-                    let params = data.payload?.params || {};
-                    const method = data.payload?.method || 'tempest/chat';
+    console.log(`[Host] Spawning Tempest: ${binaryPath} (MLX: ${useMlx}) in ${cwd}`);
 
-                    // === AUTO CONTEXT LOGIC ===
-                    if (params.auto_context === true || method === 'tempest/chat') {
-                        params.editor_context = this._getEditorContext();
-                        console.log('[Host] Injected editor context');
-                    }
+    const args = ['--mcp-server'];
+    if (useMlx) args.push('--mlx');
 
-                    const rpcObj = {
-                        jsonrpc: "2.0",
-                        id: data.id,
-                        method: method,
-                        params: params
-                    };
+    this._tempestProcess = spawn(binaryPath, args, { cwd });
 
-                    this._pendingRequests.set(data.id, method);
+    this._tempestProcess.on('error', (err) => {
+      console.error('[Host] Failed to start Tempest process:', err);
+      if (this._view) {
+        this._view.webview.postMessage({
+          type: 'tempestThought',
+          value: `\n❌ ERROR: Failed to start backend: ${err.message}\n`,
+        });
+      }
+    });
 
-                    if (this._tempestProcess?.stdin?.writable) {
-                        this._tempestProcess.stdin.write(JSON.stringify(rpcObj) + "\n");
-                    } else {
-                        console.error('[Host] Tempest process stdin not writable');
-                    }
-                }
-            })
-        );
-    }
+    this._tempestProcess.on('exit', (code, signal) => {
+      console.log(`[Host] Tempest process exited with code ${code} and signal ${signal}`);
+      if (this._view) {
+        this._view.webview.postMessage({
+          type: 'tempestThought',
+          value: `\n⚠️ Backend exited (Code: ${code}, Signal: ${signal})\n`,
+        });
+      }
+    });
 
-    private _startTempest() {
-        const config = vscode.workspace.getConfiguration('tempest');
-        const binaryPath = config.get<string>('binaryPath') || '/Volumes/Corsair_Lab/Home/Projects/tempest_ai/target/release/tempest_ai';
-        const useMlx = config.get<boolean>('useMlx') !== false; // Default to true if not set
-        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || '/tmp';
+    // Combined listener for Zero-Latency and JSON-RPC
+    const rl = readline.createInterface({
+      input: this._tempestProcess.stdout!,
+      terminal: false,
+    });
 
-        console.log(`[Host] Spawning Tempest: ${binaryPath} (MLX: ${useMlx}) in ${cwd}`);
-        
-        const args = ['--mcp-server'];
-        if (useMlx) args.push('--mlx');
+    rl.on('line', (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
 
-        this._tempestProcess = spawn(binaryPath, args, { cwd });
+      // DIAGNOSTIC: Log every single line received to the Debug Console
+      console.log(`[Backend -> Host] ${trimmed}`);
 
-        this._tempestProcess.on('error', (err) => {
-            console.error('[Host] Failed to start Tempest process:', err);
-            if (this._view) {
-                this._view.webview.postMessage({ type: 'tempestThought', value: `\n❌ ERROR: Failed to start backend: ${err.message}\n` });
+      // Log everything to history regardless of type
+      this._logHistory.push(line + '\n');
+
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const json = JSON.parse(trimmed);
+          const method = json.method || (json.id ? this._pendingRequests.get(json.id) : undefined);
+          if (json.id) {
+            // For streaming, we keep the ID until the backend sends a final result.
+            // But since we switched to notifications for tokens, we can clear it after the ACK.
+            this._pendingRequests.delete(json.id);
+          }
+
+          if (this._view && this._isWebviewReady) {
+            this._view.webview.postMessage({
+              type: 'tempest-response',
+              id: json.id,
+              method: method,
+              payload: json,
+            });
+
+            // Special Case: Bridge notifications to the phase-tracking system
+            if (method === 'tempest/status') {
+              const statusText = json.params?.text || '';
+              let phase = 'READY';
+
+              if (statusText.toLowerCase().includes('thinking')) phase = 'THINKING';
+              if (statusText.toLowerCase().includes('analyzing')) phase = 'ANALYZING';
+              if (statusText.toLowerCase().includes('grounding')) phase = 'GROUNDING';
+              if (
+                statusText.toLowerCase().includes('metal') ||
+                statusText.toLowerCase().includes('warm')
+              )
+                phase = 'LOADING';
+              if (statusText.toLowerCase().includes('ready')) phase = 'READY';
+
+              this._view.webview.postMessage({
+                type: 'tempest-response',
+                payload: { phase: phase },
+              });
             }
-        });
+          }
 
-        this._tempestProcess.on('exit', (code, signal) => {
-            console.log(`[Host] Tempest process exited with code ${code} and signal ${signal}`);
-            if (this._view) {
-                this._view.webview.postMessage({ type: 'tempestThought', value: `\n⚠️ Backend exited (Code: ${code}, Signal: ${signal})\n` });
+          if (method === 'tempest/status') {
+            statusBarItem.text = `$(tornado) Tempest: ${json.params?.text || 'Ready'}`;
+          } else if (
+            method === 'tempest/thought' ||
+            json.result?.ChatResponse?.payload?.reasoning
+          ) {
+            statusBarItem.text = `$(sync~spin) Tempest: Thinking...`;
+          } else if (method === 'tempest/edit') {
+            const params = json.params || json.result?.payload || {};
+            if (params.path && params.content) {
+              this._applyEditorEdit(params.path, params.content);
             }
-        });
+          }
+        } catch {
+          // Not valid JSON, treat as raw log below
+        }
+      } else {
+        // Raw log
+        if (this._view && this._isWebviewReady) {
+          this._view.webview.postMessage({
+            type: 'tempestThought',
+            value: line + '\n',
+          });
+        }
+      }
+    });
 
-        // Combined listener for Zero-Latency and JSON-RPC
-        const rl = readline.createInterface({
-            input: this._tempestProcess.stdout!,
-            terminal: false
-        });
+    this._tempestProcess.stderr?.on('data', (data: Buffer) => {
+      console.error(`Tempest Error: ${data}`);
+    });
+  }
 
-        rl.on('line', (line: string) => {
-            const trimmed = line.trim();
-            if (!trimmed) return;
+  private async _applyEditorEdit(filePath: string, content: string) {
+    const uri = vscode.Uri.file(filePath);
+    const edit = new vscode.WorkspaceEdit();
 
-            // DIAGNOSTIC: Log every single line received to the Debug Console
-            console.log(`[Backend -> Host] ${trimmed}`);
+    // Replace entire content for now
+    const fullRange = new vscode.Range(new vscode.Position(0, 0), new vscode.Position(100000, 0));
 
-            // Log everything to history regardless of type
-            this._logHistory.push(line + '\n');
+    edit.replace(uri, fullRange, content);
+    await vscode.workspace.applyEdit(edit);
+  }
 
-            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-                try {
-                    const json = JSON.parse(trimmed);
-                    const method = json.method || (json.id ? this._pendingRequests.get(json.id) : undefined);
-                    if (json.id) {
-                        // For streaming, we keep the ID until the backend sends a final result.
-                        // But since we switched to notifications for tokens, we can clear it after the ACK.
-                        this._pendingRequests.delete(json.id);
-                    }
-
-                    if (this._view && this._isWebviewReady) {
-                        this._view.webview.postMessage({
-                            type: 'tempest-response',
-                            id: json.id,
-                            method: method,
-                            payload: json
-                        });
-
-                        // Special Case: Bridge notifications to the phase-tracking system
-                        if (method === 'tempest/status') {
-                            const statusText = json.params?.text || '';
-                            let phase = 'READY';
-                            
-                            if (statusText.toLowerCase().includes('thinking')) phase = 'THINKING';
-                            if (statusText.toLowerCase().includes('analyzing')) phase = 'ANALYZING';
-                            if (statusText.toLowerCase().includes('grounding')) phase = 'GROUNDING';
-                            if (statusText.toLowerCase().includes('metal') || statusText.toLowerCase().includes('warm')) phase = 'LOADING';
-                            if (statusText.toLowerCase().includes('ready')) phase = 'READY';
-
-                            this._view.webview.postMessage({
-                                type: 'tempest-response',
-                                payload: { phase: phase }
-                            });
-                        }
-                    }
-                    
-                    if (method === 'tempest/status') {
-                        statusBarItem.text = `$(tornado) Tempest: ${json.params?.text || 'Ready'}`;
-                    } else if (method === 'tempest/thought' || (json.result?.ChatResponse?.payload?.reasoning)) {
-                        statusBarItem.text = `$(sync~spin) Tempest: Thinking...`;
-                    } else if (method === 'tempest/edit') {
-                        const params = json.params || json.result?.payload || {};
-                        if (params.path && params.content) {
-                            this._applyEditorEdit(params.path, params.content);
-                        }
-                    }
-                } catch (e) {
-                    // Not valid JSON, treat as raw log below
-                }
-            } else {
-                // Raw log
-                if (this._view && this._isWebviewReady) {
-                    this._view.webview.postMessage({
-                        type: 'tempestThought',
-                        value: line + '\n'
-                    });
-                }
-            }
-        });
-
-        this._tempestProcess.stderr?.on('data', (data: Buffer) => {
-            console.error(`Tempest Error: ${data}`);
-        });
-    }
-
-    private async _applyEditorEdit(filePath: string, content: string) {
-        const uri = vscode.Uri.file(filePath);
-        const edit = new vscode.WorkspaceEdit();
-        
-        // Replace entire content for now
-        const fullRange = new vscode.Range(
-            new vscode.Position(0, 0),
-            new vscode.Position(100000, 0)
-        );
-        
-        edit.replace(uri, fullRange, content);
-        await vscode.workspace.applyEdit(edit);
-    }
-
-    private _getHtmlForWebview(webview: vscode.Webview): string {
-        return `<!DOCTYPE html>
+  private _getHtmlForWebview(webview: vscode.Webview): string {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -622,7 +640,7 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
                             // Heuristic: Extract model name from status text if present
                             const statusText = findV(raw, 'text') || '';
                             if (statusText.includes('[Using ') && statusText.includes(']')) {
-                                const match = statusText.match(/\[Using (.*?)\]/);
+                                const match = statusText.match(/\\\[Using (.*?)\\\]/);
                                 if (match && match[1]) {
                                     activeModel.value = match[1].split(':')[0].toUpperCase();
                                 }
@@ -677,5 +695,5 @@ class TempestChatViewProvider implements vscode.WebviewViewProvider {
     </script>
 </body>
 </html>`;
-    }
+  }
 }

@@ -66,9 +66,17 @@ impl AgentTool for RunCommandTool {
             cmd_str.clone()
         };
 
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(&final_cmd)
+        let mut child_cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&final_cmd);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&final_cmd);
+            c
+        };
+
+        let child = child_cmd
             .current_dir(shellexpand::tilde(&cwd).to_string())
             .env("TERM", "dumb")
             .env("DEBIAN_FRONTEND", "noninteractive")
